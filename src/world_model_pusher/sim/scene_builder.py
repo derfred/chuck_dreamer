@@ -38,63 +38,46 @@ _BASE_MJCF_TEMPLATE = """\
             pos="0 0 0.02" rgba="0.6 0.5 0.4 1"
             contype="1" conaffinity="1" friction="0.6 0.02 0.001"/>
     </body>
-    <!-- Robot arm base attached to negative-x edge of table -->
-    <body name="base_link" pos="-0.30 0 0.04">
-      <geom type="cylinder" size="0.03 0.02" rgba="0.3 0.3 0.3 1"
+    <!-- Pusher: heavy dynamic body welded tightly to the mocap.
+         The mocap body is pure kinematic (no collision).
+         The ee_link body is dynamic and carries the collision geom.
+         A very stiff weld makes ee_link track mocap_target exactly.
+         Mass=2kg ensures contact forces push objects rather than deflecting the pusher. -->
+    <body name="mocap_target" mocap="true" pos="0.0 0 0.075">
+      <geom type="sphere" size="0.008" rgba="1 0 0 0.6"
             contype="0" conaffinity="0"/>
-      <!-- Link 1: shoulder rotation around z -->
-      <body name="link1" pos="0 0 0.02">
-        <joint name="joint1" type="hinge" axis="0 0 1"
-               range="-1.57 1.57" damping="1.0"/>
-        <geom type="capsule" size="0.015 0.075" pos="0 0 0.075"
-              rgba="0.6 0.2 0.2 1" contype="0" conaffinity="0"/>
-        <!-- Link 2: elbow around y -->
-        <body name="link2" pos="0 0 0.15">
-          <joint name="joint2" type="hinge" axis="0 1 0"
-                 range="-1.57 1.57" damping="1.0"/>
-          <geom type="capsule" size="0.012 0.075" pos="0 0 0.075"
-                rgba="0.2 0.6 0.2 1" contype="0" conaffinity="0"/>
-          <!-- EE link: wrist around y -->
-          <body name="ee_link" pos="0 0 0.15">
-            <joint name="joint3" type="hinge" axis="0 1 0"
-                   range="-1.57 1.57" damping="1.0"/>
-            <geom type="box" size="0.02 0.02 0.01" pos="0 0 0.01"
-                  rgba="0.2 0.2 0.8 1" contype="1" conaffinity="1"/>
-            <site name="ee_site" pos="0 0 0.02" size="0.005"/>
-          </body>
-        </body>
-      </body>
     </body>
-    <!-- Mocap body for EE control -->
-    <body name="mocap_target" mocap="true" pos="-0.10 0 0.14">
-      <geom type="sphere" size="0.015" rgba="1 0 0 0.4"
-            contype="0" conaffinity="0"/>
+    <body name="ee_link" pos="0.0 0 0.075">
+      <joint name="joint1" type="free"/>
+      <geom type="cylinder" size="0.025 0.015" rgba="0.2 0.2 0.9 0.8"
+            contype="1" conaffinity="1" mass="2.0"/>
     </body>
   </worldbody>
   <equality>
-    <weld body1="ee_link" body2="mocap_target" solref="0.01 1" solimp="0.9 0.95 0.001"/>
+    <weld body1="ee_link" body2="mocap_target"
+          solref="0.002 1" solimp="0.99 0.999 0.0001"/>
   </equality>
 </mujoco>
 """
 
 
 def create_default_base_mjcf(path: str) -> None:
-  """Write the default base MJCF (table + 3-DOF stick arm + mocap EE + weld) to *path*."""
-  os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-  with open(path, "w", encoding="utf-8") as fh:
-    fh.write(_BASE_MJCF_TEMPLATE)
+    """Write the default base MJCF (table + 3-DOF stick arm + mocap EE + weld) to *path*."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(_BASE_MJCF_TEMPLATE)
 
 
 def create_so100_base_mjcf(path: str) -> None:
-  """Write a base MJCF that embeds the SO-100 arm on the table edge.
+    """Write a base MJCF that embeds the SO-100 arm on the table edge.
 
-  The SO-100 ``Base`` body is placed at the negative-x edge of the table
-  (x=-0.30) and rotated so the arm faces the table surface.  A mocap body
-  ``mocap_target`` is welded to the ``ee_frame`` body inside the hand so that
-  the existing mocap-based EE control still works unchanged.
-  """
-  meshdir = str(_ASSETS_DIR / "trs_so_arm100")
-  template = f"""\
+    The SO-100 ``Base`` body is placed at the negative-x edge of the table
+    (x=-0.30) and rotated so the arm faces the table surface.  A mocap body
+    ``mocap_target`` is welded to the ``ee_frame`` body inside the hand so that
+    the existing mocap-based EE control still works unchanged.
+    """
+    meshdir = str(_ASSETS_DIR / "trs_so_arm100")
+    template = f"""\
 <mujoco model="pushing_so100">
   <compiler angle="radian" meshdir="{meshdir}" inertiafromgeom="false"/>
   <option timestep="0.005" gravity="0 0 -9.81" iterations="50" solver="Newton"
@@ -245,7 +228,7 @@ def create_so100_base_mjcf(path: str) -> None:
       </body>
     </body>
     <!-- Mocap body welded to ee_frame for position-delta control -->
-    <body name="mocap_target" mocap="true" pos="-0.10 0 0.20">
+    <body name="mocap_target" mocap="true" pos="-0.10 0 0.08">
       <geom type="sphere" size="0.015" rgba="1 0 0 0.4"
             contype="0" conaffinity="0"/>
     </body>
@@ -266,9 +249,9 @@ def create_so100_base_mjcf(path: str) -> None:
   </contact>
 </mujoco>
 """
-  os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-  with open(path, "w", encoding="utf-8") as fh:
-    fh.write(template)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(template)
 
 
 # ---------------------------------------------------------------------------
@@ -276,101 +259,106 @@ def create_so100_base_mjcf(path: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _object_geom_element(cfg: ObjectConfig, name: str) -> etree._Element:
-  """Return an lxml ``<geom>`` element for the given object config."""
-  geom = etree.Element("geom")
-  geom.set("name", f"{name}_geom")
-  rgba = " ".join(f"{v:.3f}" for v in cfg.color)
-  geom.set("rgba", rgba)
-  geom.set("mass", str(cfg.mass))
-  geom.set("friction", f"{cfg.friction:.3f} 0.02 0.001")
+    """Return an lxml ``<geom>`` element for the given object config."""
+    geom = etree.Element("geom")
+    geom.set("name", f"{name}_geom")
+    rgba = " ".join(f"{v:.3f}" for v in cfg.color)
+    geom.set("rgba", rgba)
+    geom.set("mass", str(cfg.mass))
+    geom.set("friction", f"{cfg.friction:.3f} 0.02 0.001")
 
-  shape = cfg.shape
-  if shape == "box":
-    geom.set("type", "box")
-    s = cfg.size
-    geom.set("size", f"{s[0]:.4f} {s[1]:.4f} {s[2]:.4f}")
-  elif shape == "cylinder":
-    geom.set("type", "cylinder")
-    geom.set("size", f"{cfg.size[0]:.4f} {cfg.size[1]:.4f}")
-  elif shape == "sphere":
-    geom.set("type", "sphere")
-    geom.set("size", f"{cfg.size[0]:.4f}")
-  elif shape == "capsule":
-    geom.set("type", "capsule")
-    geom.set("size", f"{cfg.size[0]:.4f} {cfg.size[1]:.4f}")
-  else:
-    # Fallback: small box
-    geom.set("type", "box")
-    geom.set("size", "0.03 0.03 0.03")
+    shape = cfg.shape
+    if shape == "box":
+        geom.set("type", "box")
+        s = cfg.size
+        geom.set("size", f"{s[0]:.4f} {s[1]:.4f} {s[2]:.4f}")
+    elif shape == "cylinder":
+        geom.set("type", "cylinder")
+        geom.set("size", f"{cfg.size[0]:.4f} {cfg.size[1]:.4f}")
+    elif shape == "sphere":
+        geom.set("type", "sphere")
+        geom.set("size", f"{cfg.size[0]:.4f}")
+    elif shape == "capsule":
+        geom.set("type", "capsule")
+        geom.set("size", f"{cfg.size[0]:.4f} {cfg.size[1]:.4f}")
+    else:
+        # Fallback: small box
+        geom.set("type", "box")
+        geom.set("size", "0.03 0.03 0.03")
 
-  return geom
+    return geom
 
 
 def _make_object_body(
-  cfg: ObjectConfig,
-  name: str,
-  table_top_z: float,
-  colliding: bool,
+    cfg: ObjectConfig,
+    name: str,
+    table_top_z: float,
+    colliding: bool,
 ) -> etree._Element:
-  """Build a ``<body>`` element placed on the table surface."""
-  body = etree.Element("body")
-  body.set("name", name)
+    """Build a ``<body>`` element placed on the table surface."""
+    body = etree.Element("body")
+    body.set("name", name)
 
-  # Position: x,y from config, z = table surface + half-height of object
-  half_z = _half_z_for_object(cfg)
-  pos_z = table_top_z + half_z
-  yaw = cfg.orientation
-  # MuJoCo euler is intrinsic XYZ
-  body.set("pos", f"{cfg.pos[0]:.4f} {cfg.pos[1]:.4f} {pos_z:.4f}")
-  body.set("euler", f"0 0 {yaw:.4f}")
+    # Position: x,y from config, z = table surface + half-height of object
+    half_z = _half_z_for_object(cfg)
+    pos_z = table_top_z + half_z
+    yaw = cfg.orientation
+    # MuJoCo euler is intrinsic XYZ
+    body.set("pos", f"{cfg.pos[0]:.4f} {cfg.pos[1]:.4f} {pos_z:.4f}")
+    body.set("euler", f"0 0 {yaw:.4f}")
 
-  geom = _object_geom_element(cfg, name)
-  if not colliding:
-    geom.set("contype", "0")
-    geom.set("conaffinity", "0")
-  body.append(geom)
-  return body
+    # Free joint allows the body to move under contact forces
+    free_joint = etree.SubElement(body, "joint")
+    free_joint.set("type", "free")
+
+    geom = _object_geom_element(cfg, name)
+    if not colliding:
+        geom.set("contype", "0")
+        geom.set("conaffinity", "0")
+    body.append(geom)
+    return body
 
 
 def _half_z_for_object(cfg: ObjectConfig) -> float:
-  """Estimate half-height of the object for placement."""
-  shape = cfg.shape
-  s = cfg.size
-  if shape == "box":
-    return s[2] if len(s) > 2 else s[0]
-  elif shape == "cylinder":
-    return s[1] if len(s) > 1 else s[0]
-  elif shape == "sphere":
-    return s[0]
-  elif shape == "capsule":
-    return (s[1] + s[0]) if len(s) > 1 else s[0]
-  return 0.03
+    """Estimate half-height of the object for placement."""
+    shape = cfg.shape
+    s = cfg.size
+    if shape == "box":
+        return s[2] if len(s) > 2 else s[0]
+    elif shape == "cylinder":
+        return s[1] if len(s) > 1 else s[0]
+    elif shape == "sphere":
+        return s[0]
+    elif shape == "capsule":
+        return (s[1] + s[0]) if len(s) > 1 else s[0]
+    return 0.03
 
 
 # ---------------------------------------------------------------------------
 # Camera: convert look-at to MuJoCo quat
 # ---------------------------------------------------------------------------
 
-def _lookat_to_euler(pos: list[float], look_at: list[float]) -> tuple[str, str]:
-  """Return (pos_str, euler_str) for a camera pointing from pos toward look_at."""
-  px, py, pz = pos
-  lx, ly, lz = look_at
-  # Direction vector (forward = -z in MuJoCo camera frame)
-  fwd = np.array([lx - px, ly - py, lz - pz], dtype=float)
-  dist = np.linalg.norm(fwd)
-  if dist < 1e-6:
-    fwd = np.array([0.0, 0.0, -1.0])
-  else:
-    fwd /= dist
+def _lookat_to_euler(
+        pos: list[float], look_at: list[float]) -> tuple[str, str]:
+    """Return (pos_str, euler_str) for a camera pointing from pos toward look_at."""
+    px, py, pz = pos
+    lx, ly, lz = look_at
+    # Direction vector (forward = -z in MuJoCo camera frame)
+    fwd = np.array([lx - px, ly - py, lz - pz], dtype=float)
+    dist = np.linalg.norm(fwd)
+    if dist < 1e-6:
+        fwd = np.array([0.0, 0.0, -1.0])
+    else:
+        fwd /= dist
 
-  # Pitch (rotation around x)
-  pitch = math.atan2(-fwd[2], math.hypot(fwd[0], fwd[1]))
-  # Yaw (rotation around z)
-  yaw = math.atan2(fwd[1], fwd[0]) + math.pi / 2
+    # Pitch (rotation around x)
+    pitch = math.atan2(-fwd[2], math.hypot(fwd[0], fwd[1]))
+    # Yaw (rotation around z)
+    yaw = math.atan2(fwd[1], fwd[0]) + math.pi / 2
 
-  pos_str = f"{px:.4f} {py:.4f} {pz:.4f}"
-  euler_str = f"{pitch:.4f} 0 {yaw:.4f}"
-  return pos_str, euler_str
+    pos_str = f"{px:.4f} {py:.4f} {pz:.4f}"
+    euler_str = f"{pitch:.4f} 0 {yaw:.4f}"
+    return pos_str, euler_str
 
 
 # ---------------------------------------------------------------------------
@@ -378,126 +366,131 @@ def _lookat_to_euler(pos: list[float], look_at: list[float]) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 class SceneBuilder:
-  """Injects objects, camera, and lighting into a base MJCF and compiles it.
-
-  Parameters
-  ----------
-  base_mjcf_path:
-      Path to a pre-written base MJCF file.  When *None* the builder writes a
-      fresh temporary file based on ``config.robot_type`` at build time.
-  """
-
-  def __init__(self, base_mjcf_path: str | None = None) -> None:
-    self.base_mjcf_path = base_mjcf_path
-
-  # ------------------------------------------------------------------
-  # Internal: select / create the correct base MJCF for a config
-  # ------------------------------------------------------------------
-
-  def _get_base_path(self, config: SceneConfig) -> str:
-    if self.base_mjcf_path is not None:
-      return self.base_mjcf_path
-    import tempfile
-    tmp = tempfile.NamedTemporaryFile(suffix=".xml", delete=False)
-    tmp.close()
-    if config.robot_type == "so100":
-      create_so100_base_mjcf(tmp.name)
-    else:
-      create_default_base_mjcf(tmp.name)
-    return tmp.name
-
-  def build(
-    self,
-    config: SceneConfig,
-    render_size: tuple[int, int] | None = None,
-  ) -> mujoco.MjModel:
-    """Parse base MJCF, inject scene elements, compile and return MjModel.
+    """Injects objects, camera, and lighting into a base MJCF and compiles it.
 
     Parameters
     ----------
-    render_size:
-        (height, width) of the offscreen framebuffer.  When provided, a
-        ``<visual><global offheight=... offwidth=.../></visual>`` element is
-        injected so MuJoCo allocates a large enough framebuffer.
+    base_mjcf_path:
+        Path to a pre-written base MJCF file.  When *None* the builder writes a
+        fresh temporary file based on ``config.robot_type`` at build time.
     """
-    base_path = self._get_base_path(config)
-    parser = etree.XMLParser(remove_blank_text=True)
-    tree = etree.parse(base_path, parser)
-    root = tree.getroot()
 
-    # 0. Set offscreen framebuffer size if requested
-    if render_size is not None:
-      h, w = render_size
-      visual = root.find("visual")
-      if visual is None:
-        visual = etree.SubElement(root, "visual")
-      global_elem = visual.find("global")
-      if global_elem is None:
-        global_elem = etree.SubElement(visual, "global")
-      global_elem.set("offheight", str(h))
-      global_elem.set("offwidth", str(w))
+    def __init__(self, base_mjcf_path: str | None = None) -> None:
+        self.base_mjcf_path = base_mjcf_path
 
-    worldbody = root.find("worldbody")
-    if worldbody is None:
-      raise ValueError("Base MJCF has no <worldbody> element")
+    # ------------------------------------------------------------------
+    # Internal: select / create the correct base MJCF for a config
+    # ------------------------------------------------------------------
 
-    # Table top z = pos_z + half_z = 0.02 + 0.02 = 0.04
-    table_top_z = 0.04
+    def _get_base_path(self, config: SceneConfig) -> str:
+        if self.base_mjcf_path is not None:
+            return self.base_mjcf_path
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".xml", delete=False)
+        tmp.close()
+        if config.robot_type == "so100":
+            create_so100_base_mjcf(tmp.name)
+        else:
+            create_default_base_mjcf(tmp.name)
+        return tmp.name
 
-    # 1. Update table color and friction
-    table_geom = worldbody.find(".//geom[@name='table_top']")
-    if table_geom is not None:
-      rgba = " ".join(f"{v:.3f}" for v in config.table_color)
-      table_geom.set("rgba", rgba)
-      hz = config.table_size[2]
-      hx, hy = config.table_size[0], config.table_size[1]
-      table_geom.set("size", f"{hx:.3f} {hy:.3f} {hz:.3f}")
-      table_geom.set("friction", f"{config.table_friction:.3f} 0.02 0.001")
+    def build(
+        self,
+        config: SceneConfig,
+        render_size: tuple[int, int] | None = None,
+    ) -> mujoco.MjModel:
+        """Parse base MJCF, inject scene elements, compile and return MjModel.
 
-    # 2. Inject target body
-    target_body = _make_object_body(
-      config.target, "target_object", table_top_z, colliding=True
-    )
-    worldbody.append(target_body)
+        Parameters
+        ----------
+        render_size:
+            (height, width) of the offscreen framebuffer.  When provided, a
+            ``<visual><global offheight=... offwidth=.../></visual>`` element is
+            injected so MuJoCo allocates a large enough framebuffer.
+        """
+        base_path = self._get_base_path(config)
+        parser = etree.XMLParser(remove_blank_text=True)
+        tree = etree.parse(base_path, parser)
+        root = tree.getroot()
 
-    # 3. Inject obstacle bodies (colliding)
-    for i, obs_cfg in enumerate(config.obstacles):
-      obs_body = _make_object_body(obs_cfg, f"obstacle_{i}", table_top_z, colliding=True)
-      worldbody.append(obs_body)
+        # 0. Set offscreen framebuffer size if requested
+        if render_size is not None:
+            h, w = render_size
+            visual = root.find("visual")
+            if visual is None:
+                visual = etree.SubElement(root, "visual")
+            global_elem = visual.find("global")
+            if global_elem is None:
+                global_elem = etree.SubElement(visual, "global")
+            global_elem.set("offheight", str(h))
+            global_elem.set("offwidth", str(w))
 
-    # 4. Inject clutter bodies (visual only)
-    for i, cl_cfg in enumerate(config.clutter):
-      cl_body = _make_object_body(cl_cfg, f"clutter_{i}", table_top_z, colliding=False)
-      worldbody.append(cl_body)
+        worldbody = root.find("worldbody")
+        if worldbody is None:
+            raise ValueError("Base MJCF has no <worldbody> element")
 
-    # 5. Set camera
-    cam_elem = root.find(".//camera[@name='main_camera']")
-    if cam_elem is None:
-      cam_elem = etree.SubElement(worldbody, "camera")
-      cam_elem.set("name", "main_camera")
-    pos_str, euler_str = _lookat_to_euler(config.camera.pos, config.camera.look_at)
-    cam_elem.set("pos", pos_str)
-    cam_elem.set("euler", euler_str)
-    cam_elem.set("fovy", f"{config.camera.fov:.1f}")
+        # Table top z = pos_z + half_z = 0.02 + 0.02 = 0.04
+        table_top_z = 0.04
 
-    # 6. Set lighting via <light> element
-    # Remove existing non-headlight lights
-    for lt in root.findall(".//light"):
-      if lt.get("name", "") == "scene_light":
-        lt.getparent().remove(lt)  # type: ignore[union-attr]
+        # 1. Update table color and friction
+        table_geom = worldbody.find(".//geom[@name='table_top']")
+        if table_geom is not None:
+            rgba = " ".join(f"{v:.3f}" for v in config.table_color)
+            table_geom.set("rgba", rgba)
+            hz = config.table_size[2]
+            hx, hy = config.table_size[0], config.table_size[1]
+            table_geom.set("size", f"{hx:.3f} {hy:.3f} {hz:.3f}")
+            table_geom.set(
+                "friction", f"{
+                    config.table_friction:.3f} 0.02 0.001")
 
-    light = etree.SubElement(worldbody, "light")
-    light.set("name", "scene_light")
-    d = config.lighting.direction
-    light.set("dir", f"{d[0]:.3f} {d[1]:.3f} {d[2]:.3f}")
-    iv = config.lighting.intensity
-    light.set("diffuse", f"{iv:.3f} {iv:.3f} {iv:.3f}")
-    av = config.lighting.ambient
-    light.set("ambient", f"{av:.3f} {av:.3f} {av:.3f}")
-    light.set("directional", "true")
-    light.set("castshadow", "false")
+        # 2. Inject target body
+        target_body = _make_object_body(
+            config.target, "target_object", table_top_z, colliding=True
+        )
+        worldbody.append(target_body)
 
-    # 7. Compile
-    xml_str = etree.tostring(root, pretty_print=True, encoding="unicode")
-    model = mujoco.MjModel.from_xml_string(xml_str)
-    return model
+        # 3. Inject obstacle bodies (colliding)
+        for i, obs_cfg in enumerate(config.obstacles):
+            obs_body = _make_object_body(
+                obs_cfg, f"obstacle_{i}", table_top_z, colliding=True)
+            worldbody.append(obs_body)
+
+        # 4. Inject clutter bodies (visual only)
+        for i, cl_cfg in enumerate(config.clutter):
+            cl_body = _make_object_body(
+                cl_cfg, f"clutter_{i}", table_top_z, colliding=False)
+            worldbody.append(cl_body)
+
+        # 5. Set camera
+        cam_elem = root.find(".//camera[@name='main_camera']")
+        if cam_elem is None:
+            cam_elem = etree.SubElement(worldbody, "camera")
+            cam_elem.set("name", "main_camera")
+        pos_str, euler_str = _lookat_to_euler(
+            config.camera.pos, config.camera.look_at)
+        cam_elem.set("pos", pos_str)
+        cam_elem.set("euler", euler_str)
+        cam_elem.set("fovy", f"{config.camera.fov:.1f}")
+
+        # 6. Set lighting via <light> element
+        # Remove existing non-headlight lights
+        for lt in root.findall(".//light"):
+            if lt.get("name", "") == "scene_light":
+                lt.getparent().remove(lt)  # type: ignore[union-attr]
+
+        light = etree.SubElement(worldbody, "light")
+        light.set("name", "scene_light")
+        d = config.lighting.direction
+        light.set("dir", f"{d[0]:.3f} {d[1]:.3f} {d[2]:.3f}")
+        iv = config.lighting.intensity
+        light.set("diffuse", f"{iv:.3f} {iv:.3f} {iv:.3f}")
+        av = config.lighting.ambient
+        light.set("ambient", f"{av:.3f} {av:.3f} {av:.3f}")
+        light.set("directional", "true")
+        light.set("castshadow", "false")
+
+        # 7. Compile
+        xml_str = etree.tostring(root, pretty_print=True, encoding="unicode")
+        model = mujoco.MjModel.from_xml_string(xml_str)
+        return model

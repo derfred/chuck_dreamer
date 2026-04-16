@@ -88,3 +88,8 @@ extend-ignore = ["E203", "W503"]
 python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
+
+[dependency-groups]
+dev = [
+    "autopep8>=2.3.2",
+]

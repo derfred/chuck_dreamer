@@ -2,64 +2,65 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
 class ObjectConfig:
-  shape: str                     # "box", "cylinder", "sphere", "capsule", "mesh"
-  size: list[float]              # shape-dependent dimensions
-  mass: float                    # kg
-  friction: float                # sliding friction coefficient
-  pos: list[float]               # [x, y] on table surface
-  orientation: float             # yaw angle in radians
-  color: list[float]             # RGBA
-  mesh_path: str | None = None   # for shape="mesh"
+    shape: str                     # "box", "cylinder", "sphere", "capsule", "mesh"
+    size: list[float]              # shape-dependent dimensions
+    mass: float                    # kg
+    friction: float                # sliding friction coefficient
+    pos: list[float]               # [x, y] on table surface
+    orientation: float             # yaw angle in radians
+    color: list[float]             # RGBA
+    mesh_path: str | None = None   # for shape="mesh"
 
 
 @dataclass
 class CameraConfig:
-  pos: list[float]               # [x, y, z]
-  look_at: list[float]           # [x, y, z]
-  fov: float                     # degrees
+    pos: list[float]               # [x, y, z]
+    look_at: list[float]           # [x, y, z]
+    fov: float                     # degrees
 
 
 @dataclass
 class LightingConfig:
-  direction: list[float]         # [x, y, z]
-  intensity: float               # 0.0–1.0
-  ambient: float                 # ambient light level
+    direction: list[float]         # [x, y, z]
+    intensity: float               # 0.0–1.0
+    ambient: float                 # ambient light level
 
 
 @dataclass
 class SceneConfig:
-  # Table
-  table_size: list[float]        # [half_x, half_y, half_z]
-  table_friction: float
-  table_color: list[float]       # RGBA
+    # Table
+    table_size: list[float]        # [half_x, half_y, half_z]
+    table_friction: float
+    table_color: list[float]       # RGBA
 
-  # Robot
-  robot_type: str                # "stick" | "so100"
-  robot_base_pos: list[float]    # [x, y, z] relative to table
-  robot_initial_qpos: list[float] | None  # if None, use default home position
+    # Robot
+    robot_type: str                # "stick" | "so100"
+    robot_base_pos: list[float]    # [x, y, z] relative to table
+    # if None, use default home position
+    robot_initial_qpos: list[float] | None
 
-  # Target object (the one to push)
-  target: ObjectConfig
+    # Target object (the one to push)
+    target: ObjectConfig
 
-  # Goal
-  goal_pos: list[float]          # [x, y] on table surface
-  goal_tolerance: float          # distance threshold for "done"
+    # Goal
+    goal_pos: list[float]          # [x, y] on table surface
+    goal_tolerance: float          # distance threshold for "done"
 
-  # Obstacles (objects that block the path but aren't pushed)
-  obstacles: list[ObjectConfig]
+    # Obstacles (objects that block the path but aren't pushed)
+    obstacles: list[ObjectConfig]
 
-  # Clutter (visual-only objects for domain randomization)
-  clutter: list[ObjectConfig]
+    # Clutter (visual-only objects for domain randomization)
+    clutter: list[ObjectConfig]
 
-  # Camera and lighting
-  camera: CameraConfig
-  lighting: LightingConfig
+    # Camera and lighting
+    camera: CameraConfig
+    lighting: LightingConfig
 
-  # Episode parameters
-  max_steps: int
-  control_dt: float              # seconds per action step
+    # Episode parameters
+    max_steps: int
+    control_dt: float              # seconds per action step
