@@ -50,7 +50,8 @@ def _make_simple_config() -> SceneConfig:
         obstacles=[],
         clutter=[],
         camera=CameraConfig(pos=[0.0, -0.40, 0.55], look_at=[0.0, 0.0, 0.04], fov=60.0),
-        lighting=LightingConfig(direction=[0.0, -0.5, -1.0], intensity=0.8, ambient=0.3),
+        lighting=LightingConfig(
+            direction=[0.0, -0.5, -1.0], intensity=0.8, ambient=0.3),
         max_steps=50,
         control_dt=0.1,
     )

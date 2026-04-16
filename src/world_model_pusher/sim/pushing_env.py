@@ -46,9 +46,12 @@ class PushingEnv(gym.Env):
 
         H, W = render_size
         self.observation_space = spaces.Dict({
-            "image": spaces.Box(low=0, high=255, shape=(H, W, 3), dtype=np.uint8),
-            "ee_pos": spaces.Box(low=-2.0, high=2.0, shape=(3,), dtype=np.float32),
-            "object_pos": spaces.Box(low=-2.0, high=2.0, shape=(2,), dtype=np.float32),
+            "image": spaces.Box(
+                low=0, high=255, shape=(H, W, 3), dtype=np.uint8),
+            "ee_pos": spaces.Box(
+                low=-2.0, high=2.0, shape=(3,), dtype=np.float32),
+            "object_pos": spaces.Box(
+                low=-2.0, high=2.0, shape=(2,), dtype=np.float32),
         })
         self.action_space = spaces.Box(
             low=np.array([-0.02, -0.02, -0.01], dtype=np.float32),
@@ -85,8 +88,11 @@ class PushingEnv(gym.Env):
     def step(
         self, action: np.ndarray
     ) -> tuple[Observation, float, bool, bool, dict[str, Any]]:
-        assert self.model is not None and self.data is not None and self.config is not None, (
-            "Call reset() before step().")
+        assert (
+            self.model is not None
+            and self.data is not None
+            and self.config is not None
+        ), "Call reset() before step()."
         # Clip action
         action = np.clip(
             action.astype(np.float64),

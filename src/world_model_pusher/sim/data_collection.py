@@ -55,7 +55,8 @@ class EpisodeWriter:
         Parameters
         ----------
         episode:
-            List of dicts with keys ``pre_image`` (H,W,3 uint8), ``post_image`` (H,W,3 uint8), ``action`` (3,),
+            List of dicts with keys ``pre_image`` (H,W,3 uint8),
+            ``post_image`` (H,W,3 uint8), ``action`` (3,),
             ``reward`` (float).
         metadata:
             Optional dict. May include ``config`` (SceneConfig or dict),
@@ -98,8 +99,9 @@ class EpisodeWriter:
                 if cfg is not None:
                     if not isinstance(cfg, (str, bytes)):
                         cfg = json.dumps(
-                            cfg if isinstance(
-                                cfg, dict) else asdict(cfg))  # type: ignore[arg-type]
+                            cfg if isinstance(cfg, dict)
+                            else asdict(cfg)  # type: ignore[arg-type]
+                        )
                     meta_grp.create_dataset("config", data=cfg)
                 seed = metadata.get("seed", -1)
                 meta_grp.create_dataset("seed", data=int(seed))

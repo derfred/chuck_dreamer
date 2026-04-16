@@ -267,8 +267,10 @@ class SceneGenerator:
         gx, gy = cfg.goal_pos
         hx, hy = cfg.table_size[:2]
         margin = 0.03
-        return (-hx + margin) <= gx <= (hx -
-                                        margin) and (-hy + margin) <= gy <= (hy - margin)
+        return (
+            (-hx + margin) <= gx <= (hx - margin)
+            and (-hy + margin) <= gy <= (hy - margin)
+        )
 
     def _check_no_overlaps(self, cfg: SceneConfig) -> bool:
         """No obstacle should overlap with the target or the goal position."""

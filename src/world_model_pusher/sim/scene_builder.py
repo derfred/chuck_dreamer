@@ -340,7 +340,8 @@ def _half_z_for_object(cfg: ObjectConfig) -> float:
 
 def _lookat_to_euler(
         pos: list[float], look_at: list[float]) -> tuple[str, str]:
-    """Return (pos_str, euler_str) for a camera pointing from pos toward look_at."""
+    """Return (pos_str, euler_str) for a camera pointing from pos
+    toward look_at."""
     px, py, pz = pos
     lx, ly, lz = look_at
     # Direction vector (forward = -z in MuJoCo camera frame)
@@ -405,7 +406,8 @@ class SceneBuilder:
         ----------
         render_size:
             (height, width) of the offscreen framebuffer.  When provided, a
-            ``<visual><global offheight=... offwidth=.../></visual>`` element is
+            ``<visual><global offheight=... offwidth=.../></visual>``
+            element is
             injected so MuJoCo allocates a large enough framebuffer.
         """
         base_path = self._get_base_path(config)
