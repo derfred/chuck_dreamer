@@ -275,7 +275,8 @@ class TestEpisodeWriter:
     rng = np.random.default_rng(42)
     return [
       {
-        "image": rng.integers(0, 256, (H, W, 3), dtype=np.uint8),
+        "pre_image": rng.integers(0, 256, (H, W, 3), dtype=np.uint8),
+        "post_image": rng.integers(0, 256, (H, W, 3), dtype=np.uint8),
         "action": rng.uniform(-0.02, 0.02, (3,)).astype(np.float32),
         "reward": float(rng.uniform(-1.0, 0.0)),
       }
@@ -290,8 +291,9 @@ class TestEpisodeWriter:
 
     assert path.exists()
     with h5py.File(path, "r") as f:
-      assert f["images"].shape == (5, 64, 64, 3)
-      assert f["images"].dtype == np.uint8
+      assert f["pre_images"].shape == (5, 64, 64, 3)
+      assert f["pre_images"].dtype == np.uint8
+      assert f["post_images"].shape == (5, 64, 64, 3)
       assert f["actions"].shape == (5, 3)
       assert f["rewards"].shape == (5,)
       assert "metadata" in f
