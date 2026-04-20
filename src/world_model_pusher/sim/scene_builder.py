@@ -12,9 +12,9 @@ from lxml import etree  # type: ignore[import-untyped]
 from .scene_config import ObjectConfig, SceneConfig
 
 _ASSETS_DIR = Path(__file__).parent.parent.parent.parent / "assets" / "mujoco"
-_TABLE_SCENE_XML = _ASSETS_DIR / "table_scene.xml"
+_BASE_SCENE_XML = _ASSETS_DIR / "base_scene.xml"
 _SIMPLE_ARM_XML = _ASSETS_DIR / "simple_arm.xml"
-_SO101_SCENE_XML = _ASSETS_DIR / "so101_scene.xml"
+_SO101_ARM_XML = _ASSETS_DIR / "so101_arm.xml"
 _SO101_MESHDIR = _ASSETS_DIR / "trs_so_arm100"
 
 
@@ -128,29 +128,74 @@ def _lookat_to_euler(
 # Base MJCF assembly
 # ---------------------------------------------------------------------------
 
+def _inject_arm_fragment(root: etree._Element, arm_root: etree._Element) -> None:
+    """Merge all sections from an arm fragment XML into the base scene root."""
+    # compiler: copy extra attributes (e.g. cone, impratio, inertiafromgeom)
+    arm_compiler = arm_root.find("compiler")
+    if arm_compiler is not None:
+        base_compiler = root.find("compiler")
+        if base_compiler is None:
+            base_compiler = etree.SubElement(root, "compiler")
+        for k, v in arm_compiler.attrib.items():
+            base_compiler.set(k, v)
+
+    # default: append arm <default> children into base <default>
+    arm_default = arm_root.find("default")
+    if arm_default is not None:
+        base_default = root.find("default")
+        if base_default is None:
+            base_default = etree.SubElement(root, "default")
+        for child in arm_default:
+            base_default.append(child)
+
+    # asset: append all children into base <asset> (create if missing)
+    arm_asset = arm_root.find("asset")
+    if arm_asset is not None:
+        base_asset = root.find("asset")
+        if base_asset is None:
+            base_asset = etree.SubElement(root, "asset")
+        for child in arm_asset:
+            base_asset.append(child)
+
+    # worldbody: append arm worldbody children into base worldbody
+    arm_worldbody = arm_root.find("worldbody")
+    if arm_worldbody is not None:
+        base_worldbody = root.find("worldbody")
+        for child in arm_worldbody:
+            base_worldbody.append(child)
+
+    # option: merge extra attributes (e.g. cone, impratio)
+    arm_option = arm_root.find("option")
+    if arm_option is not None:
+        base_option = root.find("option")
+        if base_option is None:
+            base_option = etree.SubElement(root, "option")
+        for k, v in arm_option.attrib.items():
+            base_option.set(k, v)
+
+    # top-level sections: actuator, equality, contact
+    for tag in ("actuator", "equality", "contact"):
+        arm_elem = arm_root.find(tag)
+        if arm_elem is not None:
+            root.append(arm_elem)
+
+
 def _load_base_xml(config: SceneConfig) -> etree._Element:
-    """Load and return the root element of the appropriate base MJCF."""
+    """Load base scene XML and inject the appropriate arm fragment."""
     parser = etree.XMLParser(remove_blank_text=True)
+    root = etree.parse(str(_BASE_SCENE_XML), parser).getroot()
+
     if config.robot_type == "so100":
-        root = etree.parse(str(_SO101_SCENE_XML), parser).getroot()
+        arm_root = etree.parse(str(_SO101_ARM_XML), parser).getroot()
+        _inject_arm_fragment(root, arm_root)
         compiler = root.find("compiler")
         if compiler is not None:
             compiler.set("meshdir", str(_SO101_MESHDIR))
-        return root
+    else:
+        arm_root = etree.parse(str(_SIMPLE_ARM_XML), parser).getroot()
+        _inject_arm_fragment(root, arm_root)
 
-    # Simple arm: merge table_scene.xml and simple_arm.xml
-    table_root = etree.parse(str(_TABLE_SCENE_XML), parser).getroot()
-    arm_root = etree.parse(str(_SIMPLE_ARM_XML), parser).getroot()
-
-    worldbody = table_root.find("worldbody")
-    for child in arm_root.find("worldbody"):
-        worldbody.append(child)
-
-    equality = arm_root.find("equality")
-    if equality is not None:
-        table_root.append(equality)
-
-    return table_root
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -183,9 +228,8 @@ class SceneBuilder:
         if worldbody is None:
             raise ValueError("Base MJCF has no <worldbody> element")
 
-        table_top_z = 0.04
-
         table_geom = worldbody.find(".//geom[@name='table_top']")
+        table_top_z = 0.04  # fallback: matches base_scene.xml default
         if table_geom is not None:
             rgba = " ".join(f"{v:.3f}" for v in config.table_color)
             table_geom.set("rgba", rgba)
@@ -193,6 +237,9 @@ class SceneBuilder:
             hx, hy = config.table_size[0], config.table_size[1]
             table_geom.set("size", f"{hx:.3f} {hy:.3f} {hz:.3f}")
             table_geom.set("friction", f"{config.table_friction:.3f} 0.02 0.001")
+            # Recompute table top z from the geom's centre position + half-height
+            geom_pos_z = float(table_geom.get("pos", "0 0 0").split()[2])
+            table_top_z = geom_pos_z + hz
 
         target_body = _make_object_body(
             config.target, "target_object", table_top_z, colliding=True

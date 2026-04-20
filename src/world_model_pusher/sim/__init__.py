@@ -1,12 +1,8 @@
 """MuJoCo pushing simulation package."""
 
-from .data_collection import EpisodeWriter, random_push_policy
+from .data_collection import EpisodeWriter, RandomPushPolicy
 from .pushing_env import PushingEnv
-from .scene_builder import (
-    SceneBuilder,
-    create_default_base_mjcf,
-    create_so100_base_mjcf,
-)
+from .scene_builder import SceneBuilder
 from .scene_config import (
     CameraConfig,
     LightingConfig,
@@ -24,7 +20,5 @@ __all__ = [
     "SceneBuilder",
     "SceneConfig",
     "SceneGenerator",
-    "create_default_base_mjcf",
-    "create_so100_base_mjcf",
-    "random_push_policy",
+    "RandomPushPolicy",
 ]

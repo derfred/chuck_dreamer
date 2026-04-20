@@ -12,12 +12,76 @@ from gymnasium import spaces
 from .scene_builder import SceneBuilder
 from .scene_config import SceneConfig
 
-# Action clip limits: [dx_lo, dx_hi, dy_lo, dy_hi, dz_lo, dz_hi]
-_ACTION_CLIP = np.array(
-    [-0.02, 0.02, -0.02, 0.02, -0.01, 0.01], dtype=np.float32)
-
 Observation = dict[str, np.ndarray]
 
+class Controller:
+  def reset(self, model, config: SceneConfig) -> None:
+    self.model   = model
+    self.config  = config
+    self.ik_data = mujoco.MjData(model)
+
+    self.ee_sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "ee_site")
+
+    joint_ids = [
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n) for n in config.joint_names
+    ]
+    self.arm_qpos_adr = np.array([model.jnt_qposadr[jid] for jid in joint_ids])
+    self.arm_dof_idx  = np.array([model.jnt_dofadr[jid]  for jid in joint_ids])
+
+    self.arm_ctrl_idx = np.array([
+      mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, n)
+      for n in config.actuator_names
+    ])
+    self.arm_ctrl_range = model.actuator_ctrlrange[self.arm_ctrl_idx].copy()  # (n_joints, 2)
+
+  def get_ee_pos(self, data) -> np.ndarray:
+    return data.site_xpos[self.ee_sid].copy().astype(np.float32)
+
+  def get_arm_qpos(self, data) -> np.ndarray:
+    return data.qpos[self.arm_qpos_adr].copy().astype(np.float32)
+
+  def reset_initial_qpos(self, data, qpos) -> None:
+    """Set arm joint positions and matching control setpoints so the
+    position actuators hold the initial pose instead of driving back to zero."""
+    qpos = np.asarray(qpos, dtype=np.float64)
+    data.qpos[self.arm_qpos_adr] = qpos
+    data.qvel[self.arm_dof_idx]  = 0.0
+    data.ctrl[self.arm_ctrl_idx] = qpos
+    mujoco.mj_forward(self.model, data)
+
+  def ik_for_ee_pos(self, target_xyz, qpos) -> np.ndarray:
+    d = self.ik_data
+    d.qpos[:] = qpos
+    q = qpos[self.arm_qpos_adr].copy()
+
+    lam_sq    = 0.05 ** 2
+    _jac_pos  = np.zeros((3, self.model.nv))
+    _eye3     = np.eye(3)
+    converged = False
+    for _ in range(20):
+      mujoco.mj_forward(self.model, d)
+      err = target_xyz - d.site_xpos[self.ee_sid]
+      if np.linalg.norm(err) < 1e-3:
+        converged = True
+        break
+      mujoco.mj_jacSite(self.model, d, _jac_pos, None, self.ee_sid)
+      J = _jac_pos[:, self.arm_dof_idx]
+      dq = J.T @ np.linalg.solve(J @ J.T + lam_sq * _eye3, err)
+      q = q + dq
+      d.qpos[self.arm_qpos_adr] = q
+
+    if not converged:
+      raise RuntimeError(f"IK did not converge: {err}")
+
+    return q
+
+  def update_arm(self, data, action):
+    ctrl = np.clip(
+        action,
+        self.arm_ctrl_range[:, 0],
+        self.arm_ctrl_range[:, 1],
+    )
+    data.ctrl[self.arm_ctrl_idx] = ctrl
 
 class PushingEnv(gym.Env):
     """
@@ -35,13 +99,14 @@ class PushingEnv(gym.Env):
         render_size: tuple[int, int] = (128, 128),
     ) -> None:
         super().__init__()
-        self.builder = builder
+        self.builder     = builder
         self.render_size = render_size
 
         self.model: mujoco.MjModel | None = None
         self.data: mujoco.MjData | None = None
         self.renderer: mujoco.Renderer | None = None
         self.config: SceneConfig | None = None
+        self.controller: Controller = Controller()
         self.step_count: int = 0
 
         H, W = render_size
@@ -50,6 +115,8 @@ class PushingEnv(gym.Env):
                 low=0, high=255, shape=(H, W, 3), dtype=np.uint8),
             "ee_pos": spaces.Box(
                 low=-2.0, high=2.0, shape=(3,), dtype=np.float32),
+            "ee_angle": spaces.Box(
+                low=-np.pi, high=np.pi, shape=(3,), dtype=np.float32),
             "object_pos": spaces.Box(
                 low=-2.0, high=2.0, shape=(2,), dtype=np.float32),
         })
@@ -65,23 +132,28 @@ class PushingEnv(gym.Env):
 
     def reset(  # type: ignore[override]
         self,
-        config: SceneConfig | None = None,
         *,
-        seed: int | None = None,
-        options: dict[str, Any] | None = None,
+        config: SceneConfig | None = None,
+        seed: int | None = None
     ) -> tuple[Observation, dict[str, Any]]:
+        assert config is not None, "Must provide a SceneConfig to reset()."
         super().reset(seed=seed)
-        if config is None:
-            raise ValueError(
-                "PushingEnv.reset() requires a SceneConfig argument.")
+
         self.config = config
-        self.model = self.builder.build(config, render_size=self.render_size)
-        self.data = mujoco.MjData(self.model)
+        self.model  = self.builder.build(config, render_size=self.render_size)
+        self.data   = mujoco.MjData(self.model)
+        self.controller.reset(self.model, config)
+
         if self.renderer is not None:
             self.renderer.close()
         self.renderer = mujoco.Renderer(
             self.model, self.render_size[0], self.render_size[1])
         mujoco.mj_forward(self.model, self.data)
+
+        initial_qpos = config.joint_initial_qpos
+        if initial_qpos is not None:
+            self.controller.reset_initial_qpos(self.data, initial_qpos)
+
         self.step_count = 0
         return self._get_obs(), {}
 
@@ -93,15 +165,8 @@ class PushingEnv(gym.Env):
             and self.data is not None
             and self.config is not None
         ), "Call reset() before step()."
-        # Clip action
-        action = np.clip(
-            action.astype(np.float64),
-            _ACTION_CLIP[[0, 2, 4]],
-            _ACTION_CLIP[[1, 3, 5]],
-        )
 
-        # Update mocap target
-        self.data.mocap_pos[0] = self.data.mocap_pos[0] + action
+        self.controller.update_arm(self.data, action)
 
         # Step physics
         n_substeps = max(
@@ -112,13 +177,14 @@ class PushingEnv(gym.Env):
             mujoco.mj_step(self.model, self.data)
 
         self.step_count += 1
-        obs = self._get_obs()
-        reward = self._compute_reward()
+
+        obs        = self._get_obs()
+        reward     = self._compute_reward()
         terminated = self._check_done()
-        truncated = False
+        truncated  = False
         info: dict[str, Any] = {
             "object_pos": self._get_object_pos(),
-            "ee_pos": self.data.mocap_pos[0].copy(),
+            "ee_pos": self.controller.get_ee_pos(self.data),
             "goal_pos": np.array(self.config.goal_pos, dtype=np.float32),
             "step": self.step_count,
         }
@@ -145,8 +211,11 @@ class PushingEnv(gym.Env):
         image = self.renderer.render()
         return {
             "image": image,
-            "ee_pos": self.data.mocap_pos[0].copy().astype(np.float32),
+            "ee_pos": self.controller.get_ee_pos(self.data),
+            "arm_qpos": self.controller.get_arm_qpos(self.data),
             "object_pos": self._get_object_pos(),
+            "qpos": self.data.qpos.copy(),
+            "step": self.step_count,
         }
 
     def _compute_reward(self) -> float:

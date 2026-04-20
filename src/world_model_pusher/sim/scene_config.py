@@ -64,3 +64,27 @@ class SceneConfig:
     # Episode parameters
     max_steps: int
     control_dt: float              # seconds per action step
+
+    @property
+    def joint_initial_qpos(self) -> list[float] | None:
+        if self.robot_initial_qpos is not None:
+            return self.robot_initial_qpos
+        if self.robot_type == "stick":
+            return [0.0]
+        elif self.robot_type == "so100":
+            return [0, -3.14, 3.14, 0, 0, 0]
+        else:
+            raise ValueError(f"Unknown robot type: {self.robot_type}")
+
+    @property
+    def joint_names(self) -> list[str]:
+        if self.robot_type == "stick":
+            return ["joint1"]
+        elif self.robot_type == "so100":
+            return ["Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw"]
+        else:
+            raise ValueError(f"Unknown robot type: {self.robot_type}")
+
+    @property
+    def actuator_names(self) -> list[str]:
+        return self.joint_names

@@ -60,7 +60,7 @@ def _parse_render_size(render_size: str) -> tuple[int, int]:
 
 
 @cli.command("collect-data")
-@click.option("--episodes", default=None, type=int, help="Number of episodes to collect")
+@click.option("--episodes", default=10, type=int, help="Number of episodes to collect")
 @click.option("--output", default=None, type=str, help="Output directory")
 @click.option("--difficulty", default=None, type=str, help="Scene difficulty (easy/medium/hard)")
 @click.option("--render-size", default=None, type=str, help="Render size WxH (e.g. 128x128)")
@@ -80,32 +80,30 @@ def collect_data(ctx, episodes, output, difficulty, render_size, seed):
   )
 
   cfg = _resolve_sim_cfg(ctx, {
-    "collect_episodes": episodes,
     "output_dir": output,
     "difficulty": difficulty,
     "render_size": render_size,
     "seed": seed,
   })
-  episodes = cfg["collect_episodes"]
-  output = cfg["output_dir"]
-  difficulty = cfg["difficulty"]
-  resolved_seed = _resolve_seed(cfg, seed)
+  output             = cfg["output_dir"]
+  difficulty         = cfg["difficulty"]
+  resolved_seed      = _resolve_seed(cfg, seed)
   render_h, render_w = _parse_render_size(cfg["render_size"])
 
-  builder = SceneBuilder()
-  env = PushingEnv(builder, render_size=(render_h, render_w))
+  builder   = SceneBuilder()
+  env       = PushingEnv(builder, render_size=(render_h, render_w))
   generator = SceneGenerator(difficulty=difficulty)
-  writer = EpisodeWriter(output, format="hdf5")
-  rng = np.random.default_rng(resolved_seed)
+  writer    = EpisodeWriter(output, format="hdf5")
+  rng       = np.random.default_rng(resolved_seed)
 
   click.echo(f"Collecting {episodes} episodes → {output}  (difficulty={difficulty}, seed={resolved_seed})")
   total_reward = 0.0
 
   for ep_idx in tqdm(range(episodes), desc="Collecting"):
-    config = generator.sample(rng)
-    obs, _ = env.reset(config=config)
+    config       = generator.sample(rng)
+    obs, _       = env.reset(config=config)
     episode_data = []
-    done = False
+    done         = False
 
     while not done:
       action = random_push_policy(obs, config, rng)
@@ -127,47 +125,6 @@ def collect_data(ctx, episodes, output, difficulty, render_size, seed):
 
   env.close()
   click.echo(f"Done. Avg reward per step: {total_reward / max(1, episodes):.4f}")
-
-
-@cli.command("show-scene")
-@click.option("--difficulty", default=None, type=str, help="Scene difficulty (easy/medium/hard)")
-@click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
-@click.option("--render-size", default=None, type=str, help="Render size WxH (e.g. 128x128)")
-@click.option("--output", default=None, type=str, help="Path to save PNG (optional)")
-@click.pass_context
-def show_scene(ctx, difficulty, seed, render_size, output):
-  """Generate one random scene, render it, and display or save it."""
-  from PIL import Image
-
-  from src.world_model_pusher.sim import PushingEnv, SceneBuilder, SceneGenerator
-
-  cfg = _resolve_sim_cfg(ctx, {"difficulty": difficulty, "seed": seed, "render_size": render_size})
-  difficulty = cfg["difficulty"]
-  resolved_seed = _resolve_seed(cfg, seed)
-  render_h, render_w = _parse_render_size(cfg["render_size"])
-
-  builder = SceneBuilder()
-  env = PushingEnv(builder, render_size=(render_h, render_w))
-  generator = SceneGenerator(difficulty=difficulty)
-  rng = np.random.default_rng(resolved_seed)
-  click.echo(f"difficulty={difficulty}  seed={resolved_seed}")
-  config = generator.sample(rng)
-  obs, _ = env.reset(config=config)
-  image_array = obs["image"]
-  env.close()
-
-  img = Image.fromarray(image_array)
-  if output:
-    img.save(output)
-    click.echo(f"Scene saved to {output}")
-  else:
-    import matplotlib.pyplot as plt
-    plt.figure(figsize=(5, 5))
-    plt.imshow(image_array)
-    plt.title(f"Scene (difficulty={difficulty}, seed={resolved_seed})")
-    plt.axis("off")
-    plt.tight_layout()
-    plt.show()
 
 
 @cli.command("rl-loop")
@@ -199,15 +156,15 @@ def rl_loop(ctx, episodes, difficulty, seed, render_size):
     "seed": seed,
     "render_size": render_size,
   })
-  episodes = cfg["rl_episodes"]
-  difficulty = cfg["rl_difficulty"]
-  resolved_seed = _resolve_seed(cfg, seed)
+  episodes           = cfg["rl_episodes"]
+  difficulty         = cfg["rl_difficulty"]
+  resolved_seed      = _resolve_seed(cfg, seed)
   render_h, render_w = _parse_render_size(cfg["render_size"])
 
-  builder = SceneBuilder()
-  env = PushingEnv(builder, render_size=(render_h, render_w))
+  builder   = SceneBuilder()
+  env       = PushingEnv(builder, render_size=(render_h, render_w))
   generator = SceneGenerator(difficulty=difficulty)
-  rng = np.random.default_rng(resolved_seed)
+  rng       = np.random.default_rng(resolved_seed)
 
   click.echo(f"Starting RL loop: {episodes} episodes, difficulty={difficulty}, seed={resolved_seed}")
 
@@ -241,6 +198,51 @@ def rl_loop(ctx, episodes, difficulty, seed, render_size):
 
   env.close()
   click.echo(f"Finished. Average episode reward: {total_reward / episodes:.4f}")
+
+@cli.command("show-scene")
+@click.option("--difficulty", default=None, type=str, help="Scene difficulty (easy/medium/hard)")
+@click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
+@click.option("--render-size", default=None, type=str, help="Render size WxH (e.g. 128x128)")
+@click.option("--step-delay", default=0.5, type=float, help="Seconds to sleep between steps (default 0.05)")
+@click.pass_context
+def show_scene(ctx, difficulty, seed, render_size, step_delay):
+  """Generate a scene and run it in the interactive MuJoCo viewer."""
+  import time
+  import mujoco
+  import mujoco.viewer
+
+  from src.world_model_pusher.sim import PushingEnv, SceneBuilder, SceneGenerator, RandomPushPolicy
+
+  cfg = _resolve_sim_cfg(ctx, {"difficulty": difficulty, "seed": seed, "render_size": render_size})
+  difficulty         = cfg["difficulty"]
+  resolved_seed      = _resolve_seed(cfg, seed)
+  render_h, render_w = _parse_render_size(cfg["render_size"])
+
+  builder   = SceneBuilder()
+  env       = PushingEnv(builder, render_size=(render_h, render_w))
+  generator = SceneGenerator(difficulty=difficulty)
+  rng       = np.random.default_rng(resolved_seed)
+
+  click.echo(f"difficulty={difficulty}  seed={resolved_seed}")
+  config = generator.sample(rng)
+  policy = RandomPushPolicy(config, env.controller, rng)
+  obs, _ = env.reset(config=config)
+
+  def key_callback(keycode):
+    print(f"Key pressed: {keycode}")
+    # if keycode == mujoco.mjtKey.mjKEY_ESCAPE:
+    #   return False  # signal to close viewer
+    return True
+
+  click.echo("Launching MuJoCo viewer — close the window to exit.")
+  with mujoco.viewer.launch_passive(env.model, env.data, key_callback=key_callback) as v:
+    while v.is_running():
+      action = policy.act(obs)
+      obs, _, terminated, truncated, _ = env.step(action)
+      v.sync()
+      time.sleep(step_delay)
+
+  env.close()
 
 
 if __name__ == "__main__":

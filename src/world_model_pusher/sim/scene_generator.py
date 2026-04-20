@@ -52,8 +52,8 @@ _PRESETS: dict[str, dict[str, Any]] = {
 }
 
 # Table half-extents (fixed for all difficulties)
-_TABLE_HALF_X = 0.30
-_TABLE_HALF_Y = 0.25
+_TABLE_HALF_X = 0.60
+_TABLE_HALF_Y = 0.5
 _TABLE_HALF_Z = 0.02
 
 # Robot base is at the negative-x edge of the table
@@ -76,6 +76,7 @@ def _sample_object(
     table_half_x: float,
     table_half_y: float,
     margin: float = 0.07,
+    min_x: float | None = None,
 ) -> ObjectConfig:
     shape = rng.choice(shapes)
     mass = float(rng.uniform(*mass_range))
@@ -84,7 +85,8 @@ def _sample_object(
     color = [float(rng.uniform(0.1, 1.0)) for _ in range(3)] + [1.0]
 
     # Sample position anywhere on the accessible portion of the table
-    x = float(rng.uniform(-table_half_x + margin, table_half_x - margin))
+    x_low = -table_half_x + margin if min_x is None else max(-table_half_x + margin, min_x)
+    x = float(rng.uniform(x_low, table_half_x - margin))
     y = float(rng.uniform(-table_half_y + margin, table_half_y - margin))
 
     if shape == "box":
@@ -180,7 +182,8 @@ class SceneGenerator:
         for _ in range(num_obs):
             obs = _sample_object(
                 rng, [
-                    "box", "cylinder"], p["mass_range"], _TABLE_HALF_X, _TABLE_HALF_Y)
+                    "box", "cylinder"], p["mass_range"], _TABLE_HALF_X, _TABLE_HALF_Y,
+                min_x=-_TABLE_HALF_X / 2)
             obstacles.append(obs)
 
         # Clutter (visual only — contype=0)
@@ -195,7 +198,8 @@ class SceneGenerator:
                 p["shapes"],
                 p["mass_range"],
                 _TABLE_HALF_X,
-                _TABLE_HALF_Y)
+                _TABLE_HALF_Y,
+                min_x=-_TABLE_HALF_X / 2)
             clutter.append(cl)
 
         # Camera — looking down at the table from above and to one side

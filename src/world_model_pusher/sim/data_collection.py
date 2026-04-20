@@ -9,6 +9,7 @@ from typing import Any
 
 import h5py  # type: ignore[import-untyped]
 import numpy as np
+import mujoco  # type: ignore[import-untyped]
 
 from .scene_config import SceneConfig
 
@@ -116,10 +117,75 @@ class EpisodeWriter:
 # Random push policy
 # ---------------------------------------------------------------------------
 
+class RandomPushPolicy:
+    """
+        A simple heuristic push policy.
+
+        State 1 - initial: arm in rest position pointing to the middle of the table
+        State 2 — approach: move the end-effector toward the object, maintain a standoff distance.
+        State 3 — push: once close, move toward the goal.
+        State 4 — done: push complete, hold position.
+
+        Returns a (3,) float32 action [dx, dy, dz].
+    """
+
+    _PUSH_Z = 0.075          # EE height — midpoint of typical object side
+    _APPROACH_SPEED = 0.02
+    _PUSH_SPEED = 0.015
+    _STANDOFF = 0.06         # approach to this distance behind the object
+    _PUSH_THRESH = 0.08      # switch from approach to push phase
+    _PUSH_DISTANCE = 0.12   # distance at which we consider the push done
+
+    state: str = "initial"  # "initial", "ready", "approach", "push", "done"
+
+    def __init__(self, config: SceneConfig, controller, rng: np.random.Generator | None = None) -> None:
+        self.config     = config
+        self.controller = controller
+        self.rng        = rng if rng is not None else np.random.default_rng()
+
+    @property
+    def ready_xz(self) -> np.ndarray:
+        base  = np.array(self.config.robot_base_pos[:2], dtype=np.float64)
+        zero  = np.array([0.0, 0.0], dtype=np.float64)
+        return base + (zero - base) * 0.3
+
+    @property
+    def goal_xy(self) -> np.ndarray:
+        return np.array(self.config.goal_pos, dtype=np.float64)
+
+    def _update_state(self, obs: dict[str, np.ndarray]) -> None:
+        pass
+
+    def _act_initial(self, _obs: dict[str, np.ndarray]) -> np.ndarray:
+        target = np.append(self.ready_xz, self._PUSH_Z)
+        step   = (target - _obs["ee_pos"]) * 0.2 + _obs["ee_pos"]
+        return self.controller.ik_for_ee_pos(step, _obs["qpos"])
+
+    def _act_ready(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        pass
+
+    def _act_approach(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        pass
+
+    def _act_push(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        pass
+
+    def _act_done(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        return np.zeros(3, dtype=np.float32)
+
+    def act(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        "Returns a (3,) float32 action [dx, dy, dz]."
+
+        ee_pos     = obs["ee_pos"].astype(np.float64)
+        obj_pos_xy = obs["object_pos"].astype(np.float64)
+
+        self._update_state(obs)
+        return getattr(self, f"_act_{self.state}")(obs)  # type: ignore[attr-defined]
+
+
 def random_push_policy(
     obs: dict[str, np.ndarray],
     config: SceneConfig,
-    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """
     A simple heuristic push policy.
@@ -129,18 +195,9 @@ def random_push_policy(
 
     Returns a (3,) float32 action [dx, dy, dz].
     """
-    if rng is None:
-        rng = np.random.default_rng()
-
-    _PUSH_Z = 0.075          # EE height — midpoint of typical object side
-    _APPROACH_SPEED = 0.02
-    _PUSH_SPEED = 0.015
-    _STANDOFF = 0.06         # approach to this distance behind the object
-    _PUSH_THRESH = 0.08      # switch from approach to push phase
-
-    ee_pos = obs["ee_pos"].astype(np.float64)
+    ee_pos     = obs["ee_pos"].astype(np.float64)
     obj_pos_xy = obs["object_pos"].astype(np.float64)
-    goal_xy = np.array(config.goal_pos, dtype=np.float64)
+    goal_xy    = np.array(config.goal_pos, dtype=np.float64)
     ee_xy = ee_pos[:2]
     ee_z = float(ee_pos[2])
 
