@@ -14,6 +14,7 @@ from .scene_config import SceneConfig
 
 Observation = dict[str, np.ndarray]
 
+
 class Controller:
   def reset(self, model, config: SceneConfig) -> None:
     self.model   = model
@@ -82,6 +83,7 @@ class Controller:
         self.arm_ctrl_range[:, 1],
     )
     data.ctrl[self.arm_ctrl_idx] = ctrl
+
 
 class PushingEnv(gym.Env):
     """

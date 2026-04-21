@@ -229,7 +229,6 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
   obs, _ = env.reset(config=config)
 
   def key_callback(keycode):
-    print(f"Key pressed: {keycode}")
     if keycode == 32 and policy.state == "ready":  # Space bar to start the push
       policy.state = "approach"
       print("Policy state changed: ready → approach")

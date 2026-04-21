@@ -9,7 +9,6 @@ from typing import Any
 
 import h5py  # type: ignore[import-untyped]
 import numpy as np
-import mujoco  # type: ignore[import-untyped]
 
 from .scene_config import SceneConfig
 
@@ -130,11 +129,9 @@ class RandomPushPolicy:
     """
 
     _PUSH_Z = 0.075          # EE height — midpoint of typical object side
-    _APPROACH_SPEED = 0.02
-    _PUSH_SPEED = 0.015
+    _MOVE_SPEED = 0.015
     _STANDOFF = 0.06         # approach to this distance behind the object
-    _PUSH_THRESH = 0.08      # switch from approach to push phase
-    _PUSH_DISTANCE = 0.12   # distance at which we consider the push done
+    _CLOSE_THRESH = 0.08      # switch from approach to push phase
 
     state: str = "initial"  # "initial", "ready", "approach", "push", "done"
 
@@ -178,23 +175,30 @@ class RandomPushPolicy:
 
     def _determine_state(self, obs: dict[str, np.ndarray]) -> None:
         if self.state == "initial":
-            if np.linalg.norm(obs["ee_pos"][:2] - self.ready_xy) < 0.02:
+            if np.linalg.norm(obs["ee_pos"][:2] - self.ready_xy) < self._CLOSE_THRESH:
                 return "ready"
+        elif self.state == "approach":
+            if np.linalg.norm(obs["ee_pos"] - self.approach_xyz) < self._CLOSE_THRESH:
+                return "push"
+        elif self.state == "push":
+            if np.linalg.norm(obs["ee_pos"] - self.goal_xyz) < self._CLOSE_THRESH:
+                return "done"
 
     def _act_initial(self, obs: dict[str, np.ndarray]) -> np.ndarray:
         target = np.append(self.ready_xy, self._PUSH_Z)
-        step   = (target - obs["ee_pos"]) * 0.2 + obs["ee_pos"]
+        step   = (target - obs["ee_pos"]) * self._MOVE_SPEED + obs["ee_pos"]
         return self.controller.ik_for_ee_pos(step, obs["qpos"])
 
     def _act_ready(self, obs: dict[str, np.ndarray]) -> np.ndarray:
         return obs["arm_qpos"]
 
     def _act_approach(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        step = (self.approach_xyz - obs["ee_pos"]) * 0.2 + obs["ee_pos"]
+        step = (self.approach_xyz - obs["ee_pos"]) * self._MOVE_SPEED + obs["ee_pos"]
         return self.controller.ik_for_ee_pos(step, obs["qpos"])
 
     def _act_push(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        return obs["arm_qpos"]
+        step = (self.goal_xyz - obs["ee_pos"]) * self._MOVE_SPEED + obs["ee_pos"]
+        return self.controller.ik_for_ee_pos(step, obs["qpos"])
 
     def _act_done(self, obs: dict[str, np.ndarray]) -> np.ndarray:
         return obs["arm_qpos"]
@@ -207,54 +211,3 @@ class RandomPushPolicy:
             self.state = next_state
 
         return getattr(self, f"_act_{self.state}")(obs), (cur_state if changed else None)  # type: ignore[attr-defined]
-
-
-def random_push_policy(
-    obs: dict[str, np.ndarray],
-    config: SceneConfig,
-) -> np.ndarray:
-    """
-    A simple heuristic push policy.
-
-    Phase 1 — approach: move the end-effector toward the object.
-    Phase 2 — push: once close, move toward the goal.
-
-    Returns a (3,) float32 action [dx, dy, dz].
-    """
-    ee_pos     = obs["ee_pos"].astype(np.float64)
-    obj_pos_xy = obs["object_pos"].astype(np.float64)
-    goal_xy    = np.array(config.goal_pos, dtype=np.float64)
-    ee_xy = ee_pos[:2]
-    ee_z = float(ee_pos[2])
-
-    # Push direction: from object toward goal
-    push_dir = goal_xy - obj_pos_xy
-    push_norm = np.linalg.norm(push_dir)
-    if push_norm > 1e-6:
-        push_dir /= push_norm
-    else:
-        push_dir = np.array([1.0, 0.0])
-
-    # Approach target: stand off behind the object on the push axis
-    approach_target = obj_pos_xy - push_dir * _STANDOFF
-
-    dist_to_approach = float(np.linalg.norm(ee_xy - approach_target))
-
-    if dist_to_approach > _PUSH_THRESH:
-        # Phase 1: move to approach position behind the object
-        direction = approach_target - ee_xy
-        direction /= (np.linalg.norm(direction) + 1e-8)
-        dx, dy = direction * _APPROACH_SPEED
-    else:
-        # Phase 2: push straight through toward the goal
-        dx, dy = push_dir * _PUSH_SPEED
-        dx += float(rng.uniform(-0.002, 0.002))
-        dy += float(rng.uniform(-0.002, 0.002))
-
-    # Descend toward pushing height
-    dz = float(np.clip(_PUSH_Z - ee_z, -0.01, 0.01))
-
-    dx = float(np.clip(dx, -0.02, 0.02))
-    dy = float(np.clip(dy, -0.02, 0.02))
-
-    return np.array([dx, dy, dz], dtype=np.float32)

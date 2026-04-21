@@ -3627,6 +3627,24 @@ wheels = [
 ]
 
 [[package]]
+name = "rerun-sdk"
+version = "0.31.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "pyarrow" },
+    { name = "typing-extensions" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6d/eb/48ff09062919646bed150e76313debc7b815c23de12dbb999332fb0bddc2/rerun_sdk-0.31.3-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:d3ed6c246edf6f809df5fbdaeafbb335d1295930b73d9d53b17e7d9fb1f5e8bc", size = 121398857, upload-time = "2026-04-14T10:10:24.611Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/8c/219d612b61d2fde3731068cd3ba1ef1e9bb646e06923361574b52529fa96/rerun_sdk-0.31.3-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:90deef848af60d544071e219ce2f608f64090a50b75d0cd951c24933a0260edd", size = 130846353, upload-time = "2026-04-14T10:10:31.311Z" },
+    { url = "https://files.pythonhosted.org/packages/f7/f4/d4350829d5bd74005ff08b194a21c24a570c9db67d90c14ca29cf0b063bf/rerun_sdk-0.31.3-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:b285dda76f4bf01d617204c09bab8543cddd224cc8fe159f3bf38458bf398998", size = 135093900, upload-time = "2026-04-14T10:10:36.404Z" },
+    { url = "https://files.pythonhosted.org/packages/5d/99/f1d5ba615a282ae18919c1c3c1975cbd14c66032ed3c574ac0153fbbb567/rerun_sdk-0.31.3-cp310-abi3-win_amd64.whl", hash = "sha256:427b90d5157189f134b0e43d3378c83f548ac858cc0b81553ecb6df4b7977a40", size = 116476172, upload-time = "2026-04-14T10:10:41.209Z" },
+]
+
+[[package]]
 name = "rfc3339-validator"
 version = "0.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -4565,6 +4583,7 @@ dependencies = [
     { name = "pillow" },
     { name = "plotly" },
     { name = "pybullet" },
+    { name = "rerun-sdk" },
     { name = "rich" },
     { name = "scikit-learn" },
     { name = "scipy" },
@@ -4617,6 +4636,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "plotly", specifier = ">=5.15.0" },
     { name = "pybullet", specifier = ">=3.2.5" },
+    { name = "rerun-sdk", specifier = ">=0.31.3" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "scikit-learn", specifier = ">=1.3.0" },
     { name = "scipy", specifier = ">=1.10.0" },
