@@ -12,7 +12,11 @@ from .scene_config import (
     LightingConfig,
     ObjectConfig,
     SceneConfig,
+    object_half_z,
 )
+
+# z-coordinate of the table geom centre in the base MJCF (see base_scene.xml).
+_TABLE_GEOM_CENTRE_Z = 0.02
 
 # ---------------------------------------------------------------------------
 # Difficulty presets
@@ -51,22 +55,26 @@ _PRESETS: dict[str, dict[str, Any]] = {
     },
 }
 
-# Table half-extents (fixed for all difficulties)
-_TABLE_HALF_X = 0.60
-_TABLE_HALF_Y = 0.5
-_TABLE_HALF_Z = 0.02
-
-# Robot base is at the negative-x edge of the table
-_ROBOT_BASE_X = -_TABLE_HALF_X
-_ROBOT_BASE_Y = 0.0
-_ROBOT_BASE_Z = _TABLE_HALF_Z  # on top of table surface
-
 # Maximum arm reach (3 links × 0.15 m each, but realistic reach ~0.35 m)
 _ARM_MAX_REACH = 0.38
-_ARM_MIN_REACH = 0.05
+_ARM_MIN_REACH = 0.12
 
 # Object radius used for overlap checks (conservative)
 _OBJ_RADIUS = 0.06
+
+
+def _object_footprint_radius(cfg: ObjectConfig) -> float:
+    """Worst-case radius of the object's projection onto the xy plane."""
+    s = cfg.size
+    if cfg.shape == "box":
+        return math.hypot(s[0], s[1])
+    if cfg.shape == "cylinder":
+        return s[0]
+    if cfg.shape == "sphere":
+        return s[0]
+    if cfg.shape == "capsule":
+        return s[0]
+    return 0.03
 
 
 def _sample_object(
@@ -75,22 +83,23 @@ def _sample_object(
     mass_range: tuple[float, float],
     table_half_x: float,
     table_half_y: float,
+    table_top_z: float,
     margin: float = 0.07,
     min_x: float | None = None,
 ) -> ObjectConfig:
-    shape = rng.choice(shapes)
-    mass = float(rng.uniform(*mass_range))
-    friction = float(rng.uniform(0.3, 0.8))
+    shape       = rng.choice(shapes)
+    mass        = float(rng.uniform(*mass_range))
+    friction    = float(rng.uniform(0.3, 0.8))
     orientation = float(rng.uniform(0.0, 2 * math.pi))
-    color = [float(rng.uniform(0.1, 1.0)) for _ in range(3)] + [1.0]
+    color       = [float(rng.uniform(0.1, 1.0)) for _ in range(3)] + [1.0]
 
     # Sample position anywhere on the accessible portion of the table
     x_low = -table_half_x + margin if min_x is None else max(-table_half_x + margin, min_x)
-    x = float(rng.uniform(x_low, table_half_x - margin))
-    y = float(rng.uniform(-table_half_y + margin, table_half_y - margin))
+    x     = float(rng.uniform(x_low, table_half_x - margin))
+    y     = float(rng.uniform(-table_half_y + margin, table_half_y - margin))
 
     if shape == "box":
-        s = float(rng.uniform(0.025, 0.05))
+        s    = float(rng.uniform(0.025, 0.05))
         size = [s, s, s]
     elif shape == "cylinder":
         r = float(rng.uniform(0.02, 0.045))
@@ -106,27 +115,29 @@ def _sample_object(
     else:
         size = [0.03, 0.03, 0.03]
 
-    return ObjectConfig(
+    partial = ObjectConfig(
         shape=shape,
         size=size,
         mass=mass,
         friction=friction,
-        pos=[x, y],
+        pos=[x, y, 0.0],
         orientation=orientation,
         color=color,
     )
+    z = table_top_z + object_half_z(partial)
+    partial.pos[2] = z
+    return partial
 
 
 class SceneGenerator:
     """Samples :class:`SceneConfig` instances for a given difficulty level."""
 
-    def __init__(self, difficulty: str = "easy") -> None:
+    def __init__(self, table_size: list[float], difficulty: str = "easy") -> None:
         if difficulty not in _PRESETS:
-            raise ValueError(
-                f"Unknown difficulty '{difficulty}'. Choose from {
-                    list(_PRESETS)}")
+            raise ValueError(f"Unknown difficulty '{difficulty}'. Choose from {list(_PRESETS)}")
         self.difficulty = difficulty
-        self._preset = _PRESETS[difficulty]
+        self._preset    = _PRESETS[difficulty]
+        self.table_size = [float(v) for v in table_size]
 
     # ------------------------------------------------------------------
     # Public API
@@ -149,57 +160,38 @@ class SceneGenerator:
     def _sample_unchecked(self, rng: np.random.Generator) -> SceneConfig:
         p = self._preset
 
-        table_size = [_TABLE_HALF_X, _TABLE_HALF_Y, _TABLE_HALF_Z]
-        table_friction = float(rng.uniform(0.4, 0.7))
-        table_color = [0.6, 0.5, 0.4, 1.0]
+        table_half_x, table_half_y, table_half_z = self.table_size
+        table_size                               = list(self.table_size)
+        table_friction                           = float(rng.uniform(0.4, 0.7))
+        table_color                              = [0.6, 0.5, 0.4, 1.0]
+        table_top_z                              = _TABLE_GEOM_CENTRE_Z + table_half_z
 
-        robot_base_pos = [_ROBOT_BASE_X, _ROBOT_BASE_Y, _TABLE_HALF_Z]
+        # Robot base sits on top of the table at the left edge (−x), centered in y
+        robot_base_pos = [-table_half_x, 0.0, table_half_z]
 
         # Target object — must end up on the reachable side
-        target = _sample_object(
-            rng,
-            p["shapes"],
-            p["mass_range"],
-            _TABLE_HALF_X,
-            _TABLE_HALF_Y,
-            margin=0.07,
-        )
+        target = _sample_object(rng, p["shapes"], p["mass_range"], table_half_x, table_half_y, table_top_z, margin=0.07)
 
         # Goal: push direction at a random angle from target
-        push_dist = float(rng.uniform(*p["push_distance"]))
-        push_angle = float(rng.uniform(0.0, 2 * math.pi))
-        gx = target.pos[0] + push_dist * math.cos(push_angle)
-        gy = target.pos[1] + push_dist * math.sin(push_angle)
-        goal_pos = [gx, gy]
+        push_dist      = float(rng.uniform(*p["push_distance"]))
+        push_angle     = float(rng.uniform(0.0, 2 * math.pi))
+        gx             = target.pos[0] + push_dist * math.cos(push_angle)
+        gy             = target.pos[1] + push_dist * math.sin(push_angle)
+        goal_pos       = [gx, gy]
         goal_tolerance = 0.04
 
         # Obstacles
-        num_obs = int(
-            rng.integers(
-                p["num_obstacles"][0],
-                p["num_obstacles"][1] + 1))
+        num_obs = int(rng.integers(p["num_obstacles"][0], p["num_obstacles"][1] + 1))
         obstacles: list[ObjectConfig] = []
         for _ in range(num_obs):
-            obs = _sample_object(
-                rng, [
-                    "box", "cylinder"], p["mass_range"], _TABLE_HALF_X, _TABLE_HALF_Y,
-                min_x=-_TABLE_HALF_X / 2)
+            obs = _sample_object(rng, ["box", "cylinder"], p["mass_range"], table_half_x, table_half_y, table_top_z, min_x=-table_half_x / 2)
             obstacles.append(obs)
 
         # Clutter (visual only — contype=0)
-        num_clutter = int(
-            rng.integers(
-                p["num_clutter"][0],
-                p["num_clutter"][1] + 1))
+        num_clutter = int(rng.integers(p["num_clutter"][0], p["num_clutter"][1] + 1))
         clutter: list[ObjectConfig] = []
         for _ in range(num_clutter):
-            cl = _sample_object(
-                rng,
-                p["shapes"],
-                p["mass_range"],
-                _TABLE_HALF_X,
-                _TABLE_HALF_Y,
-                min_x=-_TABLE_HALF_X / 2)
+            cl = _sample_object(rng, p["shapes"], p["mass_range"], table_half_x, table_half_y, table_top_z, min_x=-table_half_x / 2)
             clutter.append(cl)
 
         # Camera — looking down at the table from above and to one side
@@ -212,22 +204,14 @@ class SceneGenerator:
             base_cam_pos[1],
             base_cam_pos[2],
         ]
-        camera = CameraConfig(
-            pos=cam_pos, look_at=[
-                0.0, 0.0, _TABLE_HALF_Z], fov=60.0)
+        camera = CameraConfig(pos=cam_pos, look_at=[0.0, 0.0, table_half_z], fov=60.0)
 
         # Lighting
         base_intensity = 0.8
-        variation = p["lighting_variation"]
-        intensity = float(
-            np.clip(base_intensity + rng.uniform(-variation, variation), 0.1, 1.0))
-        ambient = float(
-            np.clip(0.3 + rng.uniform(-variation * 0.5, variation * 0.5), 0.05, 1.0))
-        lighting = LightingConfig(
-            direction=[0.0, -0.5, -1.0],
-            intensity=intensity,
-            ambient=ambient,
-        )
+        variation      = p["lighting_variation"]
+        intensity      = float(np.clip(base_intensity + rng.uniform(-variation, variation), 0.1, 1.0))
+        ambient        = float(np.clip(0.3 + rng.uniform(-variation * 0.5, variation * 0.5), 0.05, 1.0))
+        lighting       = LightingConfig(direction=[0.0, -0.5, -1.0], intensity=intensity, ambient=ambient)
 
         return SceneConfig(
             table_size=table_size,
@@ -262,7 +246,7 @@ class SceneGenerator:
 
     def _check_reachability(self, cfg: SceneConfig) -> bool:
         """Target must be within arm reach from robot base."""
-        tx, ty = cfg.target.pos
+        tx, ty = cfg.target.pos[:2]
         bx, by = cfg.robot_base_pos[:2]
         dist = math.hypot(tx - bx, ty - by)
         return _ARM_MIN_REACH <= dist <= _ARM_MAX_REACH
@@ -277,13 +261,23 @@ class SceneGenerator:
         )
 
     def _check_no_overlaps(self, cfg: SceneConfig) -> bool:
-        """No obstacle should overlap with the target or the goal position."""
-        tx, ty = cfg.target.pos
+        """No colliding object should overlap with another, the target, or the goal."""
         gx, gy = cfg.goal_pos
+        colliders = [cfg.target] + cfg.obstacles
+        for i, a in enumerate(colliders):
+            ax, ay = a.pos[:2]
+            for b in colliders[i + 1:]:
+                bx, by = b.pos[:2]
+                if math.hypot(ax - bx, ay - by) < 2 * _OBJ_RADIUS:
+                    return False
+        # Goal must lie outside the target's current footprint, otherwise the
+        # target is already "at the goal" at t=0.
+        tx, ty = cfg.target.pos[:2]
+        target_radius = _object_footprint_radius(cfg.target)
+        if math.hypot(gx - tx, gy - ty) < target_radius + cfg.goal_tolerance:
+            return False
         for obs in cfg.obstacles:
-            ox, oy = obs.pos
-            if math.hypot(tx - ox, ty - oy) < 2 * _OBJ_RADIUS:
-                return False
+            ox, oy = obs.pos[:2]
             if math.hypot(gx - ox, gy - oy) < _OBJ_RADIUS:
                 return False
         return True
@@ -292,7 +286,7 @@ class SceneGenerator:
         """Simple check: no obstacle fully blocks the straight line target→goal."""
         if not cfg.obstacles:
             return True
-        tx, ty = cfg.target.pos
+        tx, ty = cfg.target.pos[:2]
         gx, gy = cfg.goal_pos
         dx, dy = gx - tx, gy - ty
         length = math.hypot(dx, dy)
@@ -300,7 +294,7 @@ class SceneGenerator:
             return True
         ux, uy = dx / length, dy / length
         for obs in cfg.obstacles:
-            ox, oy = obs.pos
+            ox, oy = obs.pos[:2]
             # Project obstacle centre onto the push ray
             t = max(0.0, min(length, (ox - tx) * ux + (oy - ty) * uy))
             cx = tx + t * ux
@@ -316,7 +310,7 @@ class SceneGenerator:
         hx, hy = cfg.table_size[:2]
         objects_to_check = [cfg.target] + cfg.obstacles + cfg.clutter
         for obj in objects_to_check:
-            ox, oy = obj.pos
+            ox, oy = obj.pos[:2]
             if abs(ox) > hx or abs(oy) > hy:
                 return False
         return True

@@ -68,3 +68,4 @@ sim:
   output_dir: "data/generated-pushes/"
   rl_episodes: 1000
   rl_difficulty: "medium"
+  table_size: [0.60, 0.5, 0.02]  # [half_x, half_y, half_z]

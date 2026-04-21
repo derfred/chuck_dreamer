@@ -11,7 +11,7 @@ class ObjectConfig:
     size: list[float]              # shape-dependent dimensions
     mass: float                    # kg
     friction: float                # sliding friction coefficient
-    pos: list[float]               # [x, y] on table surface
+    pos: list[float]               # [x, y, z] world position (z = object centre)
     orientation: float             # yaw angle in radians
     color: list[float]             # RGBA
     mesh_path: str | None = None   # for shape="mesh"
@@ -88,3 +88,17 @@ class SceneConfig:
     @property
     def actuator_names(self) -> list[str]:
         return self.joint_names
+
+
+def object_half_z(cfg: ObjectConfig) -> float:
+    """Half-extent along z for an object resting with its default orientation."""
+    s = cfg.size
+    if cfg.shape == "box":
+        return s[2] if len(s) > 2 else s[0]
+    if cfg.shape == "cylinder":
+        return s[1] if len(s) > 1 else s[0]
+    if cfg.shape == "sphere":
+        return s[0]
+    if cfg.shape == "capsule":
+        return (s[0] + s[1]) if len(s) > 1 else s[0]
+    return 0.03

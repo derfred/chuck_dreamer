@@ -92,7 +92,7 @@ def collect_data(ctx, episodes, output, difficulty, render_size, seed):
 
   builder   = SceneBuilder()
   env       = PushingEnv(builder, render_size=(render_h, render_w))
-  generator = SceneGenerator(difficulty=difficulty)
+  generator = SceneGenerator(table_size=cfg["table_size"], difficulty=difficulty)
   writer    = EpisodeWriter(output, format="hdf5")
   rng       = np.random.default_rng(resolved_seed)
 
@@ -163,7 +163,7 @@ def rl_loop(ctx, episodes, difficulty, seed, render_size):
 
   builder   = SceneBuilder()
   env       = PushingEnv(builder, render_size=(render_h, render_w))
-  generator = SceneGenerator(difficulty=difficulty)
+  generator = SceneGenerator(table_size=cfg["table_size"], difficulty=difficulty)
   rng       = np.random.default_rng(resolved_seed)
 
   click.echo(f"Starting RL loop: {episodes} episodes, difficulty={difficulty}, seed={resolved_seed}")
@@ -220,7 +220,7 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
 
   builder   = SceneBuilder()
   env       = PushingEnv(builder, render_size=(render_h, render_w))
-  generator = SceneGenerator(difficulty=difficulty)
+  generator = SceneGenerator(table_size=cfg["table_size"], difficulty=difficulty)
   rng       = np.random.default_rng(resolved_seed)
 
   click.echo(f"difficulty={difficulty}  seed={resolved_seed}")
@@ -230,15 +230,23 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
 
   def key_callback(keycode):
     print(f"Key pressed: {keycode}")
-    # if keycode == mujoco.mjtKey.mjKEY_ESCAPE:
-    #   return False  # signal to close viewer
+    if keycode == 32 and policy.state == "ready":  # Space bar to start the push
+      policy.state = "approach"
+      print("Policy state changed: ready → approach")
     return True
 
   click.echo("Launching MuJoCo viewer — close the window to exit.")
   with mujoco.viewer.launch_passive(env.model, env.data, key_callback=key_callback) as v:
     while v.is_running():
-      action = policy.act(obs)
+      action, prev_state = policy.act(obs)
+      if prev_state is not None:
+        print(f"Policy state changed: {prev_state} → {policy.state}")
       obs, _, terminated, truncated, _ = env.step(action)
+
+      v.user_scn.ngeom = 0
+      if policy.state == "ready":
+        env.insert_hints(v, policy)
+
       v.sync()
       time.sleep(step_delay)
 

@@ -146,11 +146,7 @@
         </body>
       </body>
     </body>
-    <body name="mocap_target" mocap="true" pos="-0.10 0 0.08">
-      <geom type="sphere" size="0.008" rgba="1 0 0 0.5"
-            contype="0" conaffinity="0"/>
-    </body>
-    <!-- Heavy pusher body welded to mocap_target; does the actual pushing. -->
+    <!-- Heavy pusher body welded to; does the actual pushing. -->
     <body name="ee_link" pos="-0.10 0 0.08">
       <joint name="ee_free" type="free"/>
       <inertial pos="0 0 0" mass="2.0" diaginertia="8e-4 8e-4 8e-4"/>
@@ -158,10 +154,6 @@
             contype="1" conaffinity="1"/>
     </body>
   </worldbody>
-  <equality>
-    <weld body1="ee_link" body2="mocap_target"
-          solref="0.002 1" solimp="0.99 0.999 0.0001"/>
-  </equality>
   <actuator>
     <position class="Rotation"    name="Rotation"    joint="Rotation"    inheritrange="1"/>
     <position class="Pitch"       name="Pitch"       joint="Pitch"       inheritrange="1"/>

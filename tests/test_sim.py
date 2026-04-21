@@ -26,6 +26,9 @@ from src.world_model_pusher.sim import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+_DEFAULT_TABLE_SIZE = [0.60, 0.5, 0.02]
+
+
 def _make_simple_config() -> SceneConfig:
     """Return a minimal valid SceneConfig."""
     return SceneConfig(
@@ -40,7 +43,7 @@ def _make_simple_config() -> SceneConfig:
             size=[0.03, 0.03, 0.03],
             mass=0.1,
             friction=0.5,
-            pos=[0.05, 0.0],
+            pos=[0.05, 0.0, 0.07],
             orientation=0.0,
             color=[1.0, 0.0, 0.0, 1.0],
         ),
@@ -88,7 +91,7 @@ class TestSceneConfig:
             size=[0.03, 0.05],
             mass=0.15,
             friction=0.6,
-            pos=[0.1, 0.0],
+            pos=[0.1, 0.0, 0.09],
             orientation=1.0,
             color=[0.0, 1.0, 0.0, 1.0],
         )
@@ -113,7 +116,7 @@ class TestSceneConfig:
 
 class TestSceneGenerator:
     def test_sample_easy(self):
-        gen = SceneGenerator(difficulty="easy")
+        gen = SceneGenerator(table_size=_DEFAULT_TABLE_SIZE, difficulty="easy")
         rng = np.random.default_rng(42)
         cfg = gen.sample(rng)
         assert isinstance(cfg, SceneConfig)
@@ -121,39 +124,39 @@ class TestSceneGenerator:
         assert len(cfg.obstacles) == 0
 
     def test_sample_medium(self):
-        gen = SceneGenerator(difficulty="medium")
+        gen = SceneGenerator(table_size=_DEFAULT_TABLE_SIZE, difficulty="medium")
         rng = np.random.default_rng(42)
         cfg = gen.sample(rng)
         assert isinstance(cfg, SceneConfig)
         assert cfg.target.shape in ["box", "cylinder", "capsule"]
 
     def test_sample_hard(self):
-        gen = SceneGenerator(difficulty="hard")
+        gen = SceneGenerator(table_size=_DEFAULT_TABLE_SIZE, difficulty="hard")
         rng = np.random.default_rng(42)
         cfg = gen.sample(rng)
         assert isinstance(cfg, SceneConfig)
 
     def test_invalid_difficulty(self):
         with pytest.raises(ValueError):
-            SceneGenerator(difficulty="extreme")
+            SceneGenerator(table_size=_DEFAULT_TABLE_SIZE, difficulty="extreme")
 
     def test_validity_checks_reject_bad_target(self):
-        gen = SceneGenerator(difficulty="easy")
+        gen = SceneGenerator(table_size=_DEFAULT_TABLE_SIZE, difficulty="easy")
         rng = np.random.default_rng(42)
         cfg = gen.sample(rng)
         # Place target out of reach (too far from robot base)
-        cfg.target.pos = [0.50, 0.50]
+        cfg.target.pos = [0.50, 0.50, cfg.target.pos[2]]
         assert not gen._check_reachability(cfg)
 
     def test_validity_goal_on_table(self):
-        gen = SceneGenerator(difficulty="easy")
+        gen = SceneGenerator(table_size=_DEFAULT_TABLE_SIZE, difficulty="easy")
         rng = np.random.default_rng(42)
         cfg = gen.sample(rng)
         cfg.goal_pos = [5.0, 5.0]  # way off table
         assert not gen._check_goal_on_table(cfg)
 
     def test_multiple_samples_are_valid(self):
-        gen = SceneGenerator(difficulty="easy")
+        gen = SceneGenerator(table_size=_DEFAULT_TABLE_SIZE, difficulty="easy")
         rng = np.random.default_rng(0)
         for _ in range(10):
             cfg = gen.sample(rng)
@@ -185,7 +188,7 @@ class TestSceneBuilder:
                 size=[0.03, 0.03, 0.03],
                 mass=0.2,
                 friction=0.5,
-                pos=[0.08, 0.08],
+                pos=[0.08, 0.08, 0.07],
                 orientation=0.0,
                 color=[0.0, 0.0, 1.0, 1.0],
             )

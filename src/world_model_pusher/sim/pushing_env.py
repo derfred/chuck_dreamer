@@ -183,12 +183,49 @@ class PushingEnv(gym.Env):
         terminated = self._check_done()
         truncated  = False
         info: dict[str, Any] = {
-            "object_pos": self._get_object_pos(),
+            "object_xy": self._get_object_pos(),
             "ee_pos": self.controller.get_ee_pos(self.data),
-            "goal_pos": np.array(self.config.goal_pos, dtype=np.float32),
+            "goal_xy": np.array(self.config.goal_pos, dtype=np.float32),
             "step": self.step_count,
         }
         return obs, reward, terminated, truncated, info
+
+    def insert_hints(self, viewer: mujoco.Viewer, policy, rgba: np.ndarray = np.array([0.0, 1.0, 0.0, 0.8], dtype=np.float32)) -> None:
+        """Insert custom geoms into the scene for visualization hints."""
+        assert self.config is not None
+
+        if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+          return
+
+        goal_pos = np.append(self.config.goal_pos, 0.04)  # (x, y, z)
+        g        = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+        mujoco.mjv_initGeom(
+          g,
+          type=mujoco.mjtGeom.mjGEOM_SPHERE,
+          size=np.array([0.02, 0, 0]),
+          pos=np.array(goal_pos, dtype=np.float64),
+          mat=np.eye(3).flatten(),
+          rgba=rgba,
+        )
+        g.category = mujoco.mjtCatBit.mjCAT_DECOR
+        viewer.user_scn.ngeom += 1
+
+        mujoco.mjv_initGeom(
+          g,
+          type=mujoco.mjtGeom.mjGEOM_ARROW,
+          size=np.zeros(3),
+          pos=np.zeros(3),
+          mat=np.eye(3).flatten(),
+          rgba=rgba,
+        )
+        mujoco.mjv_connector(
+          g,
+          mujoco.mjtGeom.mjGEOM_ARROW,
+          0.01,
+          policy.approach_xyz,
+          policy.goal_xyz,
+        )
+        viewer.user_scn.ngeom += 1
 
     def render(self) -> np.ndarray | None:  # type: ignore[override]
         if self.renderer is None or self.data is None:
@@ -213,7 +250,8 @@ class PushingEnv(gym.Env):
             "image": image,
             "ee_pos": self.controller.get_ee_pos(self.data),
             "arm_qpos": self.controller.get_arm_qpos(self.data),
-            "object_pos": self._get_object_pos(),
+            "object_xy": self._get_object_pos(),
+            "goal_xy": np.array(self.config.goal_pos, dtype=np.float32),
             "qpos": self.data.qpos.copy(),
             "step": self.step_count,
         }

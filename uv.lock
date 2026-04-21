@@ -4595,6 +4595,8 @@ dev = [
 [package.dev-dependencies]
 dev = [
     { name = "autopep8" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
 ]
 
 [package.metadata]
@@ -4646,7 +4648,11 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "autopep8", specifier = ">=2.3.2" }]
+dev = [
+    { name = "autopep8", specifier = ">=2.3.2" },
+    { name = "pytest", specifier = ">=9.0.3" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+]
 
 [[package]]
 name = "wrapt"

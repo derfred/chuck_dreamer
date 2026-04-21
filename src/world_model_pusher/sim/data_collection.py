@@ -144,7 +144,7 @@ class RandomPushPolicy:
         self.rng        = rng if rng is not None else np.random.default_rng()
 
     @property
-    def ready_xz(self) -> np.ndarray:
+    def ready_xy(self) -> np.ndarray:
         base  = np.array(self.config.robot_base_pos[:2], dtype=np.float64)
         zero  = np.array([0.0, 0.0], dtype=np.float64)
         return base + (zero - base) * 0.3
@@ -153,34 +153,60 @@ class RandomPushPolicy:
     def goal_xy(self) -> np.ndarray:
         return np.array(self.config.goal_pos, dtype=np.float64)
 
-    def _update_state(self, obs: dict[str, np.ndarray]) -> None:
-        pass
+    @property
+    def goal_xyz(self) -> float:
+        return np.append(self.goal_xy, self._PUSH_Z)
 
-    def _act_initial(self, _obs: dict[str, np.ndarray]) -> np.ndarray:
-        target = np.append(self.ready_xz, self._PUSH_Z)
-        step   = (target - _obs["ee_pos"]) * 0.2 + _obs["ee_pos"]
-        return self.controller.ik_for_ee_pos(step, _obs["qpos"])
+    @property
+    def object_xy(self) -> np.ndarray:
+        return np.array(self.config.target.pos[:2], dtype=np.float64)
+
+    @property
+    def approach_xy(self) -> np.ndarray:
+        push_dir  = self.goal_xy - self.object_xy
+        push_dist = np.linalg.norm(push_dir)
+        if push_dist > 1e-6:
+            push_dir /= push_dist
+        else:
+            push_dir = np.array([1.0, 0.0])
+        approach_point = self.object_xy - push_dir * self._STANDOFF
+        return approach_point
+
+    @property
+    def approach_xyz(self) -> np.ndarray:
+        return np.append(self.approach_xy, self._PUSH_Z)
+
+    def _determine_state(self, obs: dict[str, np.ndarray]) -> None:
+        if self.state == "initial":
+            if np.linalg.norm(obs["ee_pos"][:2] - self.ready_xy) < 0.02:
+                return "ready"
+
+    def _act_initial(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        target = np.append(self.ready_xy, self._PUSH_Z)
+        step   = (target - obs["ee_pos"]) * 0.2 + obs["ee_pos"]
+        return self.controller.ik_for_ee_pos(step, obs["qpos"])
 
     def _act_ready(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        pass
+        return obs["arm_qpos"]
 
     def _act_approach(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        pass
+        step = (self.approach_xyz - obs["ee_pos"]) * 0.2 + obs["ee_pos"]
+        return self.controller.ik_for_ee_pos(step, obs["qpos"])
 
     def _act_push(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        pass
+        return obs["arm_qpos"]
 
     def _act_done(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        return np.zeros(3, dtype=np.float32)
+        return obs["arm_qpos"]
 
     def act(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        "Returns a (3,) float32 action [dx, dy, dz]."
+        cur_state  = self.state
+        next_state = self._determine_state(obs)
+        changed    = next_state is not None and next_state != cur_state
+        if changed:
+            self.state = next_state
 
-        ee_pos     = obs["ee_pos"].astype(np.float64)
-        obj_pos_xy = obs["object_pos"].astype(np.float64)
-
-        self._update_state(obs)
-        return getattr(self, f"_act_{self.state}")(obs)  # type: ignore[attr-defined]
+        return getattr(self, f"_act_{self.state}")(obs), (cur_state if changed else None)  # type: ignore[attr-defined]
 
 
 def random_push_policy(

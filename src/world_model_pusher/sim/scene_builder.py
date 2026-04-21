@@ -55,28 +55,26 @@ def _object_geom_element(cfg: ObjectConfig, name: str) -> etree._Element:
 def _make_object_body(
     cfg: ObjectConfig,
     name: str,
-    table_top_z: float,
     colliding: bool,
 ) -> etree._Element:
-    """Build a ``<body>`` element placed on the table surface."""
+    """Build a ``<body>`` element at the config's world position."""
     body = etree.Element("body")
     body.set("name", name)
 
-    half_z = _half_z_for_object(cfg)
-    pos_z = table_top_z + half_z
     yaw = cfg.orientation
-    body.set("pos", f"{cfg.pos[0]:.4f} {cfg.pos[1]:.4f} {pos_z:.4f}")
+    body.set("pos", f"{cfg.pos[0]:.4f} {cfg.pos[1]:.4f} {cfg.pos[2]:.4f}")
     body.set("euler", f"0 0 {yaw:.4f}")
 
-    free_joint = etree.SubElement(body, "joint")
-    free_joint.set("type", "free")
+    if colliding:
+        free_joint = etree.SubElement(body, "joint")
+        free_joint.set("type", "free")
 
-    inertial = etree.SubElement(body, "inertial")
-    inertial.set("pos", "0 0 0")
-    inertial.set("mass", f"{cfg.mass:.6f}")
-    r = cfg.size[0] if cfg.size else 0.03
-    ival = max(2.0 / 5.0 * cfg.mass * r * r, 1e-6)
-    inertial.set("diaginertia", f"{ival:.6e} {ival:.6e} {ival:.6e}")
+        inertial = etree.SubElement(body, "inertial")
+        inertial.set("pos", "0 0 0")
+        inertial.set("mass", f"{cfg.mass:.6f}")
+        r = cfg.size[0] if cfg.size else 0.03
+        ival = max(2.0 / 5.0 * cfg.mass * r * r, 1e-6)
+        inertial.set("diaginertia", f"{ival:.6e} {ival:.6e} {ival:.6e}")
 
     geom = _object_geom_element(cfg, name)
     if not colliding:
@@ -84,20 +82,6 @@ def _make_object_body(
         geom.set("conaffinity", "0")
     body.append(geom)
     return body
-
-
-def _half_z_for_object(cfg: ObjectConfig) -> float:
-    shape = cfg.shape
-    s = cfg.size
-    if shape == "box":
-        return s[2] if len(s) > 2 else s[0]
-    elif shape == "cylinder":
-        return s[1] if len(s) > 1 else s[0]
-    elif shape == "sphere":
-        return s[0]
-    elif shape == "capsule":
-        return (s[1] + s[0]) if len(s) > 1 else s[0]
-    return 0.03
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +213,6 @@ class SceneBuilder:
             raise ValueError("Base MJCF has no <worldbody> element")
 
         table_geom = worldbody.find(".//geom[@name='table_top']")
-        table_top_z = 0.04  # fallback: matches base_scene.xml default
         if table_geom is not None:
             rgba = " ".join(f"{v:.3f}" for v in config.table_color)
             table_geom.set("rgba", rgba)
@@ -237,23 +220,16 @@ class SceneBuilder:
             hx, hy = config.table_size[0], config.table_size[1]
             table_geom.set("size", f"{hx:.3f} {hy:.3f} {hz:.3f}")
             table_geom.set("friction", f"{config.table_friction:.3f} 0.02 0.001")
-            # Recompute table top z from the geom's centre position + half-height
-            geom_pos_z = float(table_geom.get("pos", "0 0 0").split()[2])
-            table_top_z = geom_pos_z + hz
 
-        target_body = _make_object_body(
-            config.target, "target_object", table_top_z, colliding=True
-        )
+        target_body = _make_object_body(config.target, "target_object", colliding=True)
         worldbody.append(target_body)
 
         for i, obs_cfg in enumerate(config.obstacles):
-            obs_body = _make_object_body(
-                obs_cfg, f"obstacle_{i}", table_top_z, colliding=True)
+            obs_body = _make_object_body(obs_cfg, f"obstacle_{i}", colliding=True)
             worldbody.append(obs_body)
 
         for i, cl_cfg in enumerate(config.clutter):
-            cl_body = _make_object_body(
-                cl_cfg, f"clutter_{i}", table_top_z, colliding=False)
+            cl_body = _make_object_body(cl_cfg, f"clutter_{i}", colliding=False)
             worldbody.append(cl_body)
 
         cam_elem = root.find(".//camera[@name='main_camera']")
@@ -282,5 +258,5 @@ class SceneBuilder:
         light.set("castshadow", "false")
 
         xml_str = etree.tostring(root, pretty_print=True, encoding="unicode")
-        model = mujoco.MjModel.from_xml_string(xml_str)
+        model   = mujoco.MjModel.from_xml_string(xml_str)
         return model
