@@ -1,5 +1,6 @@
 [flake8]
-max-line-length = 88
-extend-ignore = E203, W503
+max-line-length = 160
+indent-size = 2
+extend-ignore = E203, W503, E111, E114, E117, E121, E127, E128, E131
 per-file-ignores =
     src/world_model_pusher/sim/scene_builder.py:E501
