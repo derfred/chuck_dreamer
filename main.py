@@ -9,13 +9,8 @@ for training models, processing data, and running experiments.
 import click
 import logging
 import numpy as np
-from pathlib import Path
-import sys
 
-# Add src to path for imports
-sys.path.append(str(Path(__file__).parent / "src"))
-
-from src.chuck_dreamer.config import load_config
+from chuck_dreamer.config import load_config
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -71,7 +66,7 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
   from dataclasses import asdict
   from tqdm import tqdm
 
-  from src.chuck_dreamer.sim import (
+  from chuck_dreamer.sim import (
     EpisodeWriter,
     PushingEnv,
     RandomPushPolicy,
@@ -139,7 +134,7 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
   import mujoco
   import mujoco.viewer
 
-  from src.chuck_dreamer.sim import (
+  from chuck_dreamer.sim import (
     PushingEnv,
     RandomPushPolicy,
     SceneBuilder,

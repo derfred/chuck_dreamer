@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.chuck_dreamer.dreamer import (
+from chuck_dreamer.dreamer import (
   ImageProcessor,
   ReplayBuffer,
   StateVectorProcessor,
@@ -15,8 +15,8 @@ from src.chuck_dreamer.dreamer import (
   load_hdf5_episode,
   load_rerun_episode,
 )
-from src.chuck_dreamer.dreamer.episode_loader import _drop_last_and_pack
-from src.chuck_dreamer.sim.data_collection import EpisodeWriter
+from chuck_dreamer.dreamer.episode_loader import _drop_last_and_pack
+from chuck_dreamer.sim.data_collection import EpisodeWriter
 
 
 # ---------------------------------------------------------------------------
