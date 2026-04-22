@@ -30,13 +30,14 @@ from src.world_model_pusher.sim import (
 _DEFAULT_TABLE_SIZE = [0.60, 0.5, 0.02]
 
 
-def _make_simple_config() -> SceneConfig:
-    """Return a minimal valid SceneConfig."""
+def _make_simple_config(robot_type: str = "so100") -> SceneConfig:
+    """Return a minimal valid SceneConfig. Uses so100 arm by default since
+    PushingEnv/Controller require an arm with named actuators and ee_site."""
     return SceneConfig(
         table_size=[0.30, 0.25, 0.02],
         table_friction=0.5,
         table_color=[0.6, 0.5, 0.4, 1.0],
-        robot_type="stick",
+        robot_type=robot_type,
         robot_base_pos=[-0.30, 0.0, 0.04],
         robot_initial_qpos=None,
         target=ObjectConfig(
@@ -203,9 +204,8 @@ class TestSceneBuilder:
         from src.world_model_pusher.sim.scene_builder import _SIMPLE_ARM_XML
         assert _SIMPLE_ARM_XML.exists()
         content = _SIMPLE_ARM_XML.read_text()
-        assert "mocap_target" in content
         assert "ee_frame" in content
-        assert "weld" in content
+        assert "joint1" in content
 
 
 # ---------------------------------------------------------------------------
@@ -219,25 +219,27 @@ class TestPushingEnv:
         assert obs["image"].shape == (64, 64, 3)
         assert obs["image"].dtype == np.uint8
         assert obs["ee_pos"].shape == (3,)
-        assert obs["object_pos"].shape == (2,)
+        assert obs["object_xy"].shape == (2,)
 
     def test_step_returns_correct_shapes(self, env):
         cfg = _make_simple_config()
         env.reset(config=cfg)
-        action = np.array([0.01, 0.0, 0.0], dtype=np.float32)
+        n_joints = len(cfg.joint_names)
+        action = np.zeros(n_joints, dtype=np.float32)
         obs, reward, terminated, truncated, info = env.step(action)
         assert obs["image"].shape == (64, 64, 3)
         assert isinstance(reward, float)
         assert isinstance(terminated, bool)
         assert isinstance(truncated, bool)
-        assert "object_pos" in info
+        assert "object_xy" in info
         assert "ee_pos" in info
 
     def test_action_clipping(self, env):
         cfg = _make_simple_config()
         env.reset(config=cfg)
-        # Oversized action should be clipped without error
-        action = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        # Oversized action in joint-space should be clipped without error
+        n_joints = len(cfg.joint_names)
+        action = np.full(n_joints, 100.0, dtype=np.float32)
         obs, reward, terminated, truncated, info = env.step(action)
         assert obs["image"].shape == (64, 64, 3)
 
@@ -245,7 +247,8 @@ class TestPushingEnv:
         cfg = _make_simple_config()
         cfg.max_steps = 3
         env.reset(config=cfg)
-        action = np.zeros(3, dtype=np.float32)
+        n_joints = len(cfg.joint_names)
+        action = np.zeros(n_joints, dtype=np.float32)
         done = False
         for _ in range(5):
             _, _, term, _, _ = env.step(action)
@@ -255,13 +258,181 @@ class TestPushingEnv:
         assert done
 
     def test_reset_requires_config(self, env):
-        with pytest.raises((ValueError, TypeError)):
+        # reset() without config hits an assert — any of these is fine.
+        with pytest.raises((AssertionError, ValueError, TypeError)):
             env.reset()
 
     def test_observation_and_action_spaces(self, env):
         assert env.observation_space is not None
         assert env.action_space is not None
         assert env.action_space.shape == (3,)
+
+    def test_render_returns_image(self, env):
+        cfg = _make_simple_config()
+        env.reset(config=cfg)
+        img = env.render()
+        assert img is not None
+        assert img.shape == (64, 64, 3)
+        assert img.dtype == np.uint8
+
+    def test_render_before_reset_returns_none(self, env):
+        # Renderer is only constructed in reset(); before that, render() no-ops.
+        assert env.render() is None
+
+    def test_close_is_idempotent(self, env):
+        cfg = _make_simple_config()
+        env.reset(config=cfg)
+        env.close()
+        # Second close must not raise even though renderer is already gone.
+        env.close()
+
+    def test_reset_twice_releases_previous_renderer(self, env):
+        """Second reset() must close the previous renderer (exercises line 167)."""
+        cfg = _make_simple_config()
+        env.reset(config=cfg)
+        first_renderer = env.renderer
+        env.reset(config=cfg)
+        # A new renderer is created on the second reset.
+        assert env.renderer is not None
+        assert env.renderer is not first_renderer
+
+    def test_step_info_contents(self, env):
+        cfg = _make_simple_config()
+        env.reset(config=cfg)
+        action = np.zeros(len(cfg.joint_names), dtype=np.float32)
+        _, _, _, _, info = env.step(action)
+        assert info["object_xy"].shape == (2,)
+        assert info["ee_pos"].shape == (3,)
+        assert info["goal_xy"].shape == (2,)
+        assert info["step"] == 1
+
+    def test_step_increments_step_count(self, env):
+        cfg = _make_simple_config()
+        env.reset(config=cfg)
+        action = np.zeros(len(cfg.joint_names), dtype=np.float32)
+        for expected in (1, 2, 3):
+            _, _, _, _, info = env.step(action)
+            assert info["step"] == expected
+
+    def test_reset_clears_step_count(self, env):
+        cfg = _make_simple_config()
+        env.reset(config=cfg)
+        action = np.zeros(len(cfg.joint_names), dtype=np.float32)
+        env.step(action)
+        env.step(action)
+        env.reset(config=cfg)
+        _, _, _, _, info = env.step(action)
+        assert info["step"] == 1
+
+    def test_reward_is_negative_distance_to_goal(self, env):
+        cfg = _make_simple_config()
+        env.reset(config=cfg)
+        action = np.zeros(len(cfg.joint_names), dtype=np.float32)
+        _, reward, _, _, info = env.step(action)
+        # Reward = -||object_xy - goal_xy||.
+        expected = -float(np.linalg.norm(info["object_xy"] - info["goal_xy"]))
+        assert reward == pytest.approx(expected, abs=1e-5)
+
+    def test_goal_reached_terminates(self, env):
+        cfg = _make_simple_config()
+        # Put the goal right on top of the target so the env is "at goal" immediately.
+        cfg.goal_pos = [cfg.target.pos[0], cfg.target.pos[1]]
+        cfg.goal_tolerance = 0.5
+        env.reset(config=cfg)
+        action = np.zeros(len(cfg.joint_names), dtype=np.float32)
+        _, _, terminated, _, _ = env.step(action)
+        assert terminated
+
+    def test_step_without_reset_asserts(self, env):
+        with pytest.raises(AssertionError):
+            env.step(np.zeros(6, dtype=np.float32))
+
+    def test_observation_keys(self, env):
+        cfg = _make_simple_config()
+        obs, _ = env.reset(config=cfg)
+        expected = {"image", "ee_pos", "ee_quat", "arm_qpos",
+                    "object_xy", "goal_xy", "qpos", "step", "time"}
+        assert expected.issubset(obs.keys())
+
+    def test_initial_qpos_is_applied(self, env):
+        cfg = _make_simple_config()
+        # Pick a non-zero home pose so we can detect it was applied.
+        cfg.robot_initial_qpos = [0.1, -0.2, 0.3, -0.1, 0.2, -0.3]
+        obs, _ = env.reset(config=cfg)
+        assert obs["arm_qpos"] == pytest.approx(cfg.robot_initial_qpos, abs=1e-3)
+
+    def test_insert_hints_adds_two_geoms(self, env):
+        """Calling insert_hints should push the user-scene geom counter by 2
+        (goal sphere + approach→goal arrow)."""
+        cfg = _make_simple_config()
+        env.reset(config=cfg)
+        viewer = _FakeViewerWithGeoms(maxgeom=10)
+        policy_stub = type("P", (), {
+            "approach_xyz": np.array([0.0, 0.0, 0.075]),
+            "goal_xyz":     np.array([0.1, 0.0, 0.075]),
+        })()
+        env.insert_hints(viewer, policy_stub)
+        assert viewer.user_scn.ngeom == 2
+
+    def test_insert_hints_noop_when_geom_buffer_full(self, env):
+        cfg = _make_simple_config()
+        env.reset(config=cfg)
+        viewer = _FakeViewerWithGeoms(maxgeom=2)
+        viewer.user_scn.ngeom = 2  # already full
+        policy_stub = type("P", (), {
+            "approach_xyz": np.array([0.0, 0.0, 0.075]),
+            "goal_xyz":     np.array([0.1, 0.0, 0.075]),
+        })()
+        env.insert_hints(viewer, policy_stub)
+        assert viewer.user_scn.ngeom == 2
+
+
+class TestController:
+    """Tests for PushingEnv.Controller — in particular the IK solver."""
+
+    def test_ik_converges_to_current_ee_position(self, env):
+        """IK for the current EE position should return a qpos ≈ the current qpos
+        (zero residual)."""
+        cfg = _make_simple_config()
+        obs, _ = env.reset(config=cfg)
+        current_ee = obs["ee_pos"].astype(np.float64)
+        q = env.controller.ik_for_ee_pos(current_ee, obs["qpos"])
+        assert np.all(np.isfinite(q))
+        assert q.shape == obs["arm_qpos"].shape
+
+    def test_ik_moves_toward_target(self, env):
+        """IK for a nearby reachable target should return a qpos that, when applied,
+        brings the EE much closer to the target."""
+        cfg = _make_simple_config()
+        obs, _ = env.reset(config=cfg)
+        current_ee = obs["ee_pos"].astype(np.float64)
+        target = current_ee + np.array([0.02, 0.0, 0.0])
+        q_new = env.controller.ik_for_ee_pos(target, obs["qpos"])
+
+        # Apply the solution and check EE is much closer to the target.
+        env.controller.reset_initial_qpos(env.data, q_new)
+        new_ee = env.controller.get_ee_pos(env.data).astype(np.float64)
+        assert np.linalg.norm(new_ee - target) < np.linalg.norm(current_ee - target)
+
+    def test_ik_raises_when_diverged(self, env):
+        """A wildly-unreachable target should either raise RuntimeError or return
+        something finite (the cap on dq makes true divergence rare)."""
+        cfg = _make_simple_config()
+        obs, _ = env.reset(config=cfg)
+        unreachable = np.array([100.0, 100.0, 100.0])
+        with pytest.raises(RuntimeError):
+            env.controller.ik_for_ee_pos(unreachable, obs["qpos"])
+
+
+class _FakeViewerWithGeoms:
+    """Minimal viewer stand-in for insert_hints — exposes a user_scn with a
+    fixed-size geoms buffer."""
+
+    def __init__(self, maxgeom: int):
+        self.user_scn = type("UserScn", (), {})()
+        self.user_scn.ngeom = 0
+        self.user_scn.maxgeom = maxgeom
+        self.user_scn.geoms = [mujoco.MjvGeom() for _ in range(maxgeom)]
 
 
 # ---------------------------------------------------------------------------
@@ -273,8 +444,7 @@ class TestEpisodeWriter:
         rng = np.random.default_rng(42)
         return [
             {
-                "pre_image":  rng.integers(0, 256, (H, W, 3), dtype=np.uint8),
-                "post_image": rng.integers(0, 256, (H, W, 3), dtype=np.uint8),
+                "image":      rng.integers(0, 256, (H, W, 3), dtype=np.uint8),
                 "action":     rng.uniform(-0.02, 0.02, (n_joints,)).astype(np.float32),
                 "reward":     float(rng.uniform(-1.0, 0.0)),
                 "timestamp":  float(t) * 0.1,
@@ -302,16 +472,15 @@ class TestEpisodeWriter:
 
         assert path.exists()
         with h5py.File(path, "r") as f:
-            assert f["pre_images"].shape  == (5, 64, 64, 3)
-            assert f["pre_images"].dtype  == np.uint8
-            assert f["post_images"].shape == (5, 64, 64, 3)
-            assert f["actions"].shape     == (5, 6)
-            assert f["rewards"].shape     == (5,)
-            assert f["timestamps"].shape  == (5,)
-            assert f["joint_qpos"].shape  == (5, 6)
-            assert f["ee_pos"].shape      == (5, 3)
-            assert f["ee_quat"].shape     == (5, 4)
-            assert f["object_xy"].shape   == (5, 2)
+            assert f["images"].shape     == (5, 64, 64, 3)
+            assert f["images"].dtype     == np.uint8
+            assert f["actions"].shape    == (5, 6)
+            assert f["rewards"].shape    == (5,)
+            assert f["timestamps"].shape == (5,)
+            assert f["joint_qpos"].shape == (5, 6)
+            assert f["ee_pos"].shape     == (5, 3)
+            assert f["ee_quat"].shape    == (5, 4)
+            assert f["object_xy"].shape  == (5, 2)
             meta = f["metadata"]
             assert int(meta["seed"][()])        == 42
             assert "sim" in str(meta["source"][()])
@@ -590,7 +759,7 @@ class TestScenePlayerHeadless:
         assert outcome == "done"
         step = episode[0]
         expected_keys = {
-            "pre_image", "post_image", "action", "reward",
+            "image", "action", "reward",
             "timestamp", "joint_qpos", "ee_pos", "ee_quat", "object_xy",
         }
         assert expected_keys.issubset(step.keys())

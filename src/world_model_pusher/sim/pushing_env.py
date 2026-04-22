@@ -136,7 +136,7 @@ class PushingEnv(gym.Env):
                 low=-2.0, high=2.0, shape=(3,), dtype=np.float32),
             "ee_quat": spaces.Box(
                 low=-1.0, high=1.0, shape=(4,), dtype=np.float32),
-            "object_pos": spaces.Box(
+            "object_xy": spaces.Box(
                 low=-2.0, high=2.0, shape=(2,), dtype=np.float32),
         })
         self.action_space = spaces.Box(

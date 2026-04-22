@@ -55,8 +55,7 @@ class HDF5EpisodeWriter:
     Each episode is stored in ``output_dir/episode_NNNNN.hdf5`` with the
     structure::
 
-        pre_images   (T, H, W, 3)    uint8
-        post_images  (T, H, W, 3)    uint8
+        images       (T, H, W, 3)    uint8
         actions      (T, n_joints)   float32
         rewards      (T,)            float32
         timestamps   (T,)            float32   seconds since episode start
@@ -89,7 +88,7 @@ class HDF5EpisodeWriter:
         ----------
         episode:
             List of dicts with keys ``pre_image`` (H,W,3 uint8),
-            ``post_image`` (H,W,3 uint8), ``action`` (3,),
+            ``image`` (H,W,3 uint8), ``action`` (3,),
             ``reward`` (float).
         metadata:
             Optional dict. May include ``config`` (SceneConfig or dict),
@@ -105,27 +104,25 @@ class HDF5EpisodeWriter:
         def _stack(key: str, dtype=np.float32) -> np.ndarray:
             return np.stack([np.asarray(s[key], dtype=dtype) for s in episode])
 
-        actions     = _stack("action")
-        rewards     = np.array([float(s["reward"]) for s in episode], dtype=np.float32)
-        timestamps  = np.array([float(s["timestamp"]) for s in episode], dtype=np.float32)
-        joint_qpos  = _stack("joint_qpos")
-        ee_pos      = _stack("ee_pos")
-        ee_quat     = _stack("ee_quat")
-        object_xy   = _stack("object_xy")
-        pre_images  = np.stack([s["pre_image"]  for s in episode], axis=0).astype(np.uint8)
-        post_images = np.stack([s["post_image"] for s in episode], axis=0).astype(np.uint8)
+        actions    = _stack("action")
+        rewards    = np.array([float(s["reward"]) for s in episode], dtype=np.float32)
+        timestamps = np.array([float(s["timestamp"]) for s in episode], dtype=np.float32)
+        joint_qpos = _stack("joint_qpos")
+        ee_pos     = _stack("ee_pos")
+        ee_quat    = _stack("ee_quat")
+        object_xy  = _stack("object_xy")
+        images     = np.stack([s["image"]  for s in episode], axis=0).astype(np.uint8)
 
         ep_path = self.output_dir / f"episode_{self._ep_count:05d}.hdf5"
         with h5py.File(ep_path, "w") as f:
-            f.create_dataset("pre_images",  data=pre_images,  compression="gzip", compression_opts=4)
-            f.create_dataset("post_images", data=post_images, compression="gzip", compression_opts=4)
-            f.create_dataset("actions",     data=actions)
-            f.create_dataset("rewards",     data=rewards)
-            f.create_dataset("timestamps",  data=timestamps)
-            f.create_dataset("joint_qpos",  data=joint_qpos)
-            f.create_dataset("ee_pos",      data=ee_pos)
-            f.create_dataset("ee_quat",     data=ee_quat)
-            f.create_dataset("object_xy",   data=object_xy)
+            f.create_dataset("images",     data=images,  compression="gzip", compression_opts=4)
+            f.create_dataset("actions",    data=actions)
+            f.create_dataset("rewards",    data=rewards)
+            f.create_dataset("timestamps", data=timestamps)
+            f.create_dataset("joint_qpos", data=joint_qpos)
+            f.create_dataset("ee_pos",     data=ee_pos)
+            f.create_dataset("ee_quat",    data=ee_quat)
+            f.create_dataset("object_xy",  data=object_xy)
 
             meta_grp = f.create_group("metadata")
             if metadata is not None:
@@ -154,7 +151,7 @@ class RerunEpisodeWriter:
     Writes episodes to Rerun ``.rrd`` files (one per episode).
 
     Each episode is stored in ``output_dir/episode_NNNNN.rrd``. Images are
-    logged as ``camera/pre`` and ``camera/post``; scalar/vector signals use
+    logged as ``camera/image``; scalar/vector signals use
     the per-component ``Scalars`` archetype. Metadata is attached on the
     recording properties entity so it is visible in the viewer.
     """
@@ -202,8 +199,7 @@ class RerunEpisodeWriter:
             rec.set_time("step", sequence=i)
             rec.set_time("time", duration=float(step["timestamp"]))
 
-            rec.log("camera/pre",  rr.Image(np.asarray(step["pre_image"],  dtype=np.uint8)))
-            rec.log("camera/post", rr.Image(np.asarray(step["post_image"], dtype=np.uint8)))
+            rec.log("camera/image",  rr.Image(np.asarray(step["image"],  dtype=np.uint8)))
 
             action = np.asarray(step["action"], dtype=np.float32)
             rec.log("action", rr.Scalars(action.tolist()))
@@ -386,8 +382,7 @@ class ScenePlayer:
         action, prev_state = self.policy.act(obs)
         next_obs, reward, terminated, truncated, _ = self.env.step(action)
         step = {
-            "pre_image":  obs["image"],
-            "post_image": next_obs["image"],
+            "image":      obs["image"],
             "action":     np.asarray(action, dtype=np.float32),
             "reward":     float(reward),
             "timestamp":  float(next_obs["time"]),
@@ -420,8 +415,8 @@ class ScenePlayer:
             if step_delay > 0:
                 time.sleep(step_delay)
 
-            # if terminated or truncated or self.policy.state == "done":
-            #     break
+            if terminated or truncated or self.policy.state == "done":
+                break
 
     def run_headless(self, max_steps: int | None = None) -> tuple[list[dict[str, Any]], str]:
         """Run until completion, robust to simulation crashes.

@@ -63,8 +63,8 @@ evaluation:
   video_dir: "videos"
 
 sim:
-  difficulty: "easy"
-  render_size: "128x128"
+  difficulty: "medium"
+  render_size: "512x512"
   output_dir: "data/generated-pushes/"
-  format: "hdf5"  # "hdf5" or "rerun"
+  format: "rerun"  # "hdf5" or "rerun"
   table_size: [0.60, 0.5, 0.02]  # [half_x, half_y, half_z]
