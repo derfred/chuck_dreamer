@@ -8,14 +8,12 @@ from __future__ import annotations
 import pickle
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import mlx.core as mx
 import numpy as np
 
-if TYPE_CHECKING:
-  from .episode_loader import EpisodeProcessor, Progress
-
+from .episode_loader import StateVectorProcessor, EpisodeProcessor, Progress, iter_episodes
 
 Episode = dict[str, np.ndarray]
 
@@ -32,6 +30,7 @@ class ReplayBuffer:
     self,
     capacity_steps: int,
     min_episode_len: int,
+    processor: EpisodeProcessor | None = None,
     seed: int | None = None,
   ) -> None:
     if min_episode_len < 1:
@@ -44,6 +43,7 @@ class ReplayBuffer:
     self._rng = np.random.default_rng(seed)
 
     self._current: dict[str, list[Any]] | None = None
+    self._sim_processor = processor if processor is not None else StateVectorProcessor()
 
   # ---------------------------------------------------------------------
   # Write side — online collection
@@ -114,10 +114,10 @@ class ReplayBuffer:
       if key not in episode:
         raise ValueError(f"episode missing required key: {key!r}")
 
-    obs = np.asarray(episode["obs"], dtype=np.float32)
+    obs    = np.asarray(episode["obs"], dtype=np.float32)
     action = np.asarray(episode["action"], dtype=np.float32)
     reward = np.asarray(episode["reward"], dtype=np.float32)
-    done = np.asarray(episode["done"], dtype=bool)
+    done   = np.asarray(episode["done"], dtype=bool)
 
     T = action.shape[0]
     if obs.shape[0] != T + 1:
@@ -223,11 +223,14 @@ class ReplayBuffer:
   # Load sim-collected episodes
   # ---------------------------------------------------------------------
 
+  def add_sim_episode(self, raw: dict[str, Any]) -> None:
+    episode = self._sim_processor(raw)
+    self.add_episode(episode)
+
   def load_sim_episodes(
     self,
     directory: str | Path,
     format: str = "hdf5",
-    processor: EpisodeProcessor | None = None,
     progress: "Progress" = False,
   ) -> int:
     """Ingest episodes from a sim ``EpisodeWriter`` output directory.
@@ -242,14 +245,11 @@ class ReplayBuffer:
     for a tqdm/print progress bar or a ``(i, total, path)`` callable
     for custom reporting.
     """
-    from .episode_loader import StateVectorProcessor, iter_episodes
 
-    proc = processor if processor is not None else StateVectorProcessor()
     count = 0
     for raw in iter_episodes(directory, format=format, progress=progress):
-      episode = proc(raw)
       before = self.num_episodes
-      self.add_episode(episode)
+      self.add_sim_episode(raw)
       if self.num_episodes > before:
         count += 1
     return count

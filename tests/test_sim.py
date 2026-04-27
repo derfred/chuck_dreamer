@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 from omegaconf import OmegaConf
 
-from chuck_dreamer.policy import Action
 from chuck_dreamer.sim import (
     CameraConfig,
     EpisodeWriter,
@@ -23,6 +22,7 @@ from chuck_dreamer.sim import (
     SceneGenerator,
     ScenePlayer,
 )
+from chuck_dreamer.policy import Action
 
 
 # ---------------------------------------------------------------------------
@@ -427,8 +427,8 @@ class TestPolicyInsertHints:
     cfg = _make_simple_config()
     cfg.target.pos = [0.05, 0.00, 0.03]
     cfg.goal_pos = [0.20, 0.00]
-    p = RandomPushPolicy(_StubController())
-    p.reset(cfg)
+    p = RandomPushPolicy()
+    p.reset(_StubController(), cfg)
     p.state = "ready"
     return p
 
@@ -460,19 +460,16 @@ class TestPolicyInsertHints:
 class TestEpisodeWriter:
   def _make_fake_episode(self, T: int = 5, H: int = 64, W: int = 64, n_joints: int = 6):
     rng = np.random.default_rng(42)
-    return [
-        {
-            "image":      rng.integers(0, 256, (H, W, 3), dtype=np.uint8),
-            "action":     rng.uniform(-0.02, 0.02, (n_joints,)).astype(np.float32),
-            "reward":     float(rng.uniform(-1.0, 0.0)),
-            "timestamp":  float(t) * 0.1,
-            "joint_qpos": rng.uniform(-1.0, 1.0, (n_joints,)).astype(np.float32),
-            "ee_pos":     rng.uniform(-0.5, 0.5, (3,)).astype(np.float32),
-            "ee_quat":    np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
-            "object_xy":  rng.uniform(-0.3, 0.3, (2,)).astype(np.float32),
-        }
-        for t in range(T)
-    ]
+    return {
+        "image":      rng.integers(0, 256, (T, H, W, 3), dtype=np.uint8),
+        "action":     rng.uniform(-0.02, 0.02, (T, n_joints)).astype(np.float32),
+        "reward":     rng.uniform(-1.0, 0.0, (T,)).astype(np.float32),
+        "timestamp":  (np.arange(T) * 0.1).astype(np.float32),
+        "joint_qpos": rng.uniform(-1.0, 1.0, (T, n_joints)).astype(np.float32),
+        "ee_pos":     rng.uniform(-0.5, 0.5, (T, 3)).astype(np.float32),
+        "ee_quat":    np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (T, 1)),
+        "object_xy":  rng.uniform(-0.3, 0.3, (T, 2)).astype(np.float32),
+    }
 
   def test_write_and_read_back(self, tmp_path):
     writer = EpisodeWriter(str(tmp_path), format="hdf5")
@@ -596,8 +593,8 @@ def _fresh_policy():
   # Put goal clearly separated from target to keep push_dir well-defined.
   cfg.target.pos = [0.05, 0.00, 0.03]
   cfg.goal_pos = [0.20, 0.00]
-  p = RandomPushPolicy(_StubController())
-  p.reset(cfg)
+  p = RandomPushPolicy()
+  p.reset(_StubController(), cfg)
   return p
 
 
@@ -703,6 +700,10 @@ class _FakeEnv:
     self.n_joints     = n_joints
     self._step        = 0
     self.reset_calls  = 0
+    self.controller   = _StubController()
+
+  def generate_scene(self):
+    return _make_simple_config()
 
   def reset(self, *, scene=None, seed=None):
     self.reset_calls += 1
@@ -730,6 +731,12 @@ class _FakePolicy:
     self.n_joints = n_joints
     self.act_calls = 0
     self.insert_hints_calls = 0
+    self.reset_calls = 0
+
+  def reset(self, controller, scene):
+    self.reset_calls += 1
+    self.state = self._states[0] if self._states else "initial"
+    self._idx = 0
 
   def act(self, obs):
     prev = None
@@ -764,7 +771,9 @@ class TestScenePlayerHeadless:
   def _make_player(self, env, policy):
     cfg = _make_simple_config()
     cfg.max_steps = 20
-    return ScenePlayer(env, policy, cfg)
+    player = ScenePlayer(cfg, env, policy)
+    player.reset()
+    return player
 
   def test_auto_advances_ready_to_approach(self):
     env    = _FakeEnv(terminate_at=None)
@@ -775,24 +784,26 @@ class TestScenePlayerHeadless:
     assert outcome == "done"
     # The player flipped ready → approach before calling act().
     assert policy.state == "done"
-    assert len(episode) >= 1
+    assert episode is not None
+    assert episode["action"].shape[0] >= 1
 
-  def test_step_dict_has_all_required_fields(self):
+  def test_episode_has_all_required_fields(self):
     env    = _FakeEnv()
     policy = _FakePolicy(["approach", "done"])
     player = self._make_player(env, policy)
 
     episode, outcome = player.run_headless(max_steps=5)
     assert outcome == "done"
-    step = episode[0]
+    assert episode is not None
     expected_keys = {
         "image", "action", "reward",
         "timestamp", "joint_qpos", "ee_pos", "ee_quat", "object_xy",
     }
-    assert expected_keys.issubset(step.keys())
-    assert step["action"].dtype == np.float32
-    assert step["ee_quat"].shape == (4,)
-    assert step["object_xy"].shape == (2,)
+    assert expected_keys.issubset(episode.keys())
+    T = episode["action"].shape[0]
+    assert episode["action"].dtype == np.float32
+    assert episode["ee_quat"].shape == (T, 4)
+    assert episode["object_xy"].shape == (T, 2)
 
   def test_outcome_timeout(self):
     # Policy never reaches "done"; env never terminates.
@@ -802,7 +813,8 @@ class TestScenePlayerHeadless:
 
     episode, outcome = player.run_headless(max_steps=3)
     assert outcome == "timeout"
-    assert len(episode) == 3
+    assert episode is not None
+    assert episode["action"].shape[0] == 3
 
   def test_outcome_terminated(self):
     # Env terminates on step 2; policy never reaches "done".
@@ -812,7 +824,8 @@ class TestScenePlayerHeadless:
 
     episode, outcome = player.run_headless(max_steps=10)
     assert outcome == "terminated"
-    assert len(episode) == 2
+    assert episode is not None
+    assert episode["action"].shape[0] == 2
 
   def test_outcome_crashed_returns_partial_data(self):
     env    = _FakeEnv(crash_at=3)
@@ -822,13 +835,14 @@ class TestScenePlayerHeadless:
     episode, outcome = player.run_headless(max_steps=10)
     assert outcome == "crashed"
     # Two successful steps happened before the crash on step 3.
-    assert len(episode) == 2
+    assert episode is not None
+    assert episode["action"].shape[0] == 2
 
 
 class TestScenePlayerInteractive:
   def _make_player(self, env, policy):
     cfg = _make_simple_config()
-    return ScenePlayer(env, policy, cfg)
+    return ScenePlayer(cfg, env, policy)
 
   def test_shows_hints_only_while_ready(self):
     env    = _FakeEnv()

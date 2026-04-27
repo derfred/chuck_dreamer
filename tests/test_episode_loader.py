@@ -26,25 +26,26 @@ from chuck_dreamer.sim.data_collection import EpisodeWriter  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def _make_raw_step(t: int, img_hw: tuple[int, int] = (16, 16)) -> dict:
-  """One step in the dict-of-arrays shape the sim writers consume."""
+def _make_raw_episode(T: int, img_hw: tuple[int, int] = (16, 16)) -> dict:
+  """An episode in the dict-of-stacked-arrays shape the sim writers consume."""
   H, W = img_hw
+  ts = np.arange(T)
   return {
-    "image": np.full((H, W, 3), t, dtype=np.uint8),
-    "action": np.array([0.1 * t, 0.2 * t, 0.3 * t], dtype=np.float32),
-    "reward": float(t),
-    "timestamp": 0.05 * t,
-    "joint_qpos": np.array([0.1] * 6, dtype=np.float32) * t,
-    "ee_pos": np.array([0.1, 0.2, 0.3], dtype=np.float32) * t,
-    "ee_quat": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
-    "object_xy": np.array([0.5, 0.5], dtype=np.float32),
+    "image":      np.stack([np.full((H, W, 3), t, dtype=np.uint8) for t in ts]),
+    "action":     np.stack([np.array([0.1 * t, 0.2 * t, 0.3 * t], dtype=np.float32) for t in ts]),
+    "reward":     ts.astype(np.float32),
+    "timestamp":  (ts * 0.05).astype(np.float32),
+    "joint_qpos": np.stack([np.full((6,), 0.1 * t, dtype=np.float32) for t in ts]),
+    "ee_pos":     np.stack([np.array([0.1, 0.2, 0.3], dtype=np.float32) * t for t in ts]),
+    "ee_quat":    np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (T, 1)),
+    "object_xy":  np.tile(np.array([0.5, 0.5], dtype=np.float32), (T, 1)),
   }
 
 
 def _write_sim_episode(dir_path: Path, fmt: str, T: int = 20) -> None:
   writer = EpisodeWriter(str(dir_path), format=fmt)
   writer.write_episode(
-    [_make_raw_step(t) for t in range(T)],
+    _make_raw_episode(T),
     metadata={"seed": 7, "source": "test", "outcome": "done", "goal_xy": [0.1, 0.2]},
   )
 
@@ -183,8 +184,8 @@ def test_replay_buffer_loads_rerun_directory(tmp_path):
   _write_sim_episode(tmp_path, "rerun", T=20)
   _write_sim_episode(tmp_path, "rerun", T=20)
 
-  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
-  n = buf.load_sim_episodes(tmp_path, format="rerun", processor=ImageProcessor())
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, processor=ImageProcessor(), seed=0)
+  n = buf.load_sim_episodes(tmp_path, format="rerun")
 
   assert n == 2
   ep = buf._episodes[0]
@@ -215,7 +216,7 @@ def test_load_sim_episodes_skips_too_short_episodes(tmp_path):
   # T=3 raw steps → 2 actions after drop-last. min_episode_len=5 filters it.
   writer = EpisodeWriter(str(tmp_path), format="hdf5")
   writer.write_episode(
-    [_make_raw_step(t) for t in range(3)],
+    _make_raw_episode(3),
     metadata={"seed": 0, "source": "test"},
   )
   buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)

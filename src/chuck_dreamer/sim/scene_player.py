@@ -12,6 +12,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+RawEpisode = dict[str, np.ndarray]
+
+
+_STEP_KEYS = (
+  "image", "action", "reward", "timestamp",
+  "joint_qpos", "ee_pos", "ee_quat", "object_xy",
+)
+
+
+def _stack_steps(steps: list[dict[str, Any]]) -> RawEpisode:
+  """Stack a list of per-step dicts into a dict of T-stacked arrays."""
+  return {k: np.stack([np.asarray(s[k]) for s in steps], axis=0) for k in _STEP_KEYS}
+
+
 class ScenePlayer:
   """
   Drives a PushingEnv with a RandomPushPolicy.
@@ -20,10 +34,25 @@ class ScenePlayer:
   headless episode collector (generate-scenes).
   """
 
-  def __init__(self, env, policy: "RandomPushPolicy", scene: SceneConfig) -> None:
+  def __init__(self, config, env, policy: "RandomPushPolicy") -> None:
+    self.config = config
     self.env    = env
     self.policy = policy
+
+  @property
+  def state(self) -> str | None:
+    return getattr(self.policy, "state", None)
+
+  def advance_from_ready(self) -> None:
+    if self.state == "ready":
+      self.policy.state = "approach"
+
+  def reset(self) -> SceneConfig:
+    scene: SceneConfig = self.env.generate_scene()
     self.scene = scene
+    self.env.reset(scene=scene)
+    self.policy.reset(self.env.controller, scene)
+    return scene
 
   def _step_once(self, obs: dict[str, np.ndarray]) -> tuple[dict[str, Any], dict[str, np.ndarray], bool, bool, str | None]:
     action, prev_state = self.policy.act(obs)
@@ -63,7 +92,7 @@ class ScenePlayer:
       if terminated or truncated or self.policy.state == "done":
         break
 
-  def run_headless(self, max_steps: int) -> tuple[list[dict[str, Any]], str]:
+  def run_headless(self, max_steps: int) -> tuple[RawEpisode | None, str]:
     """Run until completion, robust to simulation crashes.
 
     Auto-advances ``ready → approach`` (no manual step). Does not render
@@ -71,13 +100,16 @@ class ScenePlayer:
     ``env.step`` (e.g. IK non-convergence) and returns the data
     collected up to that point.
 
-    Returns ``(episode_data, outcome)`` where outcome is one of:
+    Returns ``(episode, outcome)`` where ``episode`` is a ``RawEpisode``
+    (dict of T-stacked arrays) or ``None`` if no steps were collected,
+    and ``outcome`` is one of:
       - "done":       policy reached its done state
       - "terminated": env signaled terminated/truncated
       - "timeout":    ``max_steps`` reached
       - "crashed":    an exception was raised during stepping
     """
-    episode: list[dict[str, Any]] = []
+    steps: list[dict[str, Any]] = []
+    outcome = "timeout"
     try:
       obs, _ = self.env.reset(scene=self.scene)
       for _ in range(max_steps):
@@ -85,13 +117,18 @@ class ScenePlayer:
           self.policy.state = "approach"
 
         step, obs, terminated, truncated, _ = self._step_once(obs)
-        episode.append(step)
+        steps.append(step)
 
         if self.policy.state == "done":
-          return episode, "done"
+          outcome = "done"
+          break
         if terminated or truncated:
-          return episode, "terminated"
-      return episode, "timeout"
+          outcome = "terminated"
+          break
     except Exception as e:
-      logger.warning("Simulation crashed after %d steps: %s", len(episode), e)
-      return episode, "crashed"
+      logger.warning("Simulation crashed after %d steps: %s", len(steps), e)
+      outcome = "crashed"
+
+    if not steps:
+      return None, outcome
+    return _stack_steps(steps), outcome

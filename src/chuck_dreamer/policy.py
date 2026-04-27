@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -24,6 +24,6 @@ class Action:
 
 
 class Policy(Protocol):
-  def reset(self, scene: SceneConfig) -> None: ...
+  def reset(self, controller: Any, scene: SceneConfig) -> None: ...
   def act(self, obs: dict[str, np.ndarray]) -> tuple[Action, str | None]: ...
   def is_done(self) -> bool: ...

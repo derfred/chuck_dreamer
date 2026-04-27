@@ -79,7 +79,7 @@ class HDF5EpisodeWriter:
 
     def write_episode(
         self,
-        episode: list[dict[str, Any]],
+        episode: dict[str, np.ndarray],
         metadata: dict[str, Any] | None = None,
     ) -> Path:
         """
@@ -88,9 +88,10 @@ class HDF5EpisodeWriter:
         Parameters
         ----------
         episode:
-            List of dicts with keys ``pre_image`` (H,W,3 uint8),
-            ``image`` (H,W,3 uint8), ``action`` (3,),
-            ``reward`` (float).
+            Dict of T-stacked arrays with keys ``image`` (T,H,W,3 uint8),
+            ``action`` (T,n_joints), ``reward`` (T,), ``timestamp`` (T,),
+            ``joint_qpos`` (T,n_joints), ``ee_pos`` (T,3), ``ee_quat`` (T,4),
+            ``object_xy`` (T,2).
         metadata:
             Optional dict. May include ``config`` (SceneConfig or dict),
             ``seed`` (int), ``source`` (str).
@@ -99,20 +100,17 @@ class HDF5EpisodeWriter:
         -------
         Path to the written file.
         """
-        if not episode:
+        if not episode or episode["action"].shape[0] == 0:
             raise ValueError("episode must not be empty")
 
-        def _stack(key: str, dtype=np.float32) -> np.ndarray:
-            return np.stack([np.asarray(s[key], dtype=dtype) for s in episode])
-
-        actions    = _stack("action")
-        rewards    = np.array([float(s["reward"]) for s in episode], dtype=np.float32)
-        timestamps = np.array([float(s["timestamp"]) for s in episode], dtype=np.float32)
-        joint_qpos = _stack("joint_qpos")
-        ee_pos     = _stack("ee_pos")
-        ee_quat    = _stack("ee_quat")
-        object_xy  = _stack("object_xy")
-        images     = np.stack([s["image"]  for s in episode], axis=0).astype(np.uint8)
+        actions    = np.asarray(episode["action"],     dtype=np.float32)
+        rewards    = np.asarray(episode["reward"],     dtype=np.float32)
+        timestamps = np.asarray(episode["timestamp"],  dtype=np.float32)
+        joint_qpos = np.asarray(episode["joint_qpos"], dtype=np.float32)
+        ee_pos     = np.asarray(episode["ee_pos"],     dtype=np.float32)
+        ee_quat    = np.asarray(episode["ee_quat"],    dtype=np.float32)
+        object_xy  = np.asarray(episode["object_xy"],  dtype=np.float32)
+        images     = np.asarray(episode["image"],      dtype=np.uint8)
 
         ep_path = self.output_dir / f"episode_{self._ep_count:05d}.hdf5"
         with h5py.File(ep_path, "w") as f:
@@ -165,10 +163,10 @@ class RerunEpisodeWriter:
 
     def write_episode(
         self,
-        episode: list[dict[str, Any]],
+        episode: dict[str, np.ndarray],
         metadata: dict[str, Any] | None = None,
     ) -> Path:
-        if not episode:
+        if not episode or episode["action"].shape[0] == 0:
             raise ValueError("episode must not be empty")
 
         import rerun as rr
@@ -196,28 +194,27 @@ class RerunEpisodeWriter:
             for key, value in props.items():
                 rec.log(f"metadata/{key}", rr.TextDocument(value), static=True)
 
-        for i, step in enumerate(episode):
+        images     = np.asarray(episode["image"],      dtype=np.uint8)
+        actions    = np.asarray(episode["action"],     dtype=np.float32)
+        rewards    = np.asarray(episode["reward"],     dtype=np.float32)
+        timestamps = np.asarray(episode["timestamp"],  dtype=np.float32)
+        joint_qpos = np.asarray(episode["joint_qpos"], dtype=np.float32)
+        ee_pos     = np.asarray(episode["ee_pos"],     dtype=np.float32)
+        ee_quat    = np.asarray(episode["ee_quat"],    dtype=np.float32)
+        object_xy  = np.asarray(episode["object_xy"],  dtype=np.float32)
+
+        T = actions.shape[0]
+        for i in range(T):
             rec.set_time("step", sequence=i)
-            rec.set_time("time", duration=float(step["timestamp"]))
+            rec.set_time("time", duration=float(timestamps[i]))
 
-            rec.log("camera/image",  rr.Image(np.asarray(step["image"],  dtype=np.uint8)))
-
-            action = np.asarray(step["action"], dtype=np.float32)
-            rec.log("action", rr.Scalars(action.tolist()))
-
-            rec.log("reward", rr.Scalars(float(step["reward"])))
-
-            joint_qpos = np.asarray(step["joint_qpos"], dtype=np.float32)
-            rec.log("joint_qpos", rr.Scalars(joint_qpos.tolist()))
-
-            ee_pos = np.asarray(step["ee_pos"], dtype=np.float32)
-            rec.log("ee_pos", rr.Scalars(ee_pos.tolist()))
-
-            ee_quat = np.asarray(step["ee_quat"], dtype=np.float32)
-            rec.log("ee_quat", rr.Scalars(ee_quat.tolist()))
-
-            object_xy = np.asarray(step["object_xy"], dtype=np.float32)
-            rec.log("object_xy", rr.Scalars(object_xy.tolist()))
+            rec.log("camera/image",  rr.Image(images[i]))
+            rec.log("action",        rr.Scalars(actions[i].tolist()))
+            rec.log("reward",        rr.Scalars(float(rewards[i])))
+            rec.log("joint_qpos",    rr.Scalars(joint_qpos[i].tolist()))
+            rec.log("ee_pos",        rr.Scalars(ee_pos[i].tolist()))
+            rec.log("ee_quat",       rr.Scalars(ee_quat[i].tolist()))
+            rec.log("object_xy",     rr.Scalars(object_xy[i].tolist()))
 
         rec.save(str(ep_path))
         self._ep_count += 1
@@ -248,8 +245,8 @@ class RandomPushPolicy(Policy):
 
   state: str = "initial"  # "initial", "ready", "approach", "push", "done"
 
-  def __init__(self, controller) -> None:
-    self.controller = controller
+  def __init__(self) -> None:
+    self.controller: Any = None
     self.start_xyz: np.ndarray | None = None
 
   @property
@@ -347,10 +344,11 @@ class RandomPushPolicy(Policy):
   def _act_done(self, obs: dict[str, np.ndarray]) -> Action:
     return Action.from_qpos(obs["arm_qpos"])
 
-  def reset(self, scene: SceneConfig) -> None:
-    self.scene     = scene
-    self.state     = "initial"
-    self.start_xyz = None
+  def reset(self, controller, scene: SceneConfig) -> None:
+    self.controller = controller
+    self.scene      = scene
+    self.state      = "initial"
+    self.start_xyz  = None
 
   def act(self, obs: dict[str, np.ndarray]) -> tuple[Action, str | None]:
     cur_state  = self.state

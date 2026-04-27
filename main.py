@@ -78,19 +78,15 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
   outcome_counts = {"done": 0, "terminated": 0, "timeout": 0, "crashed": 0}
 
   env    = PushingEnv(cfg)
-  policy = RandomPushPolicy(env.controller)
+  policy = RandomPushPolicy()
+  player = ScenePlayer(cfg, env, policy)
   writer = EpisodeWriter(cfg.sim.output_dir, format=cfg.sim.format)
   for ep_idx in tqdm(range(episodes), desc="Collecting"):
-    scene  = env.generate_scene()
-    player = ScenePlayer(env, policy, scene)
-
-    env.reset(scene=scene)
-    policy.reset(scene)
-
+    scene                   = player.reset()
     episode_data, outcome   = player.run_headless(max_steps=cfg.sim.max_steps)
     outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
 
-    if not episode_data:
+    if episode_data is None:
       click.echo(f"[ep {ep_idx}] crashed on reset, skipping")
       continue
 
@@ -133,16 +129,13 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
 
   click.echo(f"difficulty={cfg.sim.difficulty}  seed={cfg.seed}")
   env    = PushingEnv(cfg)
-  scene  = env.generate_scene()
-  policy = RandomPushPolicy(env.controller)
-  player = ScenePlayer(env, policy, scene)
-
-  env.reset(scene=scene)
-  policy.reset(scene)
+  policy = RandomPushPolicy()
+  player = ScenePlayer(cfg, env, policy)
+  player.reset()
 
   def key_callback(keycode):
-    if keycode == 32 and policy.state == "ready":  # Space bar to start the push
-      policy.advance_from_ready()
+    if keycode == 32 and player.state == "ready":  # Space bar to start the push
+      player.advance_from_ready()
       print("Policy state changed: ready → approach")
     return True
 
