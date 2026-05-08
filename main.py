@@ -13,9 +13,8 @@ from pathlib import Path
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
-from chuck_dreamer.config import load_config, merge_overrides
+from chuck_dreamer.config import load_config
 
-# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -36,19 +35,26 @@ def cli(ctx, config, verbose):
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # Load configuration
     ctx.ensure_object(dict)
     ctx.obj['config'] = load_config(config)
 
 
-def _resolve_cfg(ctx, overrides: dict, dotted_overrides: tuple[str, ...] = ()) -> DictConfig:
-  """Merge the loaded config with nested + dotted-path CLI overrides, defaulting seed if unset."""
-  cfg = merge_overrides(ctx.obj["config"], overrides)
-  if dotted_overrides:
-    cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(list(dotted_overrides)))
+def _resolve_cfg(ctx, overrides: tuple[str, ...] = ()) -> DictConfig:
+  """Apply dotted-path overrides on top of the loaded config; randomize seed if unset."""
+  cfg = ctx.obj["config"]
+  if overrides:
+    cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(list(overrides)))
   if cfg.get("seed") is None:
     cfg.seed = int(np.random.default_rng().integers(0, 2**31))
   return cfg
+
+
+def _alias_overrides(aliases: dict) -> tuple[str, ...]:
+  """Convert a {dotted_key: value} mapping of CLI-alias inputs into dotlist entries.
+
+  Keys whose value is ``None`` are dropped, so unset CLI flags don't override the config.
+  """
+  return tuple(f"{k}={v}" for k, v in aliases.items() if v is not None)
 
 
 @cli.command("generate-scenes")
@@ -71,7 +77,7 @@ def generate_scenes(ctx, episodes, output, seed, fmt, overrides):
     ScriptedPolicy,
   )
 
-  cfg = _resolve_cfg(ctx, {"seed": seed}, overrides)
+  cfg = _resolve_cfg(ctx, _alias_overrides({"seed": seed}) + overrides)
 
   click.echo(f"Collecting {episodes} episodes → {output}  (difficulty={cfg.env.difficulty}, format={fmt}, seed={cfg.seed})")
   outcome_counts = {"done": 0, "terminated": 0, "timeout": 0, "crashed": 0}
@@ -124,7 +130,7 @@ def show_scene(ctx, seed, step_delay, overrides):
 
   from chuck_dreamer.sim import PushingEnv, ScriptedPolicy
 
-  cfg = _resolve_cfg(ctx, {"seed": seed}, overrides)
+  cfg = _resolve_cfg(ctx, _alias_overrides({"seed": seed}) + overrides)
 
   click.echo(f"difficulty={cfg.env.difficulty}  seed={cfg.seed}")
   env    = PushingEnv(cfg)
@@ -160,18 +166,26 @@ def show_scene(ctx, seed, step_delay, overrides):
 
 
 @cli.command("train")
+@click.option("--name", "experiment_name", default=None, type=str,
+              help="Experiment name (alias for -o logging.experiment_name=...). "
+                   "Used as the checkpoint subdirectory ({save_dir}/{name}/) and as the logger run name.")
 @click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
 @click.option("--resume", "resume", default=None, is_flag=False, flag_value="__auto__",
               help="Resume from a checkpoint. Bare flag uses {save_dir}/{experiment}/latest.safetensors; "
                    "pass a path to load a specific file.")
 @override_option
 @click.pass_context
-def train(ctx, seed, resume, overrides):
+def train(ctx, experiment_name, seed, resume, overrides):
   """Train a model using the specified configuration."""
   from chuck_dreamer.trainer import Trainer
 
-  cfg = _resolve_cfg(ctx, {"seed": seed}, overrides)
-  click.echo(f"Training with config: {cfg}")
+  aliases = _alias_overrides({
+    "seed":                     seed,
+    "logging.experiment_name":  experiment_name,
+  })
+  cfg = _resolve_cfg(ctx, aliases + overrides)
+  click.echo("Training with config:")
+  click.echo(OmegaConf.to_yaml(cfg))
   trainer = Trainer(cfg)
   resume_arg: bool | str = True if resume == "__auto__" else (resume or False)
   trainer.train(resume=resume_arg)
@@ -217,7 +231,7 @@ def eval_cmd(ctx, name, checkpoint_path, num_episodes,
     raise click.BadParameter(f"unknown eval {name!r}. Available: {sorted(evals)}")
   nb_in = evals[name]
 
-  cfg = _resolve_cfg(ctx, {"seed": seed}, overrides)
+  cfg = _resolve_cfg(ctx, overrides, seed=seed)
 
   if checkpoint_path is None:
     experiment = cfg.logging.experiment_name or "default"
