@@ -430,6 +430,26 @@ class RewardHead(nn.Module):
     return cast(mx.array, self.net(feat_in).squeeze(-1))
 
 
+class AuxHead(nn.Module):
+  """Auxiliary regression head from latent features to a privileged target.
+
+  Used at training time only: a small MLP that reads ``feat(state)`` and
+  predicts a low-dim ground-truth quantity (e.g. object_xy + ee_pos) that
+  the model would otherwise fail to encode under pixel-MSE — small but
+  task-relevant features get drowned out by the bulk of the image. The
+  aux MSE creates direct gradient pressure on the encoder/RSSM to keep
+  that information in the latent. Discarded at rollout/eval time.
+  """
+
+  def __init__(self, feat_dim: int, target_dim: int, hidden: tuple[int, ...] = (200, 200)):
+    super().__init__()
+    self.target_dim = target_dim
+    self.net = _mlp(feat_dim, hidden, out_dim=target_dim)
+
+  def __call__(self, feat_in: mx.array) -> mx.array:
+    return cast(mx.array, self.net(feat_in))
+
+
 # ---------------------------------------------------------------------------
 # Actor: tanh-squashed Gaussian
 # ---------------------------------------------------------------------------
@@ -502,13 +522,26 @@ class Critic(nn.Module):
 
 
 class _WMBundle(nn.Module):
-  """Helper class to bundle RSSM, decoder, and reward head for joint WM updates."""
-  def __init__(self, encoder: nn.Module, rssm: RSSM, decoder: nn.Module, reward: RewardHead):
+  """Helper class to bundle RSSM, decoder, reward head, and (optional)
+  aux head for joint WM updates.
+
+  ``aux`` is None when disabled; the loss skips it and no params land
+  in the saved parameter tree.
+  """
+  def __init__(
+    self,
+    encoder: nn.Module,
+    rssm: RSSM,
+    decoder: nn.Module,
+    reward: RewardHead,
+    aux: AuxHead | None = None,
+  ):
     super().__init__()
     self.encoder = encoder
     self.rssm    = rssm
     self.decoder = decoder
     self.reward  = reward
+    self.aux     = aux
 
 
 class DreamerMLXModel:
@@ -587,6 +620,14 @@ class DreamerMLXModel:
       min_std=config.model.rssm.min_stddev,
     )
     self.reward_head = RewardHead(feat_dim, tuple(config.model.reward.hidden))
+
+    # Aux head: gated by aux_scale > 0. When off, no params on disk and
+    # no forward pass. Target dims must match the buffer's aux_target
+    # slice (object_xy + ee_pos = 5).
+    self.aux_head: AuxHead | None = None
+    if config.training.losses.aux_scale > 0.0:
+      aux_cfg = config.model.aux
+      self.aux_head = AuxHead(feat_dim, target_dim=int(aux_cfg.target_dim), hidden=tuple(aux_cfg.hidden))
     self.actor = Actor(
       feat_dim=feat_dim,
       action_dim=action_dim,
@@ -602,7 +643,9 @@ class DreamerMLXModel:
       self._opt_actor  = optim.Adam(learning_rate=config.training.optimizer.actor_lr,  eps=config.training.optimizer.adam_eps)
       self._opt_critic = optim.Adam(learning_rate=config.training.optimizer.critic_lr, eps=config.training.optimizer.adam_eps)
 
-      self._wm_bundle = _WMBundle(self.encoder, self.rssm, self.decoder, self.reward_head)
+      self._wm_bundle = _WMBundle(
+        self.encoder, self.rssm, self.decoder, self.reward_head, self.aux_head
+      )
       self._wm_grad   = nn.value_and_grad(self._wm_bundle, self._wm_loss_fn)
 
   @staticmethod
@@ -667,8 +710,15 @@ class DreamerMLXModel:
          + self.config.training.losses.reward_scale * rew_loss
          + self.config.training.losses.kl_scale     * kl)
 
-    aux = {"recon": recon_loss, "rew": rew_loss, "kl": kl, "post_states": states}
-    return loss, aux
+    aux_out: dict = {"recon": recon_loss, "rew": rew_loss, "kl": kl,
+                     "post_states": states}
+    if wm_modules.aux is not None:
+      aux_pred = wm_modules.aux(feats)
+      aux_loss = ((aux_pred - batch["aux_target"]) ** 2).sum(-1).mean()
+      loss = loss + self.config.training.losses.aux_scale * aux_loss
+      aux_out["aux"] = aux_loss
+
+    return loss, aux_out
 
   def wm_update(self, batch, tracker=None):
     """Compute model loss and gradients for a batch of sequences."""
@@ -689,6 +739,8 @@ class DreamerMLXModel:
         "wm/rew":   aux["rew"].item(),
         "wm/kl":    aux["kl"].item(),
       }
+      if "aux" in aux:
+        logs["wm/aux"] = aux["aux"].item()
       if grad_norm is not None:
         gn = grad_norm.item()
         logs["wm/grad_norm"]    = gn
@@ -710,8 +762,10 @@ class DreamerMLXModel:
       return {f"{prefix}.{k}": v for k, v in tree_flatten(tree)}
 
     weights: dict = {}
-    weights.update(flat("wm",     self._wm_bundle.parameters()) if self.training
-                   else flat("wm", _WMBundle(self.encoder, self.rssm, self.decoder, self.reward_head).parameters()))
+    wm_bundle = self._wm_bundle if self.training else _WMBundle(
+      self.encoder, self.rssm, self.decoder, self.reward_head, self.aux_head
+    )
+    weights.update(flat("wm", wm_bundle.parameters()))
     weights.update(flat("actor",  self.actor.parameters()))
     weights.update(flat("critic", self.critic.parameters()))
 
@@ -736,7 +790,7 @@ class DreamerMLXModel:
       return [(k[plen:], v) for k, v in flat_weights.items() if k.startswith(prefix + ".")]
 
     wm_bundle = self._wm_bundle if self.training else _WMBundle(
-      self.encoder, self.rssm, self.decoder, self.reward_head
+      self.encoder, self.rssm, self.decoder, self.reward_head, self.aux_head
     )
     wm_bundle.update(tree_unflatten(take("wm")))
     self.actor.update(tree_unflatten(take("actor")))

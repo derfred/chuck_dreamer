@@ -16,6 +16,7 @@ from chuck_dreamer.config import load_config  # noqa: E402
 from chuck_dreamer.dreamer import build_model  # noqa: E402
 from chuck_dreamer.dreamer.mlx_model import (  # noqa: E402
   Actor,
+  AuxHead,
   CNNDecoder,
   CNNEncoder,
   Critic,
@@ -419,3 +420,69 @@ def test_dreamer_state_recon_loss_unchanged():
   obs   = mx.ones((2, 3, 5))
   loss = model._recon_loss(recon, obs)
   assert abs(float(loss.item()) - 5.0) < 1e-6  # 5 dims, all (0-1)^2 = 1, summed.
+
+
+# ---------------------------------------------------------------------------
+# Aux head
+# ---------------------------------------------------------------------------
+
+
+def test_aux_head_output_shape():
+  head = AuxHead(feat_dim=230, target_dim=5, hidden=(32, 32))
+  out = head(mx.zeros((4, 230)))
+  assert out.shape == (4, 5)
+
+
+def test_aux_head_disabled_by_default():
+  """aux_scale=0 in the default config means no AuxHead instance is created.
+  Skipping construction keeps the parameter tree (and checkpoint key set)
+  identical to pre-aux runs."""
+  cfg = load_config()
+  cfg.env.obs_mode = "state"
+  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  assert model.aux_head is None
+
+
+def test_aux_head_built_when_aux_scale_positive():
+  cfg = load_config()
+  cfg.env.obs_mode = "state"
+  cfg.training.losses.aux_scale = 1.0
+  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  assert isinstance(model.aux_head, AuxHead)
+  assert model.aux_head.target_dim == int(cfg.model.aux.target_dim)
+
+
+def test_wm_loss_uses_aux_when_head_present():
+  cfg = load_config()
+  cfg.env.obs_mode = "state"
+  cfg.training.losses.aux_scale = 1.0
+  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  batch = {
+    "obs":        mx.zeros((2, 4, 5)),
+    "action":     mx.zeros((2, 4, 6)),
+    "reward":     mx.zeros((2, 4)),
+    "aux_target": mx.ones((2, 4, int(cfg.model.aux.target_dim))),
+  }
+  _, aux = model._wm_loss_fn(model._wm_bundle, batch)
+  # aux_target=ones; an untrained head with random init produces nonzero
+  # MSE — only assert the loss landed in the aux dict.
+  assert "aux" in aux
+  assert float(aux["aux"].item()) > 0.0
+
+
+def test_aux_head_round_trips_through_save_load(tmp_path):
+  cfg = load_config()
+  cfg.env.obs_mode = "state"
+  cfg.training.losses.aux_scale = 1.0
+  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+
+  path = str(tmp_path / "ckpt.safetensors")
+  model.save(path)
+
+  # Build a fresh model and reload — aux head must be present and weights
+  # must match (we test via output equality on a fixed input).
+  model2 = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model2.load(path)
+
+  f = mx.zeros((3, cfg.model.rssm.stoch_size + cfg.model.rssm.deter_size))
+  assert mx.array_equal(model.aux_head(f), model2.aux_head(f))

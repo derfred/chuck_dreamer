@@ -42,8 +42,8 @@ class ReplayBuffer:
     ``reward_fn`` recomputes reward from stored ``step_info`` at sample
     time — swap it to change the training signal without re-collecting.
     When None, sample() returns the reward recorded with the episode.
-    Recomputation requires episodes to carry ``step_info`` and
-    ``goal_xy``; episodes missing those fall back to stored reward.
+    Recomputation additionally requires ``goal_xy``; episodes missing
+    that fall back to stored reward.
     """
     if min_episode_len < 1:
       raise ValueError("min_episode_len must be >= 1")
@@ -55,63 +55,10 @@ class ReplayBuffer:
     self._total_steps: int = 0
     self._rng = np.random.default_rng(seed)
 
-    self._current: dict[str, list[Any]] | None = None
     self._sim_processor = processor if processor is not None else StateVectorProcessor()
 
   # ---------------------------------------------------------------------
-  # Write side — online collection
-  # ---------------------------------------------------------------------
-
-  def start_episode(self, initial_obs: np.ndarray) -> None:
-    """Begin a new episode with its first observation ``o_0``."""
-    obs = np.asarray(initial_obs, dtype=np.float32)
-    self._current = {
-      "obs": [obs],
-      "action": [],
-      "reward": [],
-      "done": [],
-    }
-
-  def add(
-    self,
-    action: np.ndarray,
-    next_obs: np.ndarray,
-    reward: float,
-    done: bool,
-  ) -> None:
-    """Append ``(a_t, o_{t+1}, r_t, done_t)`` to the in-progress episode.
-
-    Finalizes the episode when ``done`` is True.
-    """
-    if self._current is None:
-      raise RuntimeError("add() called before start_episode()")
-
-    self._current["action"].append(np.asarray(action, dtype=np.float32))
-    self._current["obs"].append(np.asarray(next_obs, dtype=np.float32))
-    self._current["reward"].append(float(reward))
-    self._current["done"].append(bool(done))
-
-    if done:
-      self._finalize_current()
-
-  def _finalize_current(self) -> None:
-    assert self._current is not None
-    T = len(self._current["action"])
-    if T < self.min_episode_len:
-      self._current = None
-      return
-
-    episode: Episode = {
-      "obs": np.stack(self._current["obs"], axis=0).astype(np.float32),
-      "action": np.stack(self._current["action"], axis=0).astype(np.float32),
-      "reward": np.asarray(self._current["reward"], dtype=np.float32),
-      "done": np.asarray(self._current["done"], dtype=bool),
-    }
-    self._current = None
-    self._append_episode(episode)
-
-  # ---------------------------------------------------------------------
-  # Write side — offline seeding
+  # Write side
   # ---------------------------------------------------------------------
 
   def add_episode(self, episode: Episode) -> None:
@@ -123,9 +70,13 @@ class ReplayBuffer:
     self._append_episode(validated)
 
   def _validate_episode(self, episode: Episode) -> Episode:
-    for key in ("obs", "action", "reward", "done"):
+    for key in ("obs", "action", "reward", "done", "step_info"):
       if key not in episode:
         raise ValueError(f"episode missing required key: {key!r}")
+    si = episode["step_info"]
+    for col in ("object_xy", "ee_pos"):
+      if col not in si:
+        raise ValueError(f"step_info missing required column: {col!r}")
 
     raw_obs = episode["obs"]
     action  = np.asarray(episode["action"], dtype=np.float32)
@@ -162,12 +113,10 @@ class ReplayBuffer:
     if done.shape != (T,):
       raise ValueError(f"done must have shape ({T},); got {done.shape}")
 
-    out: Episode = {"obs": obs, "action": action, "reward": reward, "done": done}
-    # Optional pass-through fields: step_info (dict of T+1 columns) and
-    # episode-scalar metadata like goal_xy. Reward recompute (§6) consumes
-    # these; today they round-trip but aren't yet used.
-    if "step_info" in episode:
-      out["step_info"] = episode["step_info"]
+    out: Episode = {
+      "obs": obs, "action": action, "reward": reward, "done": done,
+      "step_info": episode["step_info"],
+    }
     if "goal_xy" in episode:
       out["goal_xy"] = episode["goal_xy"]
     return out
@@ -202,7 +151,13 @@ class ReplayBuffer:
     return False
 
   def sample(self, batch_size: int, seq_len: int) -> dict[str, Any]:
-    """Sample a batch of ``(B, T, ...)`` sequences from single episodes."""
+    """Sample a batch of ``(B, T, ...)`` sequences from single episodes.
+
+    The returned batch contains ``aux_target`` of shape ``(B, T, 5)`` —
+    object_xy ‖ ee_pos, the privileged target for the model's aux head.
+    Step-info columns align with the action axis (``object_xy[t]`` is
+    the state AFTER ``action_t``).
+    """
     if batch_size < 1 or seq_len < 1:
       raise ValueError("batch_size and seq_len must be >= 1")
 
@@ -233,6 +188,7 @@ class ReplayBuffer:
     action_batch = []
     reward_batch = []
     done_batch = []
+    aux_batch: list[np.ndarray] = []
 
     for idx in ep_indices:
       ep, valid_starts = eligible[idx]
@@ -246,6 +202,10 @@ class ReplayBuffer:
       action_batch.append(ep["action"][start:end])
       reward_batch.append(self._reward_slice(ep, start, end))
       done_batch.append(ep["done"][start:end])
+      si = ep["step_info"]
+      aux_batch.append(np.concatenate(
+        [si["object_xy"][start:end], si["ee_pos"][start:end]], axis=-1,
+      ))
 
     obs_out: dict | mx.array
     if obs_batch_dict is not None:
@@ -258,16 +218,17 @@ class ReplayBuffer:
       "action": mx.array(np.stack(action_batch, axis=0)),
       "reward": mx.array(np.stack(reward_batch, axis=0)),
       "done": mx.array(np.stack(done_batch, axis=0)),
+      "aux_target": mx.array(np.stack(aux_batch, axis=0).astype(np.float32)),
     }
 
   def _reward_slice(self, ep: Episode, start: int, end: int) -> np.ndarray:
     """Return ``reward[start:end]`` recomputed via ``self.reward_fn`` if possible.
 
     Falls back to the stored reward when ``reward_fn`` is None or the
-    episode lacks ``step_info``/``goal_xy`` (e.g. online-collected
-    episodes).
+    episode lacks ``goal_xy`` (which is episode-scalar metadata and may
+    not always be set).
     """
-    if self.reward_fn is None or "step_info" not in ep or "goal_xy" not in ep:
+    if self.reward_fn is None or "goal_xy" not in ep:
       return np.asarray(ep["reward"][start:end], dtype=np.float32)
 
     si = ep["step_info"]

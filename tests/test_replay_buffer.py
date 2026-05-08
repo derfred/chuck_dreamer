@@ -15,6 +15,21 @@ from chuck_dreamer.training.replay_buffer import ReplayBuffer  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
+def _make_step_info(episode_id: int, length: int) -> dict[str, np.ndarray]:
+  """Step-info columns aligned with the action axis.
+
+  ``object_xy[t, 0]`` encodes (episode_id, t) and ``ee_pos[t, 0]`` mirrors
+  it with flipped sign — gives the aux-target tests a deterministic way
+  to verify alignment and component layout.
+  """
+  object_xy = np.zeros((length, 2), dtype=np.float32)
+  ee_pos    = np.zeros((length, 3), dtype=np.float32)
+  for t in range(length):
+    object_xy[t, 0] = episode_id * 1000 + t
+    ee_pos[t, 0]    = -(episode_id * 1000 + t)
+  return {"object_xy": object_xy, "ee_pos": ee_pos}
+
+
 def _make_episode(
   episode_id: int,
   length: int,
@@ -34,7 +49,10 @@ def _make_episode(
   reward = np.arange(T, dtype=np.float32)
   done = np.zeros((T,), dtype=bool)
   done[-1] = True
-  return {"obs": obs, "action": action, "reward": reward, "done": done}
+  return {
+    "obs": obs, "action": action, "reward": reward, "done": done,
+    "step_info": _make_step_info(episode_id, T),
+  }
 
 
 # ---------------------------------------------------------------------------
@@ -116,50 +134,15 @@ def test_oversize_single_episode_is_retained():
 
 
 # ---------------------------------------------------------------------------
-# Online collection path
+# Min-length filter
 # ---------------------------------------------------------------------------
 
 
-def test_online_collection_round_trip():
-  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
-
-  obs = np.zeros((3,), dtype=np.float32)
-  buf.start_episode(obs)
-  for t in range(20):
-    action = np.ones((2,), dtype=np.float32) * t
-    next_obs = np.full((3,), t + 1, dtype=np.float32)
-    done = t == 19
-    buf.add(action, next_obs, reward=float(t), done=done)
-
-  assert buf.num_episodes == 1
-  assert len(buf) == 20
-  batch = buf.sample(batch_size=4, seq_len=5)
-  assert batch["obs"].shape == (4, 5, 3)
-
-
-def test_short_episode_dropped_on_finalize():
+def test_short_episode_dropped_by_add_episode():
   buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=10, seed=0)
-  buf.start_episode(np.zeros((3,), dtype=np.float32))
-  for t in range(5):
-    buf.add(
-      np.zeros((2,), dtype=np.float32),
-      np.zeros((3,), dtype=np.float32),
-      reward=0.0,
-      done=(t == 4),
-    )
+  buf.add_episode(_make_episode(0, length=5))
   assert buf.num_episodes == 0
   assert len(buf) == 0
-
-
-def test_add_without_start_raises():
-  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=1, seed=0)
-  with pytest.raises(RuntimeError):
-    buf.add(
-      np.zeros((2,), dtype=np.float32),
-      np.zeros((3,), dtype=np.float32),
-      reward=0.0,
-      done=False,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +209,8 @@ def test_save_and_load_round_trip(tmp_path):
   for orig, new in zip(buf._episodes, restored._episodes):
     for key in ("obs", "action", "reward", "done"):
       np.testing.assert_array_equal(orig[key], new[key])
+    for col in ("object_xy", "ee_pos"):
+      np.testing.assert_array_equal(orig["step_info"][col], new["step_info"][col])
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +226,7 @@ def test_add_episode_validates_shapes():
     "action": np.zeros((10, 2), dtype=np.float32),
     "reward": np.zeros((10,), dtype=np.float32),
     "done": np.zeros((10,), dtype=bool),
+    "step_info": _make_step_info(0, 10),
   }
   with pytest.raises(ValueError):
     buf.add_episode(bad)
@@ -252,6 +238,14 @@ def test_add_episode_validates_shapes():
   }
   with pytest.raises(ValueError):
     buf.add_episode(missing_key)
+
+
+def test_add_episode_requires_step_info():
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=1, seed=0)
+  ep = _make_episode(0, length=10)
+  del ep["step_info"]
+  with pytest.raises(ValueError, match="step_info"):
+    buf.add_episode(ep)
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +308,7 @@ def _make_image_proprio_episode(
     "action": action,
     "reward": reward,
     "done": done,
+    "step_info": _make_step_info(episode_id, T),
   }
 
 
@@ -359,6 +354,34 @@ def test_dict_obs_sampled_sequences_stay_within_episode():
     assert np.all(diffs == 1), f"non-contiguous within episode: {seq}"
 
 
+def test_aux_target_shape():
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=10, seed=0)
+  for ep_id in range(3):
+    buf.add_episode(_make_episode(ep_id, length=30))
+
+  batch = buf.sample(batch_size=8, seq_len=10)
+  aux = np.asarray(batch["aux_target"])
+  assert aux.shape == (8, 10, 5)  # 2 (object_xy) + 3 (ee_pos)
+
+
+def test_aux_target_aligns_with_action_axis():
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=10, seed=0)
+  for ep_id in range(3):
+    buf.add_episode(_make_episode(ep_id, length=30))
+
+  batch = buf.sample(batch_size=4, seq_len=10)
+  aux = np.asarray(batch["aux_target"])  # (B, T, 5)
+
+  # Mirrors the cross-episode contiguity test on `obs`: within each row,
+  # object_xy[:,0] increments by 1 per timestep, and ee_pos[:,0] is its
+  # negation (the test fixture encodes them that way in _make_step_info).
+  for b in range(aux.shape[0]):
+    obj0 = aux[b, :, 0]
+    ee0  = aux[b, :, 2]  # first entry of ee_pos, after the 2-D object_xy
+    np.testing.assert_array_equal(np.diff(obj0), np.ones(aux.shape[1] - 1))
+    np.testing.assert_array_equal(ee0, -obj0)
+
+
 def test_dict_obs_rejects_mismatched_leaf_lengths():
   T = 10
   ep = {
@@ -369,6 +392,7 @@ def test_dict_obs_rejects_mismatched_leaf_lengths():
     "action": np.zeros((T, 2), dtype=np.float32),
     "reward": np.zeros((T,),   dtype=np.float32),
     "done":   np.array([False] * (T - 1) + [True]),
+    "step_info": _make_step_info(0, T),
   }
   buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
   with pytest.raises(ValueError):

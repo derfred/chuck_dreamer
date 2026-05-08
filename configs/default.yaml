@@ -23,6 +23,13 @@ model:
     cnn_strides:  [2, 2, 2, 2]
   reward:
     hidden: [200, 200]
+  aux:
+    # Auxiliary regression head: latent feat -> ground-truth target.
+    # target_dim = len(object_xy) + len(ee_pos) = 2 + 3 = 5. The buffer
+    # pulls these from step_info; aux loss is only added when
+    # training.losses.aux_scale > 0.
+    target_dim: 5
+    hidden: [200, 200]
   actor:
     hidden: [300, 300, 300]
     min_stddev: 0.1
@@ -61,6 +68,8 @@ training:
     kl_scale: 1.0
     free_nats: 3.0
     entropy_scale: 1.0
+    # Auxiliary head loss (object_xy + ee_pos regression from the latent).
+    aux_scale: 0.0
 
 logging:
   logger: "trackio" # "none", "wandb", "trackio"

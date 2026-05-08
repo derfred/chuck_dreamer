@@ -139,20 +139,18 @@ class TestReplayBufferRewardRecompute:
     np.testing.assert_array_equal(rb, np.full(rb.shape, 7.0, dtype=np.float32))
     assert not np.array_equal(ra, rb)
 
-  def test_episode_without_step_info_falls_back_to_stored_reward(self):
-    """Episodes lacking step_info (e.g. online-collected) use stored reward even with reward_fn set."""
+  def test_episode_without_goal_xy_falls_back_to_stored_reward(self):
+    """Episodes lacking goal_xy can't be recomputed (it's episode-scalar
+    metadata, not in step_info), so sample() returns the stored reward
+    even when reward_fn is set."""
     buf = ReplayBuffer(
       capacity_steps=10_000, min_episode_len=10,
       reward_fn=GoalDistanceReward(), seed=0,
     )
-    # Episode without step_info / goal_xy.
-    T = 30
-    buf.add_episode({
-      "obs":    np.zeros((T + 1, 4), dtype=np.float32),
-      "action": np.zeros((T, 2), dtype=np.float32),
-      "reward": np.full((T,), 42.0, dtype=np.float32),
-      "done":   np.concatenate([np.zeros(T - 1, dtype=bool), np.array([True])]),
-    })
+    ep = _make_episode_with_step_info(0, T=30)
+    del ep["goal_xy"]
+    ep["reward"] = np.full((30,), 42.0, dtype=np.float32)
+    buf.add_episode(ep)
 
     batch = buf.sample(batch_size=4, seq_len=10)
     np.testing.assert_array_equal(
