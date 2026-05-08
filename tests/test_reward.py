@@ -37,14 +37,12 @@ class TestGoalDistanceReward:
 
 class TestBuildRewardFn:
   def test_goal_distance(self):
-    cfg = type("C", (), {"kind": "goal_distance"})()
-    fn = build_reward_fn(cfg)
+    fn = build_reward_fn("goal_distance")
     assert isinstance(fn, GoalDistanceReward)
 
   def test_unknown_kind_raises(self):
-    cfg = type("C", (), {"kind": "definitely-not-a-real-reward"})()
     with pytest.raises(ValueError):
-      build_reward_fn(cfg)
+      build_reward_fn("definitely-not-a-real-reward")
 
 
 def _make_episode_with_step_info(

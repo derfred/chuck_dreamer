@@ -73,15 +73,13 @@ def _make_env_cfg(
   """Build a DictConfig that PushingEnv / SceneGenerator accept."""
   return OmegaConf.create({
       "seed": seed,
-      "sim": {
-          "difficulty": difficulty,
-          "render_size": render_size,
-          "table_size": list(_DEFAULT_TABLE_SIZE),
-          "max_steps": 50,
-      },
       "env": {
-          "obs_mode": obs_mode,
-          "act_mode": act_mode,
+          "difficulty":  difficulty,
+          "render_size": render_size,
+          "table_size":  list(_DEFAULT_TABLE_SIZE),
+          "max_steps":   50,
+          "obs_mode":    obs_mode,
+          "act_mode":    act_mode,
       },
   })
 

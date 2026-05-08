@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from datetime import datetime
 
 
 class Tracker:
@@ -11,6 +12,7 @@ class Tracker:
     self.data = data
 
     run_name = getattr(self.config.logging, "experiment_name", None)
+    run_name = f"{run_name}-{datetime.now().strftime('%Y%m%d-%H%M')}"
     if self.config.logging.logger == "wandb":
       import wandb
       wandb.init(project=self.config.logging.project_name, name=run_name, config=self.config)

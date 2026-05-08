@@ -134,13 +134,13 @@ class SceneGenerator:
   """Samples :class:`SceneConfig` instances for a given difficulty level."""
 
   def __init__(self, config) -> None:
-    if config.sim.difficulty not in _PRESETS:
-      raise ValueError(f"Unknown difficulty '{config.sim.difficulty}'. Choose from {list(_PRESETS)}")
+    if config.env.difficulty not in _PRESETS:
+      raise ValueError(f"Unknown difficulty '{config.env.difficulty}'. Choose from {list(_PRESETS)}")
     self.config     = config
     self._rng       = np.random.default_rng(config.seed)
-    self.difficulty = config.sim.difficulty
-    self._preset    = _PRESETS[config.sim.difficulty]
-    self.table_size = [float(v) for v in config.sim.table_size]
+    self.difficulty = config.env.difficulty
+    self._preset    = _PRESETS[config.env.difficulty]
+    self.table_size = [float(v) for v in config.env.table_size]
 
   @property
   def robot_type(self) -> Any:

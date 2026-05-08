@@ -2,7 +2,7 @@
 
 A ``RewardFn`` maps a :class:`StepInfo` to a scalar reward. Reward is
 recomputed in the replay buffer at sample time (not baked into recorded
-episodes), so swapping ``cfg.reward.kind`` at training start changes the
+episodes), so swapping ``cfg.env.reward`` at training start changes the
 next batch without re-collecting.
 """
 
@@ -29,8 +29,7 @@ class GoalDistanceReward:
     return -float(np.linalg.norm(info.object_xy - info.goal_xy))
 
 
-def build_reward_fn(cfg) -> RewardFn:
-  kind = cfg.kind
+def build_reward_fn(kind: str) -> RewardFn:
   if kind == "goal_distance":
     return GoalDistanceReward()
   raise ValueError(f"Unknown reward kind: {kind!r}")

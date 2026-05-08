@@ -268,7 +268,7 @@ class PushingEnv(gym.Env):
   @property
   def render_size(self) -> tuple[int, int]:
     """Parse a 'WxH' string and return (render_h, render_w)."""
-    w, h = self.config.sim.render_size.lower().split("x")
+    w, h = self.config.env.render_size.lower().split("x")
     return int(h), int(w)
 
   @property

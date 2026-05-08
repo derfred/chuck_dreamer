@@ -11,13 +11,20 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from chuck_dreamer.config import load_config, merge_overrides
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+override_option = click.option(
+  "-o", "--override", "overrides", multiple=True, metavar="KEY=VALUE",
+  help="Dotted-path config override, repeatable (e.g. -o training.optimizer.wm_lr=3e-4 "
+       "-o model.rssm.hidden_size=256). Values are parsed as YAML scalars.",
+)
 
 
 @click.group()
@@ -34,9 +41,11 @@ def cli(ctx, config, verbose):
     ctx.obj['config'] = load_config(config)
 
 
-def _resolve_cfg(ctx, overrides: dict) -> DictConfig:
-  """Merge the loaded config with a nested dict of CLI overrides, defaulting seed if unset."""
+def _resolve_cfg(ctx, overrides: dict, dotted_overrides: tuple[str, ...] = ()) -> DictConfig:
+  """Merge the loaded config with nested + dotted-path CLI overrides, defaulting seed if unset."""
   cfg = merge_overrides(ctx.obj["config"], overrides)
+  if dotted_overrides:
+    cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(list(dotted_overrides)))
   if cfg.get("seed") is None:
     cfg.seed = int(np.random.default_rng().integers(0, 2**31))
   return cfg
@@ -44,15 +53,13 @@ def _resolve_cfg(ctx, overrides: dict) -> DictConfig:
 
 @cli.command("generate-scenes")
 @click.option("--episodes", default=10, type=int, help="Number of episodes to collect")
-@click.option("--output", default=None, type=str, help="Output directory")
-@click.option("--difficulty", default=None, type=str, help="Scene difficulty (easy/medium/hard)")
-@click.option("--render-size", default=None, type=str, help="Render size WxH (e.g. 128x128)")
+@click.option("--output", required=True, type=str, help="Output directory")
 @click.option("--seed", default=None, type=int, help="Random seed")
-@click.option("--max-steps", default=None, type=int, help="Per-episode step cap (overrides scene config)")
-@click.option("--format", "fmt", default=None, type=click.Choice(["hdf5", "rerun"]),
+@click.option("--format", "fmt", default="rerun", type=click.Choice(["hdf5", "rerun"]),
               help="Episode output format (hdf5 or rerun)")
+@override_option
 @click.pass_context
-def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_steps, fmt):
+def generate_scenes(ctx, episodes, output, seed, fmt, overrides):
   """Generate pushing scenes using the scripted heuristic policy."""
   from dataclasses import asdict
   from tqdm import tqdm
@@ -64,28 +71,19 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
     ScriptedPolicy,
   )
 
-  cfg = _resolve_cfg(ctx, {
-    "seed": seed,
-    "sim": {
-      "output_dir": output,
-      "difficulty": difficulty,
-      "render_size": render_size,
-      "format": fmt,
-      "max_steps": max_steps,
-    },
-  })
+  cfg = _resolve_cfg(ctx, {"seed": seed}, overrides)
 
-  click.echo(f"Collecting {episodes} episodes → {cfg.sim.output_dir}  (difficulty={cfg.sim.difficulty}, format={cfg.sim.format}, seed={cfg.seed})")
+  click.echo(f"Collecting {episodes} episodes → {output}  (difficulty={cfg.env.difficulty}, format={fmt}, seed={cfg.seed})")
   outcome_counts = {"done": 0, "terminated": 0, "timeout": 0, "crashed": 0}
 
   env    = PushingEnv(cfg)
   policy = ScriptedPolicy(auto_advance_from_ready=True)
   collector = EpisodeCollector(env, policy)
-  writer = EpisodeWriter(cfg.sim.output_dir, format=cfg.sim.format)
+  writer = EpisodeWriter(output, format=fmt)
   for ep_idx in tqdm(range(episodes), desc="Collecting"):
     scene = collector.reset()
-    if cfg.sim.max_steps is not None:
-      scene.max_steps = int(cfg.sim.max_steps)
+    if cfg.env.max_steps is not None:
+      scene.max_steps = int(cfg.env.max_steps)
     episode_data, outcome = collector.run()
     outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
 
@@ -109,12 +107,11 @@ def generate_scenes(ctx, episodes, output, difficulty, render_size, seed, max_st
 
 
 @cli.command("show-scene")
-@click.option("--difficulty", default=None, type=str, help="Scene difficulty (easy/medium/hard)")
 @click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
-@click.option("--render-size", default=None, type=str, help="Render size WxH (e.g. 128x128)")
 @click.option("--step-delay", default=0.05, type=float, help="Seconds to sleep between steps (default 0.05)")
+@override_option
 @click.pass_context
-def show_scene(ctx, difficulty, seed, render_size, step_delay):
+def show_scene(ctx, seed, step_delay, overrides):
   """Generate a scene and run it in the interactive MuJoCo viewer.
 
   Drives the scripted policy directly so the user can press Space to
@@ -127,12 +124,9 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
 
   from chuck_dreamer.sim import PushingEnv, ScriptedPolicy
 
-  cfg = _resolve_cfg(ctx, {
-    "seed": seed,
-    "sim": {"difficulty": difficulty, "render_size": render_size},
-  })
+  cfg = _resolve_cfg(ctx, {"seed": seed}, overrides)
 
-  click.echo(f"difficulty={cfg.sim.difficulty}  seed={cfg.seed}")
+  click.echo(f"difficulty={cfg.env.difficulty}  seed={cfg.seed}")
   env    = PushingEnv(cfg)
   policy = ScriptedPolicy()
   scene  = env.generate_scene()
@@ -166,24 +160,17 @@ def show_scene(ctx, difficulty, seed, render_size, step_delay):
 
 
 @cli.command("train")
-@click.option("--name", "experiment_name", default=None, type=str,
-              help="Name of this training run. Used as the checkpoint subdirectory "
-                   "({save_dir}/{name}/) and as the logger run name.")
-@click.option("--warmup_path", default=None, type=str, help="Path to warmup episodes")
 @click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
 @click.option("--resume", "resume", default=None, is_flag=False, flag_value="__auto__",
               help="Resume from a checkpoint. Bare flag uses {save_dir}/{experiment}/latest.safetensors; "
                    "pass a path to load a specific file.")
+@override_option
 @click.pass_context
-def train(ctx, experiment_name, warmup_path, seed, resume):
+def train(ctx, seed, resume, overrides):
   """Train a model using the specified configuration."""
   from chuck_dreamer.trainer import Trainer
 
-  cfg = _resolve_cfg(ctx, {
-    "seed":    seed,
-    "data":    {"warmup_path": warmup_path},
-    "logging": {"experiment_name": experiment_name},
-  })
+  cfg = _resolve_cfg(ctx, {"seed": seed}, overrides)
   click.echo(f"Training with config: {cfg}")
   trainer = Trainer(cfg)
   resume_arg: bool | str = True if resume == "__auto__" else (resume or False)
@@ -201,9 +188,6 @@ def _list_evals() -> dict[str, Path]:
 @click.option("--checkpoint", "checkpoint_path", default=None, type=str,
               help="Path to a trained checkpoint .safetensors file. "
                    "Defaults to {save_dir}/{experiment}/latest.safetensors.")
-@click.option("--data-path", default=None, type=str, help="Directory of evaluation episodes (default: cfg.data.warmup_path).")
-@click.option("--data-format", default=None, type=click.Choice(["hdf5", "rerun"]),
-              help="Episode format on disk (default: cfg.data.warmup_format).")
 @click.option("--num-episodes", default=20, type=int, help="Number of episodes to evaluate on.")
 @click.option("--burn-in", default=5, type=int, help="Closed-loop burn-in steps before open-loop rollout.")
 @click.option("--horizon", default=15, type=int, help="Open-loop horizon length.")
@@ -212,9 +196,10 @@ def _list_evals() -> dict[str, Path]:
               help="Where to write the executed notebook (default: ./<name>_<ckpt-stem>.ipynb in cwd).")
 @click.option("-p", "--param", "extra_params", multiple=True, metavar="KEY=VALUE",
               help="Additional papermill parameter override (repeatable).")
+@override_option
 @click.pass_context
-def eval_cmd(ctx, name, checkpoint_path, data_path, data_format, num_episodes,
-             burn_in, horizon, seed, output_path, extra_params):
+def eval_cmd(ctx, name, checkpoint_path, num_episodes,
+             burn_in, horizon, seed, output_path, extra_params, overrides):
   """Run an evaluation notebook on a trained checkpoint via papermill.
 
   NAME selects which notebook under ``src/chuck_dreamer/evals/`` to execute
@@ -232,7 +217,7 @@ def eval_cmd(ctx, name, checkpoint_path, data_path, data_format, num_episodes,
     raise click.BadParameter(f"unknown eval {name!r}. Available: {sorted(evals)}")
   nb_in = evals[name]
 
-  cfg = _resolve_cfg(ctx, {"seed": seed})
+  cfg = _resolve_cfg(ctx, {"seed": seed}, overrides)
 
   if checkpoint_path is None:
     experiment = cfg.logging.experiment_name or "default"
@@ -240,10 +225,8 @@ def eval_cmd(ctx, name, checkpoint_path, data_path, data_format, num_episodes,
   if not Path(checkpoint_path).exists():
     raise click.ClickException(f"checkpoint not found: {checkpoint_path}")
 
-  if data_path is None:
-    data_path = cfg.data.warmup_path
-  if data_format is None:
-    data_format = cfg.data.warmup_format
+  data_path   = cfg.training.data.warmup_path
+  data_format = cfg.training.data.warmup_format
 
   if output_path is None:
     output_path = f"{name}_{Path(checkpoint_path).stem}.ipynb"

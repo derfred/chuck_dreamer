@@ -21,10 +21,10 @@ class Trainer:
     self.env    = PushingEnv(config)
 
     self._replay_buffer = ReplayBuffer(
-      capacity_steps=config.data.buffer_size,
+      capacity_steps=config.training.data.buffer_size,
       min_episode_len=config.training.min_episode_len,
       processor=processor_for(config),
-      reward_fn=build_reward_fn(config.reward),
+      reward_fn=build_reward_fn(config.env.reward),
       seed=config.seed,
     )
 
@@ -38,18 +38,19 @@ class Trainer:
     self.tracker.init()
 
   def _warmup(self):
-    if not os.path.exists(self.config.data.warmup_path):
-      logger.warning(f"Warmup path {self.config.data.warmup_path} does not exist. Skipping warmup.")
+    data_cfg = self.config.training.data
+    if not os.path.exists(data_cfg.warmup_path):
+      logger.warning(f"Warmup path {data_cfg.warmup_path} does not exist. Skipping warmup.")
       return
-    logger.info(f"Loading warmup episodes from {self.config.data.warmup_path} (format={self.config.data.warmup_format})")
-    self._replay_buffer.load_sim_episodes(self.config.data.warmup_path, self.config.data.warmup_format, progress=True)
+    logger.info(f"Loading warmup episodes from {data_cfg.warmup_path} (format={data_cfg.warmup_format})")
+    self._replay_buffer.load_sim_episodes(data_cfg.warmup_path, data_cfg.warmup_format, progress=True)
 
   def _collect_phase(self):
     collect_data = defaultdict(int)
     for _ in range(self.config.training.num_collect_episodes):
       scene = self.collector.reset()
-      if self.config.sim.max_steps is not None:
-        scene.max_steps = int(self.config.sim.max_steps)
+      if self.config.env.max_steps is not None:
+        scene.max_steps = int(self.config.env.max_steps)
       episode_data, outcome = self.collector.run()
       collect_data[outcome] += 1
       if episode_data is not None:

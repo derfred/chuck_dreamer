@@ -41,6 +41,12 @@ training:
   save_every: 10
   eval_every: 5
 
+  data:
+    warmup_path: "data/generated-pushes/"
+    warmup_format: "rerun"  # "hdf5" or "rerun"
+    shuffle: true
+    buffer_size: 10000
+
   optimizer:
     wm_lr: 6e-4
     actor_lr: 8e-5
@@ -56,12 +62,6 @@ training:
     free_nats: 3.0
     entropy_scale: 1.0
 
-data:
-  warmup_path: "data/generated-pushes/"
-  warmup_format: "rerun"  # "hdf5" or "rerun"
-  shuffle: true
-  buffer_size: 10000
-
 logging:
   logger: "trackio" # "none", "wandb", "trackio"
   project_name: "chuck-dreamer"
@@ -72,23 +72,13 @@ logging:
 hardware:
   device: "mlx"  # "auto", "mlx", "cpu", "gpu", "mps"
 
-evaluation:
-  num_episodes: 10
-  render: false
-  save_videos: false
-  video_dir: "videos"
-
-sim:
+env:
   difficulty: "medium"
   render_size: "512x512"
-  output_dir: "data/generated-pushes/"
-  format: "rerun"  # "hdf5" or "rerun"
-  max_steps: 100
   table_size: [0.60, 0.5, 0.02]  # [half_x, half_y, half_z]
+  max_steps: null  # Per-episode step cap; null uses the difficulty preset's default.
 
-env:
-  obs_mode: "state"   # "state" | "image" | "image_proprio"
+  obs_mode: "image"   # "state" | "image" | "image_proprio"
   act_mode: "ee"      # "joint" | "ee"
 
-reward:
-  kind: "goal_distance"
+  reward: "goal_distance"
