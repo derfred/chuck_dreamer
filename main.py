@@ -231,7 +231,7 @@ def eval_cmd(ctx, name, checkpoint_path, num_episodes,
     raise click.BadParameter(f"unknown eval {name!r}. Available: {sorted(evals)}")
   nb_in = evals[name]
 
-  cfg = _resolve_cfg(ctx, overrides, seed=seed)
+  cfg = _resolve_cfg(ctx, _alias_overrides({"seed": seed}) + overrides)
 
   if checkpoint_path is None:
     experiment = cfg.logging.experiment_name or "default"
