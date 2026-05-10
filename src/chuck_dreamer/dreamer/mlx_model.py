@@ -388,8 +388,8 @@ class RSSM(nn.Module):
     init:    dict | None = None,
   ) -> list[dict]:
     """Roll the posterior forward for T steps. Returns list of T state dicts."""
-    B, T = embeds.shape[0], embeds.shape[1]
-    state = init if init is not None else self.initial_state(B)
+    B, T   = embeds.shape[0], embeds.shape[1]
+    state  = init if init is not None else self.initial_state(B)
     states = []
     for t in range(T):
       state = self.obs_step(state, actions[:, t], embeds[:, t])
@@ -563,20 +563,20 @@ class DreamerMLXModel:
     if obs_mode == "state":
       if not (isinstance(obs_shape, tuple) and len(obs_shape) == 1):
         raise ValueError(f"state obs_mode expects 1-D obs_shape; got {obs_shape}")
-      obs_dim = int(obs_shape[0])
-      self.encoder = MLPEncoder(obs_dim, enc_hidden, embed_size)
-      self.decoder = MLPDecoder(feat_dim, dec_hidden, obs_dim)
-      self.image_size = None
+      obs_dim          = int(obs_shape[0])
+      self.encoder     = MLPEncoder(obs_dim, enc_hidden, embed_size)
+      self.decoder     = MLPDecoder(feat_dim, dec_hidden, obs_dim)
+      self.image_size  = None
       self.proprio_dim = None
 
     elif obs_mode in ("image", "image_proprio"):
-      enc_channels = tuple(config.model.encoder.cnn_channels)
-      enc_kernels  = tuple(config.model.encoder.cnn_kernels)
-      enc_strides  = tuple(config.model.encoder.cnn_strides)
-      dec_channels = tuple(config.model.decoder.cnn_channels)
-      dec_kernels  = tuple(config.model.decoder.cnn_kernels)
-      dec_strides  = tuple(config.model.decoder.cnn_strides)
-      image_size = int(config.model.encoder.image_size)
+      enc_channels    = tuple(config.model.encoder.cnn_channels)
+      enc_kernels     = tuple(config.model.encoder.cnn_kernels)
+      enc_strides     = tuple(config.model.encoder.cnn_strides)
+      dec_channels    = tuple(config.model.decoder.cnn_channels)
+      dec_kernels     = tuple(config.model.decoder.cnn_kernels)
+      dec_strides     = tuple(config.model.decoder.cnn_strides)
+      image_size      = int(config.model.encoder.image_size)
       self.image_size = image_size
 
       if obs_mode == "image":
@@ -596,17 +596,17 @@ class DreamerMLXModel:
           raise ValueError(
             f"image_proprio obs_mode expects shape dict with 'image' and 'proprio' keys; got {obs_shape}"
           )
-        img_shape = tuple(obs_shape["image"])
-        pro_shape = tuple(obs_shape["proprio"])
-        in_channels = int(img_shape[2])
-        proprio_dim = int(pro_shape[0])
+        img_shape        = tuple(obs_shape["image"])
+        pro_shape        = tuple(obs_shape["proprio"])
+        in_channels      = int(img_shape[2])
+        proprio_dim      = int(pro_shape[0])
         self.proprio_dim = proprio_dim
-        cnn_enc = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
-                             embed_dim=embed_size, image_size=image_size)
-        cnn_dec = CNNDecoder(feat_dim, dec_channels, dec_kernels, dec_strides,
-                             out_channels=in_channels, image_size=image_size)
-        self.encoder = ImageProprioEncoder(cnn_enc, proprio_dim, enc_hidden, embed_size)
-        self.decoder = ImageProprioDecoder(feat_dim, cnn_dec, dec_hidden, proprio_dim)
+        cnn_enc          = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
+                                      embed_dim=embed_size, image_size=image_size)
+        cnn_dec          = CNNDecoder(feat_dim, dec_channels, dec_kernels, dec_strides,
+                                      out_channels=in_channels, image_size=image_size)
+        self.encoder     = ImageProprioEncoder(cnn_enc, proprio_dim, enc_hidden, embed_size)
+        self.decoder     = ImageProprioDecoder(feat_dim, cnn_dec, dec_hidden, proprio_dim)
 
     else:
       raise ValueError(f"unknown obs_mode={obs_mode!r}")
@@ -677,7 +677,7 @@ class DreamerMLXModel:
     reward = batch["reward"]   # (B, T)
     if isinstance(obs, dict):
       any_leaf = next(iter(obs.values()))
-      B, T = any_leaf.shape[0], any_leaf.shape[1]
+      B, T     = any_leaf.shape[0], any_leaf.shape[1]
     else:
       B, T = obs.shape[0], obs.shape[1]
 
@@ -688,7 +688,7 @@ class DreamerMLXModel:
     for t in range(T):
       action_t = action[:, t]
       embed_t  = embeds[:, t]
-      state = wm_modules.rssm.obs_step(state, action_t, embed_t)
+      state    = wm_modules.rssm.obs_step(state, action_t, embed_t)
       states.append(state)
       kl_t = kl_gaussian(
         state["post_mean"],  state["post_std"],
@@ -726,7 +726,7 @@ class DreamerMLXModel:
 
     grad_norm = None
     if self.config.training.optimizer.gradient_clipping > 0:
-      max_norm = self.config.training.optimizer.gradient_clipping
+      max_norm         = self.config.training.optimizer.gradient_clipping
       grads, grad_norm = optim.clip_grad_norm(grads, max_norm)
     self._opt_wm.update(self._wm_bundle, grads)
 

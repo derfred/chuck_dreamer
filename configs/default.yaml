@@ -71,6 +71,11 @@ training:
     # Auxiliary head loss (object_xy + ee_pos regression from the latent).
     aux_scale: 0.0
 
+eval:
+  data_path: "data/generated-pushes/"
+  data_format: "rerun"  # "hdf5" or "rerun
+  num_episodes: 20
+
 logging:
   logger: "trackio" # "none", "wandb", "trackio"
   project_name: "chuck-dreamer"
