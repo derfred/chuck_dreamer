@@ -42,8 +42,16 @@ class Trainer:
     if not os.path.exists(data_cfg.warmup_path):
       logger.warning(f"Warmup path {data_cfg.warmup_path} does not exist. Skipping warmup.")
       return
-    logger.info(f"Loading warmup episodes from {data_cfg.warmup_path} (format={data_cfg.warmup_format})")
-    self._replay_buffer.load_sim_episodes(data_cfg.warmup_path, data_cfg.warmup_format, progress=True)
+    logger.info(
+      f"Loading warmup episodes from {data_cfg.warmup_path} "
+      f"(format={data_cfg.warmup_format}, num_episodes={data_cfg.warmup_num_episodes})"
+    )
+    self._replay_buffer.load_sim_episodes(
+      data_cfg.warmup_path,
+      data_cfg.warmup_format,
+      progress=True,
+      num_episodes=data_cfg.warmup_num_episodes,
+    )
 
   def _collect_phase(self):
     collect_data = defaultdict(int)

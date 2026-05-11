@@ -179,8 +179,15 @@ def iter_episodes(
   directory: str | Path,
   format: str = "hdf5",
   progress: Progress = False,
+  num_episodes: int | None = None,
+  rng: np.random.Generator | None = None,
 ) -> Iterator[RawEpisode]:
-  """Yield raw episodes from a directory of writer output."""
+  """Yield raw episodes from a directory of writer output.
+
+  If ``num_episodes`` is given, a random subset of that many episodes is
+  selected (without replacement) using ``rng`` (or a fresh default rng).
+  When ``num_episodes`` exceeds the available files, all files are used.
+  """
   directory = Path(directory)
   if format == "hdf5":
     paths = sorted(directory.glob("episode_*.hdf5"))
@@ -191,8 +198,13 @@ def iter_episodes(
   else:
     raise ValueError(f"unsupported format {format!r}; use 'hdf5' or 'rerun'")
 
+  if num_episodes is not None and num_episodes < len(paths):
+    rng = rng if rng is not None else np.random.default_rng()
+    idx = rng.choice(len(paths), size=int(num_episodes), replace=False)
+    paths = [paths[i] for i in sorted(idx.tolist())]
+
   callback = _resolve_progress(progress)
-  total = len(paths)
+  total    = len(paths)
   for i, p in enumerate(paths, start=1):
     episode = loader(p)
     if callback is not None:

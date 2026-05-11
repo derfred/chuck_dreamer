@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 @dataclass
 class ObjectConfig:
-    shape: str                     # "box", "cylinder", "sphere", "capsule", "mesh"
+    shape: str                     # "box", "cylinder", "sphere", "capsule", "pyramid", "mesh"
     size: list[float]              # shape-dependent dimensions
     mass: float                    # kg
     friction: float                # sliding friction coefficient
@@ -39,7 +39,7 @@ class SceneConfig:
     table_color: list[float]       # RGBA
 
     # Robot
-    robot_type: str                # "stick" | "so100"
+    robot_type: str                # "so100"
     robot_base_pos: list[float]    # [x, y, z] relative to table
     # if None, use default home position
     robot_initial_qpos: list[float] | None
@@ -69,12 +69,9 @@ class SceneConfig:
     def joint_initial_qpos(self) -> list[float] | None:
         if self.robot_initial_qpos is not None:
             return self.robot_initial_qpos
-        if self.robot_type == "stick":
-            return [0.0]
-        elif self.robot_type == "so100":
+        if self.robot_type == "so100":
             return [0, -3.14, 3.14, 0, 0, 0]
-        else:
-            raise ValueError(f"Unknown robot type: {self.robot_type}")
+        raise ValueError(f"Unknown robot type: {self.robot_type}")
 
     @property
     def joint_names(self) -> list[str]:
@@ -87,8 +84,6 @@ class SceneConfig:
 
 def joint_names_for_robot(robot_type: str) -> list[str]:
     """Joint names defined by the robot model — independent of any sampled scene."""
-    if robot_type == "stick":
-        return ["joint1"]
     if robot_type == "so100":
         return ["Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw"]
     raise ValueError(f"Unknown robot type: {robot_type}")
@@ -105,4 +100,7 @@ def object_half_z(cfg: ObjectConfig) -> float:
         return s[0]
     if cfg.shape == "capsule":
         return (s[0] + s[1]) if len(s) > 1 else s[0]
+    if cfg.shape == "pyramid":
+        # size = [half_base, height]; mesh is centred on its bounding-box centre
+        return (s[1] / 2.0) if len(s) > 1 else s[0]
     return 0.03

@@ -23,19 +23,25 @@ _TABLE_GEOM_CENTRE_Z = 0.02
 # Difficulty presets
 # ---------------------------------------------------------------------------
 
+# Distractor (obstacle/clutter) shapes per difficulty. ``target_shapes`` lists
+# the shapes the pushable target object may take. ``color_mode`` controls how
+# the target and obstacle/clutter colors are sampled — see ``_sample_color``.
 _PRESETS: dict[str, dict[str, Any]] = {
   "easy": {
-    "shapes": ["box", "cylinder"],
+    "target_shapes": ["box", "cylinder"],
+    "distractor_shapes": ["box", "cylinder"],
     "mass_range": (0.05, 0.2),
     "num_obstacles": (0, 0),
     "num_clutter": (0, 0),
     "camera_angle_range": 5.0,   # degrees
     "push_distance": (0.05, 0.10),
     "lighting_variation": 0.0,
-    "robot_type": "stick",
+    "robot_type": "so100",
+    "color_mode": "target_red",
   },
   "medium": {
-    "shapes": ["box", "cylinder", "capsule"],
+    "target_shapes": ["box", "cylinder"],
+    "distractor_shapes": ["box", "cylinder", "pyramid"],
     "mass_range": (0.02, 0.5),
     "num_obstacles": (0, 2),
     "num_clutter": (0, 3),
@@ -43,9 +49,11 @@ _PRESETS: dict[str, dict[str, Any]] = {
     "push_distance": (0.05, 0.20),
     "lighting_variation": 0.2,
     "robot_type": "so100",
+    "color_mode": "target_red_distractors_non_red",
   },
   "hard": {
-    "shapes": ["box", "cylinder", "capsule", "sphere"],
+    "target_shapes": ["box", "cylinder", "capsule", "sphere", "pyramid"],
+    "distractor_shapes": ["box", "cylinder", "capsule", "sphere", "pyramid"],
     "mass_range": (0.01, 1.0),
     "num_obstacles": (0, 5),
     "num_clutter": (0, 8),
@@ -53,12 +61,20 @@ _PRESETS: dict[str, dict[str, Any]] = {
     "push_distance": (0.05, 0.30),
     "lighting_variation": 0.5,
     "robot_type": "so100",
+    "color_mode": "shared",
   },
 }
 
+# RGBA tuple for the "red" target color used in easy/medium difficulties.
+_RED_RGBA = [0.85, 0.15, 0.15, 1.0]
+
+# Threshold (in normalized RGB distance) below which a sampled color is
+# considered "too red" and rejected when distractors must avoid red.
+_RED_REJECTION_DIST = 0.45
+
 # Maximum arm reach (3 links × 0.15 m each, but realistic reach ~0.35 m)
-_ARM_MAX_REACH = 0.38
-_ARM_MIN_REACH = 0.12
+_ARM_MAX_REACH = 0.4
+_ARM_MIN_REACH = 0.2
 
 # Object radius used for overlap checks (conservative)
 _OBJ_RADIUS = 0.06
@@ -75,7 +91,29 @@ def _object_footprint_radius(cfg: ObjectConfig) -> float:
     return s[0]
   if cfg.shape == "capsule":
     return s[0]
+  if cfg.shape == "pyramid":
+    # Square base with half-extent s[0]; worst-case diagonal radius.
+    return math.hypot(s[0], s[0])
   return 0.03
+
+
+def _sample_non_red_color(rng: np.random.Generator) -> list[float]:
+  """Sample an RGBA color whose RGB is sufficiently far from the target red.
+
+  Rejection sampling — capped at a few attempts to avoid pathological loops.
+  If we never find a valid color we fall back to a desaturated grey so the
+  scene still renders something sensible.
+  """
+  red = np.array(_RED_RGBA[:3])
+  for _ in range(32):
+    rgb = np.array([rng.uniform(0.1, 1.0) for _ in range(3)])
+    if np.linalg.norm(rgb - red) > _RED_REJECTION_DIST:
+      return [float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0]
+  return [0.4, 0.4, 0.5, 1.0]
+
+
+def _sample_color(rng: np.random.Generator) -> list[float]:
+  return [float(rng.uniform(0.1, 1.0)) for _ in range(3)] + [1.0]
 
 
 def _sample_object(
@@ -85,14 +123,14 @@ def _sample_object(
     table_half_x: float,
     table_half_y: float,
     table_top_z: float,
+    color: list[float],
     margin: float = 0.07,
     min_x: float | None = None,
 ) -> ObjectConfig:
-  shape       = rng.choice(shapes)
+  shape       = str(rng.choice(shapes))
   mass        = float(rng.uniform(*mass_range))
   friction    = float(rng.uniform(0.3, 0.8))
   orientation = float(rng.uniform(0.0, 2 * math.pi))
-  color       = [float(rng.uniform(0.1, 1.0)) for _ in range(3)] + [1.0]
 
   # Sample position anywhere on the accessible portion of the table
   x_low = -table_half_x + margin if min_x is None else max(-table_half_x + margin, min_x)
@@ -113,6 +151,10 @@ def _sample_object(
     r = float(rng.uniform(0.015, 0.035))
     h = float(rng.uniform(0.03, 0.07))
     size = [r, h]
+  elif shape == "pyramid":
+    half_base = float(rng.uniform(0.025, 0.05))
+    height    = float(rng.uniform(0.04, 0.08))
+    size      = [half_base, height]
   else:
     size = [0.03, 0.03, 0.03]
 
@@ -123,7 +165,7 @@ def _sample_object(
       friction=friction,
       pos=[x, y, 0.0],
       orientation=orientation,
-      color=color,
+      color=list(color),
   )
   z = table_top_z + object_half_z(partial)
   partial.pos[2] = z
@@ -184,8 +226,30 @@ class SceneGenerator:
       # Robot base sits on top of the table at the left edge (−x), centered in y
       robot_base_pos = [-table_half_x, 0.0, table_half_z]
 
+      # Colors — per difficulty:
+      #   easy:   target red, no distractors anyway
+      #   medium: target red, distractors any non-red color
+      #   hard:   target and distractors share one shared random color
+      color_mode = p["color_mode"]
+      if color_mode == "target_red":
+        target_color     = list(_RED_RGBA)
+        distractor_color = _sample_non_red_color  # callable; sample per-instance
+      elif color_mode == "target_red_distractors_non_red":
+        target_color     = list(_RED_RGBA)
+        distractor_color = _sample_non_red_color
+      elif color_mode == "shared":
+        shared           = _sample_color(rng)
+        target_color     = shared
+        distractor_color = (lambda _rng, c=shared: list(c))
+      else:
+        raise ValueError(f"Unknown color_mode '{color_mode}' in preset")
+
       # Target object — must end up on the reachable side
-      target = _sample_object(rng, p["shapes"], p["mass_range"], table_half_x, table_half_y, table_top_z, margin=0.07)
+      target = _sample_object(
+          rng, p["target_shapes"], p["mass_range"],
+          table_half_x, table_half_y, table_top_z,
+          color=target_color, margin=0.07,
+      )
 
       # Goal: push direction at a random angle from target
       push_dist      = float(rng.uniform(*p["push_distance"]))
@@ -195,18 +259,29 @@ class SceneGenerator:
       goal_pos       = [gx, gy]
       goal_tolerance = 0.04
 
-      # Obstacles
+      # Obstacles (colliding distractors). Shapes follow the preset's
+      # ``distractor_shapes`` list, which includes the pyramid at medium+.
       num_obs = int(rng.integers(p["num_obstacles"][0], p["num_obstacles"][1] + 1))
       obstacles: list[ObjectConfig] = []
       for _ in range(num_obs):
-        obs = _sample_object(rng, ["box", "cylinder"], p["mass_range"], table_half_x, table_half_y, table_top_z, min_x=-table_half_x / 2)
+        obs = _sample_object(
+            rng, p["distractor_shapes"], p["mass_range"],
+            table_half_x, table_half_y, table_top_z,
+            color=distractor_color(rng),
+            min_x=-table_half_x / 2,
+        )
         obstacles.append(obs)
 
-      # Clutter (visual only — contype=0)
+      # Clutter (visual only — contype=0). Same shape/color rules as obstacles.
       num_clutter = int(rng.integers(p["num_clutter"][0], p["num_clutter"][1] + 1))
       clutter: list[ObjectConfig] = []
       for _ in range(num_clutter):
-        cl = _sample_object(rng, p["shapes"], p["mass_range"], table_half_x, table_half_y, table_top_z, min_x=-table_half_x / 2)
+        cl = _sample_object(
+            rng, p["distractor_shapes"], p["mass_range"],
+            table_half_x, table_half_y, table_top_z,
+            color=distractor_color(rng),
+            min_x=-table_half_x / 2,
+        )
         clutter.append(cl)
 
       # Camera — looking down at the table from above and to one side
@@ -253,6 +328,7 @@ class SceneGenerator:
   def _is_valid(self, cfg: SceneConfig) -> bool:
     return (
         self._check_reachability(cfg)
+        and self._check_goal_reachability(cfg)
         and self._check_goal_on_table(cfg)
         and self._check_no_overlaps(cfg)
         and self._check_push_path(cfg)
@@ -264,6 +340,13 @@ class SceneGenerator:
     tx, ty = cfg.target.pos[:2]
     bx, by = cfg.robot_base_pos[:2]
     dist   = math.hypot(tx - bx, ty - by)
+    return _ARM_MIN_REACH <= dist <= _ARM_MAX_REACH
+
+  def _check_goal_reachability(self, cfg: SceneConfig) -> bool:
+    """Goal must lie within the same reachability annulus as the target."""
+    gx, gy = cfg.goal_pos
+    bx, by = cfg.robot_base_pos[:2]
+    dist   = math.hypot(gx - bx, gy - by)
     return _ARM_MIN_REACH <= dist <= _ARM_MAX_REACH
 
   def _check_goal_on_table(self, cfg: SceneConfig) -> bool:

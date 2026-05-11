@@ -223,14 +223,6 @@ class TestSceneBuilder:
         model, mujoco.mjtObj.mjOBJ_BODY, "obstacle_0")
     assert obs_id >= 0
 
-  def test_simple_arm_xml_exists(self):
-    from chuck_dreamer.sim.scene_builder import _SIMPLE_ARM_XML
-    assert _SIMPLE_ARM_XML.exists()
-    content = _SIMPLE_ARM_XML.read_text()
-    assert "ee_frame" in content
-    assert "joint1" in content
-
-
 # ---------------------------------------------------------------------------
 # PushingEnv tests — joint action mode (default for these fixtures)
 # ---------------------------------------------------------------------------

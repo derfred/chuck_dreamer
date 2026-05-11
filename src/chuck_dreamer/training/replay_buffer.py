@@ -273,6 +273,7 @@ class ReplayBuffer:
     directory: str | Path,
     format: str = "hdf5",
     progress: "Progress" = False,
+    num_episodes: int | None = None,
   ) -> int:
     """Ingest episodes from a sim ``EpisodeWriter`` output directory.
 
@@ -285,10 +286,20 @@ class ReplayBuffer:
     ``progress`` is forwarded to :func:`iter_episodes` — pass ``True``
     for a tqdm/print progress bar or a ``(i, total, path)`` callable
     for custom reporting.
+
+    ``num_episodes`` optionally limits ingestion to a random subset of
+    that many episode files (drawn without replacement using the
+    buffer's RNG, so it's deterministic given ``seed``).
     """
 
     count = 0
-    for raw in iter_episodes(directory, format=format, progress=progress):
+    for raw in iter_episodes(
+      directory,
+      format=format,
+      progress=progress,
+      num_episodes=num_episodes,
+      rng=self._rng,
+    ):
       before = self.num_episodes
       self.add_sim_episode(raw)
       if self.num_episodes > before:

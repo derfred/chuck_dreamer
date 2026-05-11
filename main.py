@@ -80,7 +80,7 @@ def generate_scenes(ctx, episodes, output, seed, fmt, overrides):
   cfg = _resolve_cfg(ctx, _alias_overrides({"seed": seed}) + overrides)
 
   click.echo(f"Collecting {episodes} episodes → {output}  (difficulty={cfg.env.difficulty}, format={fmt}, seed={cfg.seed})")
-  outcome_counts = {"done": 0, "terminated": 0, "timeout": 0, "crashed": 0}
+  outcome_counts = {}
 
   env    = PushingEnv(cfg)
   policy = ScriptedPolicy(auto_advance_from_ready=True)

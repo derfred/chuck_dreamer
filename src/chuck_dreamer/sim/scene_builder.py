@@ -13,16 +13,34 @@ from .scene_config import ObjectConfig, SceneConfig
 
 _ASSETS_DIR = Path(__file__).parent.parent.parent.parent / "assets" / "mujoco"
 _BASE_SCENE_XML = _ASSETS_DIR / "base_scene.xml"
-_SIMPLE_ARM_XML = _ASSETS_DIR / "simple_arm.xml"
 _SO101_ARM_XML = _ASSETS_DIR / "so101_arm.xml"
 _SO101_MESHDIR = _ASSETS_DIR / "trs_so_arm100"
+
+# Name of the inline square-based pyramid mesh registered in the <asset> section.
+_PYRAMID_MESH_NAME = "unit_pyramid"
+
+# Unit pyramid (square base of side 2 centred at origin in xy, apex at z=1).
+# We scale it via the mesh-asset ``scale`` attribute for each instance.
+_PYRAMID_VERTICES = "-1 -1 0  1 -1 0  1 1 0  -1 1 0  0 0 1"
+
+# z-coordinate of the table geom centre in the base MJCF (see base_scene.xml).
+# Duplicated from scene_generator.py to keep this module standalone.
+_TABLE_GEOM_CENTRE_Z = 0.02
+
+# Half-height of the flat disc rendered to mark the goal. Tiny so it reads as a
+# decal on the table from any reasonable camera angle.
+_GOAL_DISC_HALF_HEIGHT = 0.0005
 
 
 # ---------------------------------------------------------------------------
 # Helper: build an XML body element for a primitive ObjectConfig
 # ---------------------------------------------------------------------------
 
-def _object_geom_element(cfg: ObjectConfig, name: str) -> etree._Element:
+def _object_geom_element(
+    cfg: ObjectConfig,
+    name: str,
+    pyramid_mesh_name: str | None = None,
+) -> etree._Element:
     """Return an lxml ``<geom>`` element for the given object config."""
     geom = etree.Element("geom")
     geom.set("name", f"{name}_geom")
@@ -45,6 +63,11 @@ def _object_geom_element(cfg: ObjectConfig, name: str) -> etree._Element:
     elif shape == "capsule":
         geom.set("type", "capsule")
         geom.set("size", f"{cfg.size[0]:.4f} {cfg.size[1]:.4f}")
+    elif shape == "pyramid":
+        if pyramid_mesh_name is None:
+            raise ValueError("pyramid shape requires a registered mesh name")
+        geom.set("type", "mesh")
+        geom.set("mesh", pyramid_mesh_name)
     else:
         geom.set("type", "box")
         geom.set("size", "0.03 0.03 0.03")
@@ -56,6 +79,7 @@ def _make_object_body(
     cfg: ObjectConfig,
     name: str,
     colliding: bool,
+    pyramid_mesh_name: str | None = None,
 ) -> etree._Element:
     """Build a ``<body>`` element at the config's world position."""
     body = etree.Element("body")
@@ -76,12 +100,33 @@ def _make_object_body(
         ival = max(2.0 / 5.0 * cfg.mass * r * r, 1e-6)
         inertial.set("diaginertia", f"{ival:.6e} {ival:.6e} {ival:.6e}")
 
-    geom = _object_geom_element(cfg, name)
+    geom = _object_geom_element(cfg, name, pyramid_mesh_name=pyramid_mesh_name)
     if not colliding:
         geom.set("contype", "0")
         geom.set("conaffinity", "0")
     body.append(geom)
     return body
+
+
+def _register_pyramid_mesh(
+    root: etree._Element,
+    name: str,
+    half_base: float,
+    height: float,
+) -> None:
+    """Add an inline square-based pyramid mesh to the <asset> section.
+
+    The mesh is built from a unit pyramid (base half-extent 1, height 1) scaled
+    per-instance so that we can vary pyramid dimensions without rebuilding the
+    geometry definition.
+    """
+    asset = root.find("asset")
+    if asset is None:
+        asset = etree.SubElement(root, "asset")
+    mesh = etree.SubElement(asset, "mesh")
+    mesh.set("name", name)
+    mesh.set("vertex", _PYRAMID_VERTICES)
+    mesh.set("scale", f"{half_base:.4f} {half_base:.4f} {height:.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -171,15 +216,13 @@ def _load_base_xml(config: SceneConfig) -> etree._Element:
     parser = etree.XMLParser(remove_blank_text=True)
     root = etree.parse(str(_BASE_SCENE_XML), parser).getroot()
 
-    if config.robot_type == "so100":
-        arm_root = etree.parse(str(_SO101_ARM_XML), parser).getroot()
-        _inject_arm_fragment(root, arm_root)
-        compiler = root.find("compiler")
-        if compiler is not None:
-            compiler.set("meshdir", str(_SO101_MESHDIR))
-    else:
-        arm_root = etree.parse(str(_SIMPLE_ARM_XML), parser).getroot()
-        _inject_arm_fragment(root, arm_root)
+    if config.robot_type != "so100":
+        raise ValueError(f"Unsupported robot_type '{config.robot_type}'; only 'so100' is supported")
+    arm_root = etree.parse(str(_SO101_ARM_XML), parser).getroot()
+    _inject_arm_fragment(root, arm_root)
+    compiler = root.find("compiler")
+    if compiler is not None:
+        compiler.set("meshdir", str(_SO101_MESHDIR))
 
     return root
 
@@ -223,16 +266,55 @@ class SceneBuilder:
             table_geom.set("size", f"{hx:.3f} {hy:.3f} {hz:.3f}")
             table_geom.set("friction", f"{config.table_friction:.3f} 0.02 0.001")
 
-        target_body = _make_object_body(config.target, "target_object", colliding=True)
+        def _maybe_register_pyramid(cfg: ObjectConfig, name: str) -> str | None:
+            if cfg.shape != "pyramid":
+                return None
+            mesh_name = f"{name}_pyramid_mesh"
+            half_base = cfg.size[0] if len(cfg.size) > 0 else 0.03
+            height    = cfg.size[1] if len(cfg.size) > 1 else 0.06
+            _register_pyramid_mesh(root, mesh_name, half_base, height)
+            return mesh_name
+
+        target_mesh = _maybe_register_pyramid(config.target, "target_object")
+        target_body = _make_object_body(
+            config.target, "target_object", colliding=True, pyramid_mesh_name=target_mesh
+        )
         worldbody.append(target_body)
 
         for i, obs_cfg in enumerate(config.obstacles):
-            obs_body = _make_object_body(obs_cfg, f"obstacle_{i}", colliding=True)
+            name = f"obstacle_{i}"
+            mesh_name = _maybe_register_pyramid(obs_cfg, name)
+            obs_body = _make_object_body(
+                obs_cfg, name, colliding=True, pyramid_mesh_name=mesh_name
+            )
             worldbody.append(obs_body)
 
         for i, cl_cfg in enumerate(config.clutter):
-            cl_body = _make_object_body(cl_cfg, f"clutter_{i}", colliding=False)
+            name = f"clutter_{i}"
+            mesh_name = _maybe_register_pyramid(cl_cfg, name)
+            cl_body = _make_object_body(
+                cl_cfg, name, colliding=False, pyramid_mesh_name=mesh_name
+            )
             worldbody.append(cl_body)
+
+        # Goal disc: a thin non-colliding cylinder lying flush on the table top.
+        # Uses ``goal_tolerance`` as its radius so the rendered marker matches the
+        # success threshold the reward function uses.
+        table_top_z = _TABLE_GEOM_CENTRE_Z + config.table_size[2]
+        goal_geom = etree.SubElement(worldbody, "geom")
+        goal_geom.set("name", "goal_marker")
+        goal_geom.set("type", "cylinder")
+        goal_geom.set(
+            "size", f"{config.goal_tolerance:.4f} {_GOAL_DISC_HALF_HEIGHT:.5f}"
+        )
+        goal_geom.set(
+            "pos",
+            f"{config.goal_pos[0]:.4f} {config.goal_pos[1]:.4f} "
+            f"{table_top_z + _GOAL_DISC_HALF_HEIGHT:.5f}",
+        )
+        goal_geom.set("rgba", "0.95 0.95 0.95 1")
+        goal_geom.set("contype", "0")
+        goal_geom.set("conaffinity", "0")
 
         cam_elem = root.find(".//camera[@name='main_camera']")
         if cam_elem is None:
