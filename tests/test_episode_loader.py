@@ -299,6 +299,26 @@ def test_iter_episodes_progress_true_does_not_crash(tmp_path, capsys):
   assert len(eps) == 1
 
 
+def test_iter_episodes_parallel_preserves_order_and_progress(tmp_path):
+  # Parallel loading must yield in submission order and call the
+  # progress callback once per file with monotonically increasing i.
+  for idx in range(5):
+    _write_sim_episode(tmp_path, "hdf5", T=10, idx=idx)
+
+  calls: list[tuple[int, int, str]] = []
+  eps = list(iter_episodes(
+    tmp_path, format="hdf5", num_workers=3,
+    progress=lambda i, total, path: calls.append((i, total, path.name)),
+  ))
+
+  assert len(eps) == 5
+  assert [i for i, _, _ in calls] == [1, 2, 3, 4, 5]
+  assert all(total == 5 for _, total, _ in calls)
+  assert [name for _, _, name in calls] == [
+    f"episode-{i:05d}.hdf5" for i in range(5)
+  ]
+
+
 # ---------------------------------------------------------------------------
 # derive_image_size
 # ---------------------------------------------------------------------------

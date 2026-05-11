@@ -24,12 +24,10 @@ class Trainer:
     self.config = config
     self.env    = PushingEnv(config)
 
-    self._replay_buffer = ReplayBuffer(
-      capacity_steps=config.training.data.buffer_size,
-      min_episode_len=config.training.min_episode_len,
+    self._replay_buffer = ReplayBuffer.from_config(
+      config,
       processor=processor_for(config),
       reward_fn=build_reward_fn(config.env.reward),
-      seed=config.seed,
     )
 
     obs_shape  = self.env.model_obs_shape

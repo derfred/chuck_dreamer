@@ -5,6 +5,7 @@ See `replay_buffer.md` in the project root for the full design doc.
 
 from __future__ import annotations
 
+import os
 import pickle
 from collections import deque
 from pathlib import Path
@@ -36,6 +37,7 @@ class ReplayBuffer:
     processor: EpisodeProcessor | None = None,
     reward_fn: RewardFn | None = None,
     seed: int | None = None,
+    default_num_workers: int = 0,
   ) -> None:
     """Construct an episodic replay buffer.
 
@@ -44,6 +46,10 @@ class ReplayBuffer:
     When None, sample() returns the reward recorded with the episode.
     Recomputation additionally requires ``goal_xy``; episodes missing
     that fall back to stored reward.
+
+    ``default_num_workers`` is the default pool size used by
+    :meth:`load_sim_episodes` when its ``num_workers`` arg is omitted.
+    ``from_config`` resolves this from ``training.data.warmup_num_workers``.
     """
     if min_episode_len < 1:
       raise ValueError("min_episode_len must be >= 1")
@@ -56,6 +62,40 @@ class ReplayBuffer:
     self._rng = np.random.default_rng(seed)
 
     self._sim_processor = processor if processor is not None else StateVectorProcessor()
+    self._default_num_workers = default_num_workers
+
+  @classmethod
+  def from_config(
+    cls,
+    config,
+    *,
+    processor: EpisodeProcessor | None = None,
+    reward_fn: RewardFn | None = None,
+  ) -> "ReplayBuffer":
+    """Build a ReplayBuffer from a project config.
+
+    Reads ``training.data.buffer_size``, ``training.min_episode_len``,
+    ``seed``, and ``training.data.warmup_num_workers``. A ``null``
+    ``warmup_num_workers`` resolves to ``max(1, os.cpu_count() // 2)``;
+    ``0`` keeps loading sequential.
+
+    ``processor`` and ``reward_fn`` stay as explicit args because they
+    aren't expressible in the config schema today.
+    """
+    data_cfg = config.training.data
+    cfg_workers = data_cfg.get("warmup_num_workers")
+    if cfg_workers is None:
+      num_workers = max(1, (os.cpu_count() or 2) // 2)
+    else:
+      num_workers = int(cfg_workers)
+    return cls(
+      capacity_steps=data_cfg.buffer_size,
+      min_episode_len=config.training.min_episode_len,
+      processor=processor,
+      reward_fn=reward_fn,
+      seed=config.seed,
+      default_num_workers=num_workers,
+    )
 
   # ---------------------------------------------------------------------
   # Write side
@@ -290,8 +330,10 @@ class ReplayBuffer:
     ``num_episodes`` optionally limits ingestion to a random subset of
     that many episode files (drawn without replacement using the
     buffer's RNG, so it's deterministic given ``seed``).
-    """
 
+    Parallel-load pool size is set on the buffer at construction time
+    via ``default_num_workers`` (or :meth:`from_config`).
+    """
     count = 0
     for raw in iter_episodes(
       directory,
@@ -299,6 +341,7 @@ class ReplayBuffer:
       progress=progress,
       num_episodes=num_episodes,
       rng=self._rng,
+      num_workers=self._default_num_workers,
     ):
       before = self.num_episodes
       self.add_sim_episode(raw)

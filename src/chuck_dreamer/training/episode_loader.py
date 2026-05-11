@@ -12,6 +12,8 @@ is done by the processors in :mod:`.episode_processor`.
 
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Iterator, Union
 
@@ -181,20 +183,31 @@ def iter_episodes(
   progress: Progress = False,
   num_episodes: int | None = None,
   rng: np.random.Generator | None = None,
+  num_workers: int = 0,
 ) -> Iterator[RawEpisode]:
   """Yield raw episodes from a directory of writer output.
 
   If ``num_episodes`` is given, a random subset of that many episodes is
   selected (without replacement) using ``rng`` (or a fresh default rng).
   When ``num_episodes`` exceeds the available files, all files are used.
+
+  ``num_workers`` controls parallel loading. ``0`` (default) loads
+  sequentially in the calling thread. ``>0`` dispatches loads to a pool
+  sized at ``num_workers``: a thread pool for ``hdf5`` (h5py releases the
+  GIL on reads) and a process pool for ``rerun`` (the per-step Python
+  loops in the rerun reader are GIL-bound). Episodes are yielded in
+  submission order, with a bounded in-flight window so peak memory stays
+  capped at roughly ``num_workers`` episodes.
   """
   directory = Path(directory)
   if format == "hdf5":
     paths = sorted(directory.glob("episode-*.hdf5"))
     loader = load_hdf5_episode
+    pool_cls: type[ThreadPoolExecutor] | type[ProcessPoolExecutor] = ThreadPoolExecutor
   elif format == "rerun":
     paths = sorted(directory.glob("episode-*.rrd"))
     loader = load_rerun_episode
+    pool_cls = ProcessPoolExecutor
   else:
     raise ValueError(f"unsupported format {format!r}; use 'hdf5' or 'rerun'")
 
@@ -205,8 +218,31 @@ def iter_episodes(
 
   callback = _resolve_progress(progress)
   total    = len(paths)
-  for i, p in enumerate(paths, start=1):
-    episode = loader(p)
-    if callback is not None:
-      callback(i, total, p)
-    yield episode
+
+  if num_workers <= 0 or total <= 1:
+    for i, p in enumerate(paths, start=1):
+      episode = loader(p)
+      if callback is not None:
+        callback(i, total, p)
+      yield episode
+    return
+
+  window = min(num_workers, total)
+  with pool_cls(max_workers=num_workers) as pool:
+    in_flight: deque = deque()
+    next_submit = 0
+    for _ in range(window):
+      in_flight.append((next_submit, paths[next_submit], pool.submit(loader, paths[next_submit])))
+      next_submit += 1
+
+    yielded = 0
+    while in_flight:
+      _idx, path, fut = in_flight.popleft()
+      episode = fut.result()
+      yielded += 1
+      if callback is not None:
+        callback(yielded, total, path)
+      yield episode
+      if next_submit < total:
+        in_flight.append((next_submit, paths[next_submit], pool.submit(loader, paths[next_submit])))
+        next_submit += 1
