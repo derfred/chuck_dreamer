@@ -51,11 +51,12 @@ def _make_raw_episode(T: int, img_hw: tuple[int, int] = (16, 16)) -> dict:
   }
 
 
-def _write_sim_episode(dir_path: Path, fmt: str, T: int = 20) -> None:
+def _write_sim_episode(dir_path: Path, fmt: str, T: int = 20, idx: int = 0) -> None:
   writer = EpisodeWriter(str(dir_path), format=fmt)
   writer.write_episode(
     _make_raw_episode(T),
     metadata={"seed": 7, "source": "test", "outcome": "done", "goal_xy": [0.1, 0.2]},
+    name_suffix=f"{idx:05d}",
   )
 
 
@@ -154,7 +155,7 @@ def test_image_processor_returns_image_as_uint8():
 
 def test_load_hdf5_episode_round_trip(tmp_path):
   _write_sim_episode(tmp_path, "hdf5", T=20)
-  raw = load_hdf5_episode(tmp_path / "episode_00000.hdf5")
+  raw = load_hdf5_episode(tmp_path / "episode-00000.hdf5")
 
   assert raw["image"].shape == (20, 16, 16, 3)
   assert raw["joint_action"].shape == (20, 3)
@@ -164,8 +165,8 @@ def test_load_hdf5_episode_round_trip(tmp_path):
 
 
 def test_replay_buffer_loads_hdf5_directory(tmp_path):
-  _write_sim_episode(tmp_path, "hdf5", T=20)
-  _write_sim_episode(tmp_path, "hdf5", T=20)
+  _write_sim_episode(tmp_path, "hdf5", T=20, idx=0)
+  _write_sim_episode(tmp_path, "hdf5", T=20, idx=1)
 
   buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
   n = buf.load_sim_episodes(tmp_path, format="hdf5")
@@ -190,7 +191,7 @@ def test_replay_buffer_loads_hdf5_directory(tmp_path):
 
 def test_load_rerun_episode_round_trip(tmp_path):
   _write_sim_episode(tmp_path, "rerun", T=20)
-  raw = load_rerun_episode(tmp_path / "episode_00000.rrd")
+  raw = load_rerun_episode(tmp_path / "episode-00000.rrd")
 
   assert raw["image"].shape == (20, 16, 16, 3)
   assert raw["joint_action"].shape == (20, 3)
@@ -200,8 +201,8 @@ def test_load_rerun_episode_round_trip(tmp_path):
 
 
 def test_replay_buffer_loads_rerun_directory(tmp_path):
-  _write_sim_episode(tmp_path, "rerun", T=20)
-  _write_sim_episode(tmp_path, "rerun", T=20)
+  _write_sim_episode(tmp_path, "rerun", T=20, idx=0)
+  _write_sim_episode(tmp_path, "rerun", T=20, idx=1)
 
   buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, processor=ImageProcessor(image_size=16), seed=0)
   n = buf.load_sim_episodes(tmp_path, format="rerun")
@@ -237,6 +238,7 @@ def test_load_sim_episodes_skips_too_short_episodes(tmp_path):
   writer.write_episode(
     _make_raw_episode(3),
     metadata={"seed": 0, "source": "test"},
+    name_suffix="00000",
   )
   buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
   inserted = buf.load_sim_episodes(tmp_path, format="hdf5")
@@ -250,8 +252,8 @@ def test_load_sim_episodes_skips_too_short_episodes(tmp_path):
 
 
 def test_iter_episodes_progress_callback_sees_every_file(tmp_path):
-  for _ in range(3):
-    _write_sim_episode(tmp_path, "hdf5", T=10)
+  for idx in range(3):
+    _write_sim_episode(tmp_path, "hdf5", T=10, idx=idx)
 
   calls: list[tuple[int, int, str]] = []
 
@@ -263,9 +265,9 @@ def test_iter_episodes_progress_callback_sees_every_file(tmp_path):
   assert [i for i, _, _ in calls] == [1, 2, 3]
   assert all(total == 3 for _, total, _ in calls)
   assert [name for _, _, name in calls] == [
-    "episode_00000.hdf5",
-    "episode_00001.hdf5",
-    "episode_00002.hdf5",
+    "episode-00000.hdf5",
+    "episode-00001.hdf5",
+    "episode-00002.hdf5",
   ]
 
 
@@ -276,8 +278,8 @@ def test_iter_episodes_progress_callback_is_not_called_for_empty_dir(tmp_path):
 
 
 def test_load_sim_episodes_forwards_progress(tmp_path):
-  for _ in range(2):
-    _write_sim_episode(tmp_path, "hdf5", T=10)
+  for idx in range(2):
+    _write_sim_episode(tmp_path, "hdf5", T=10, idx=idx)
 
   seen: list[int] = []
   buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)

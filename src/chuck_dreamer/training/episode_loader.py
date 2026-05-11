@@ -190,10 +190,10 @@ def iter_episodes(
   """
   directory = Path(directory)
   if format == "hdf5":
-    paths = sorted(directory.glob("episode_*.hdf5"))
+    paths = sorted(directory.glob("episode-*.hdf5"))
     loader = load_hdf5_episode
   elif format == "rerun":
-    paths = sorted(directory.glob("episode_*.rrd"))
+    paths = sorted(directory.glob("episode-*.rrd"))
     loader = load_rerun_episode
   else:
     raise ValueError(f"unsupported format {format!r}; use 'hdf5' or 'rerun'")

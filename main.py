@@ -106,6 +106,7 @@ def generate_scenes(ctx, episodes, output, seed, fmt, overrides):
         "outcome": outcome,
         "goal_xy": scene.goal_pos,
       },
+      name_suffix=f"{ep_idx:05d}",
     )
 
   env.close()

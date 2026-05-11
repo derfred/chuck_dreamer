@@ -360,9 +360,9 @@ class RSSM(nn.Module):
 
   def img_step(self, prev_state: dict, prev_action: mx.array) -> dict:
     """Imagination step: predict s_t from prior only, no observation."""
-    h = self._compute_h(prev_state["s"], prev_action, prev_state["h"])
+    h                     = self._compute_h(prev_state["s"], prev_action, prev_state["h"])
     prior_mean, prior_std = self._split_dist(self.prior_net(h))
-    s = self._sample(prior_mean, prior_std)
+    s                     = self._sample(prior_mean, prior_std)
     return {
       "h": h, "s": s,
       "prior_mean": prior_mean, "prior_std": prior_std,
@@ -370,11 +370,11 @@ class RSSM(nn.Module):
 
   def obs_step(self, prev_state: dict, prev_action: mx.array, embed: mx.array) -> dict:
     """Observation step: run prior, then refine with posterior using embed."""
-    h = self._compute_h(prev_state["s"], prev_action, prev_state["h"])
+    h                     = self._compute_h(prev_state["s"], prev_action, prev_state["h"])
     prior_mean, prior_std = self._split_dist(self.prior_net(h))
-    post_in = mx.concatenate([h, embed], axis=-1)
-    post_mean, post_std = self._split_dist(self.post_net(post_in))
-    s = self._sample(post_mean, post_std)
+    post_in               = mx.concatenate([h, embed], axis=-1)
+    post_mean, post_std   = self._split_dist(self.post_net(post_in))
+    s                     = self._sample(post_mean, post_std)
     return {
       "h": h, "s": s,
       "prior_mean": prior_mean, "prior_std": prior_std,
@@ -749,12 +749,15 @@ class DreamerMLXModel:
 
     return aux["post_states"]
 
-  def save(self, path: str) -> None:
+  def save(self, path: str, extra_metadata: dict[str, str] | None = None) -> None:
     """Save model weights (and optimizer state during training) to ``path``.
 
     Writes a single ``.safetensors`` file containing flat keys for the
     world-model bundle, actor, and critic. When ``training`` is True the
     Adam optimizer states are written alongside.
+
+    ``extra_metadata`` is merged into the safetensors metadata block. The
+    ``CONFIG_METADATA_KEY`` slot is reserved; passing it raises ValueError.
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
@@ -779,11 +782,20 @@ class DreamerMLXModel:
     # plain values, so the saved YAML is self-contained: loading it does not
     # require the resolver to be registered in the reader process.
     metadata = {CONFIG_METADATA_KEY: OmegaConf.to_yaml(self.config, resolve=True)}
+    if extra_metadata:
+      if CONFIG_METADATA_KEY in extra_metadata:
+        raise ValueError(f"extra_metadata may not set reserved key {CONFIG_METADATA_KEY!r}")
+      metadata.update(extra_metadata)
     mx.save_safetensors(path, weights, metadata=metadata)
 
-  def load(self, path: str) -> None:
-    """Load weights previously written by :meth:`save`."""
-    flat_weights = mx.load(path)
+  def load(self, path: str) -> dict[str, str]:
+    """Load weights previously written by :meth:`save`.
+
+    Returns the caller-supplied ``extra_metadata`` dict that was passed to
+    :meth:`save` (the reserved ``CONFIG_METADATA_KEY`` is filtered out).
+    Empty dict if the checkpoint has no extra metadata.
+    """
+    flat_weights, metadata = mx.load(path, return_metadata=True)
 
     def take(prefix):
       plen = len(prefix) + 1
@@ -808,3 +820,5 @@ class DreamerMLXModel:
         self._opt_critic.state = tree_unflatten(opt_critic)
 
     mx.eval(self.actor.parameters(), self.critic.parameters(), wm_bundle.parameters())
+
+    return {k: v for k, v in metadata.items() if k != CONFIG_METADATA_KEY}

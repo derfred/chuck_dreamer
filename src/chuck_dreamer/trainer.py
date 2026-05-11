@@ -1,10 +1,14 @@
 import logging
 import os
 from collections import defaultdict
+from dataclasses import asdict
+
+import numpy as np
 
 from .reward import build_reward_fn
 from .sim.pushing_env import PushingEnv
 from .sim.episode_collector import EpisodeCollector
+from .sim.episode_writer import EpisodeWriter
 
 from .training.episode_processor import processor_for
 from .training.replay_buffer import ReplayBuffer
@@ -37,6 +41,16 @@ class Trainer:
     self.tracker   = Tracker(config)
     self.tracker.init()
 
+    self._collect_writer = None
+    self._collect_dump_prob = 0.0
+    if config.training.data.get("collect_dump_path"):
+      self._collect_writer = EpisodeWriter(
+        config.training.data.collect_dump_path,
+        format=config.training.data.collect_dump_format,
+      )
+      self._collect_dump_prob = float(config.training.data.collect_dump_prob)
+    self._dump_rng = np.random.default_rng(config.seed)
+
   def _warmup(self):
     data_cfg = self.config.training.data
     if not os.path.exists(data_cfg.warmup_path):
@@ -53,9 +67,23 @@ class Trainer:
       num_episodes=data_cfg.warmup_num_episodes,
     )
 
-  def _collect_phase(self):
+  def _log_episode(self, episode_data, scene, outcome, iteration: int, ep_idx: int):
+    if self._collect_writer is not None and self._dump_rng.random() < self._collect_dump_prob:
+      self._collect_writer.write_episode(
+            episode_data,
+            metadata={
+              "config":  asdict(scene),
+              "seed":    self.config.seed,
+              "source":  "sim",
+              "outcome": outcome,
+              "goal_xy": scene.goal_pos,
+            },
+            name_suffix=f"step{iteration:03d}-{ep_idx:03d}",
+          )
+
+  def _collect_phase(self, iteration: int):
     collect_data = defaultdict(int)
-    for _ in range(self.config.training.num_collect_episodes):
+    for ep_idx in range(self.config.training.num_collect_episodes):
       scene = self.collector.reset()
       if self.config.env.max_steps is not None:
         scene.max_steps = int(self.config.env.max_steps)
@@ -63,6 +91,7 @@ class Trainer:
       collect_data[outcome] += 1
       if episode_data is not None:
         self._replay_buffer.add_sim_episode(episode_data)
+        self._log_episode(episode_data, scene, outcome, iteration, ep_idx)
     self.tracker.derive({"phase": "collect"}).log({
       "num_episodes": self.config.training.num_collect_episodes,
       **{f"outcome/{k}": v for k, v in collect_data.items()},
@@ -79,7 +108,7 @@ class Trainer:
         batch = self._replay_buffer.sample(self.config.training.batch_size, self.config.training.seq_len)
 
         # get the world model predictions for this batch
-        self.model.wm_update(batch, tracker=tracker.derive({"epoch": epoch}))
+        self.model.wm_update(batch, tracker=tracker)
 
   def _eval_phase(self):
     pass
@@ -88,38 +117,51 @@ class Trainer:
     name = self.config.logging.experiment_name or "default"
     return os.path.join(self.config.logging.save_dir, name)
 
-  def _resume(self, resume: bool | str):
-    """Load weights before training. ``resume`` may be:
-      - False/None: no-op
+  def _resume(self, resume: bool | str) -> int:
+    """Load weights before training and return the iteration to start from.
+
+    ``resume`` may be:
+      - False/None: no-op, start from 0
       - True:       load ``{checkpoint_dir}/latest.safetensors`` if present
       - str path:   load that exact file
+
+    The starting iteration is read from the safetensors metadata block
+    (``"iteration"`` key) written by :meth:`_checkpoint`. Missing key →
+    start from 0 (pre-migration checkpoints).
     """
     if not resume:
-      return
+      return 0
     if resume is True:
       path = os.path.join(self._checkpoint_dir(), "latest.safetensors")
     else:
       path = resume
     if not os.path.exists(path):
       logger.warning(f"Resume requested but {path} does not exist; starting from scratch.")
-      return
+      return 0
     logger.info(f"Resuming from {path}")
-    self.model.load(path)
+    extra = self.model.load(path)
+    iteration = extra.get("iteration")
+    if iteration is None:
+      return 0
+    start = int(iteration) + 1
+    logger.info(f"Resuming at iteration {start}")
+    return start
 
   def _checkpoint(self, step: int):
     ckpt_dir = self._checkpoint_dir()
     os.makedirs(ckpt_dir, exist_ok=True)
     step_path   = os.path.join(ckpt_dir, f"step_{step:06d}.safetensors")
     latest_path = os.path.join(ckpt_dir, "latest.safetensors")
-    self.model.save(step_path)
-    self.model.save(latest_path)
+    extra = {"iteration": str(int(step))}
+    self.model.save(step_path,   extra_metadata=extra)
+    self.model.save(latest_path, extra_metadata=extra)
     logger.info(f"Saved checkpoint to {step_path}")
 
   def train(self, resume: bool | str = False):
-    self._resume(resume)
+    start = self._resume(resume)
     self._warmup()
-    for i in range(self.config.training.num_iterations):
-      self._collect_phase()
+    for i in range(start, self.config.training.num_iterations):
+      self._collect_phase(i)
       self._train_phase()
       if i % self.config.training.eval_every == 0:
         self._eval_phase()

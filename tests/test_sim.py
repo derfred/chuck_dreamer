@@ -537,7 +537,8 @@ class TestEpisodeWriter:
             "source":  "sim",
             "outcome": "done",
             "goal_xy": cfg.goal_pos,
-        })
+        },
+        name_suffix="00000")
 
     assert path.exists()
     with h5py.File(path, "r") as f:
@@ -561,7 +562,7 @@ class TestEpisodeWriter:
   def test_write_and_read_back_ee_mode(self, tmp_path):
     writer = EpisodeWriter(str(tmp_path), format="hdf5")
     episode = self._make_fake_episode(T=5, action_kind="ee_action")
-    path = writer.write_episode(episode, metadata={"seed": 0, "source": "sim"})
+    path = writer.write_episode(episode, metadata={"seed": 0, "source": "sim"}, name_suffix="00000")
     with h5py.File(path, "r") as f:
       assert f["ee_action"].shape == (5, 7)
       assert "joint_action" not in f
@@ -576,7 +577,8 @@ class TestEpisodeWriter:
         metadata={
             "config": cfg,
             "seed": 0,
-            "source": "sim"})
+            "source": "sim"},
+        name_suffix="00000")
     with h5py.File(path, "r") as f:
       raw = f["metadata/config"][()]
       if isinstance(raw, bytes):
@@ -584,14 +586,13 @@ class TestEpisodeWriter:
       parsed = json.loads(raw)
     assert "target" in parsed
 
-  def test_episode_counter_increments(self, tmp_path):
+  def test_caller_supplied_suffix_drives_filename(self, tmp_path):
     writer = EpisodeWriter(str(tmp_path))
     ep = self._make_fake_episode(T=2)
-    p1 = writer.write_episode(ep)
-    p2 = writer.write_episode(ep)
-    assert p1 != p2
-    assert p1.name == "episode_00000.hdf5"
-    assert p2.name == "episode_00001.hdf5"
+    p1 = writer.write_episode(ep, name_suffix="00000")
+    p2 = writer.write_episode(ep, name_suffix="step012-003")
+    assert p1.name == "episode-00000.hdf5"
+    assert p2.name == "episode-step012-003.hdf5"
 
   def test_unsupported_format_raises(self, tmp_path):
     with pytest.raises(ValueError):
@@ -610,19 +611,20 @@ class TestEpisodeWriter:
             "source":  "sim",
             "outcome": "done",
             "goal_xy": cfg.goal_pos,
-        })
+        },
+        name_suffix="00000")
     assert path.exists()
     assert path.suffix == ".rrd"
     assert path.stat().st_size > 0
 
-  def test_rerun_counter_increments(self, tmp_path):
+  def test_rerun_caller_supplied_suffix_drives_filename(self, tmp_path):
     pytest.importorskip("rerun")
     writer = EpisodeWriter(str(tmp_path), format="rerun")
     ep = self._make_fake_episode(T=2)
-    p1 = writer.write_episode(ep)
-    p2 = writer.write_episode(ep)
-    assert p1.name == "episode_00000.rrd"
-    assert p2.name == "episode_00001.rrd"
+    p1 = writer.write_episode(ep, name_suffix="00000")
+    p2 = writer.write_episode(ep, name_suffix="step012-003")
+    assert p1.name == "episode-00000.rrd"
+    assert p2.name == "episode-step012-003.rrd"
 
 
 # ---------------------------------------------------------------------------

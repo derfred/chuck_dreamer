@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_FORMATS = ("hdf5", "rerun")
 
+# All writer filenames share this prefix so `iter_episodes` can glob them
+# regardless of which call site produced them.
+EPISODE_FILENAME_PREFIX = "episode"
+
 
 def EpisodeWriter(output_dir: str, format: str = "hdf5"):
     """Factory that returns the concrete writer for the requested ``format``.
@@ -90,12 +94,13 @@ class HDF5EpisodeWriter:
     def __init__(self, output_dir: str) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self._ep_count = len(list(self.output_dir.glob("episode_*.hdf5")))
 
     def write_episode(
         self,
         episode: dict[str, np.ndarray],
         metadata: dict[str, Any] | None = None,
+        *,
+        name_suffix: str,
     ) -> Path:
         action_kind, action = _resolve_action(episode)
         if action.shape[0] == 0:
@@ -109,7 +114,7 @@ class HDF5EpisodeWriter:
         object_xy  = np.asarray(episode["object_xy"],  dtype=np.float32)
         images     = np.asarray(episode["image"],      dtype=np.uint8)
 
-        ep_path = self.output_dir / f"episode_{self._ep_count:05d}.hdf5"
+        ep_path = self.output_dir / f"{EPISODE_FILENAME_PREFIX}-{name_suffix}.hdf5"
         with h5py.File(ep_path, "w") as f:
             f.create_dataset("images",     data=images,  compression="gzip", compression_opts=4)
             f.create_dataset(action_kind,  data=action)
@@ -140,7 +145,6 @@ class HDF5EpisodeWriter:
                         "goal_xy",
                         data=np.asarray(goal_xy, dtype=np.float32))
 
-        self._ep_count += 1
         return ep_path
 
 
@@ -159,12 +163,13 @@ class RerunEpisodeWriter:
         import rerun as rr  # noqa: F401  — fail fast if rerun is missing
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self._ep_count = len(list(self.output_dir.glob("episode_*.rrd")))
 
     def write_episode(
         self,
         episode: dict[str, np.ndarray],
         metadata: dict[str, Any] | None = None,
+        *,
+        name_suffix: str,
     ) -> Path:
         action_kind, action = _resolve_action(episode)
         if action.shape[0] == 0:
@@ -172,10 +177,11 @@ class RerunEpisodeWriter:
 
         import rerun as rr
 
-        ep_path = self.output_dir / f"episode_{self._ep_count:05d}.rrd"
+        recording_id = f"{EPISODE_FILENAME_PREFIX}-{name_suffix}"
+        ep_path = self.output_dir / f"{recording_id}.rrd"
         rec = rr.RecordingStream(
             application_id="chuck_dreamer",
-            recording_id=f"episode_{self._ep_count:05d}",
+            recording_id=recording_id,
         )
 
         act_mode = "joint" if action_kind == "joint_action" else "ee"
@@ -218,5 +224,4 @@ class RerunEpisodeWriter:
             rec.log("object_xy",      rr.Scalars(object_xy[i].tolist()))
 
         rec.save(str(ep_path))
-        self._ep_count += 1
         return ep_path

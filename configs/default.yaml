@@ -54,6 +54,9 @@ training:
     warmup_num_episodes: 100  # null = load all; otherwise sample this many at random
     shuffle: true
     buffer_size: 10000
+    collect_dump_path: null      # null = disabled
+    collect_dump_format: "rerun" # "hdf5" or "rerun"
+    collect_dump_prob: 0.1
 
   optimizer:
     wm_lr: 6e-4
@@ -73,7 +76,7 @@ training:
     aux_scale: 0.0
 
 eval:
-  data_path: "data/generated-pushes/"
+  data_path: "data/eval/"
   data_format: "rerun"  # "hdf5" or "rerun
   num_episodes: 20
 
