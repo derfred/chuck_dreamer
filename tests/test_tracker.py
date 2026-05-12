@@ -24,8 +24,18 @@ def calls(monkeypatch):
 
 
 def _make_root(logger: str = "trackio") -> Tracker:
-  """Build a root Tracker pointed at the given logger backend."""
-  config = SimpleNamespace(logging=SimpleNamespace(logger=logger, project_name="test"))
+  """Build a root Tracker pointed at the given logger backend.
+
+  ``logging.episodes.dump_path`` is left None so the Tracker takes the
+  disabled branch and no real EpisodeWriter is constructed.
+  """
+  config = SimpleNamespace(
+    logging=SimpleNamespace(
+      logger=logger,
+      project_name="test",
+      episodes=SimpleNamespace(every_n_collects=None, dump_path=None, dump_format="rerun"),
+    ),
+  )
   return Tracker(config)
 
 
@@ -204,7 +214,10 @@ def test_child_log_does_not_mutate_child_data(calls):
 
 
 def test_init_with_unknown_logger_logs_are_silent(calls):
-  config = SimpleNamespace(logging=SimpleNamespace(logger="none", project_name="test"))
+  config = SimpleNamespace(logging=SimpleNamespace(
+    logger="none", project_name="test",
+    episodes=SimpleNamespace(every_n_collects=None, dump_path=None, dump_format="rerun"),
+  ))
   tracker = Tracker(config)
   tracker.init()
 
@@ -213,7 +226,10 @@ def test_init_with_unknown_logger_logs_are_silent(calls):
 
 
 def test_init_resets_data():
-  config = SimpleNamespace(logging=SimpleNamespace(logger="none", project_name="test"))
+  config = SimpleNamespace(logging=SimpleNamespace(
+    logger="none", project_name="test",
+    episodes=SimpleNamespace(every_n_collects=None, dump_path=None, dump_format="rerun"),
+  ))
   tracker = Tracker(config, data={"stale": True})
   tracker.init({"fresh": 1})
 

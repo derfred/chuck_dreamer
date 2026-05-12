@@ -56,9 +56,6 @@ training:
     warmup_num_workers: null   # null = os.cpu_count() // 2; 0 = sequential load
     shuffle: true
     buffer_size: 10000
-    collect_dump_path: null      # null = disabled
-    collect_dump_format: "rerun" # "hdf5" or "rerun"
-    collect_dump_prob: 0.1
 
   optimizer:
     wm_lr: 6e-4
@@ -77,17 +74,22 @@ training:
     # Auxiliary head loss (object_xy + ee_pos regression from the latent).
     aux_scale: 0.0
 
-eval:
-  data_path: "data/eval/"
-  data_format: "rerun"  # "hdf5" or "rerun
-  num_episodes: 20
-
 logging:
   logger: "trackio" # "none", "wandb", "trackio"
   project_name: "chuck-dreamer"
-  log_every: 100
   save_dir: "checkpoints"
   experiment_name: null  # Will be auto-generated if null
+  episodes:
+    dump_path: null         # null = disabled. Output dir for episode dumps (collect + eval).
+    dump_format: "rerun"    # "hdf5" or "rerun"
+    every_n_collects: 100   # int or null to disable, regularly dump the episodes produced during collect phase.
+    every_n_evals: 1        # int or null to disable, regularly dump the episodes processed during eval phase.
+
+eval:
+  data_path: "data/eval/"
+  data_format: "rerun"  # "hdf5" or "rerun
+  num_episodes: null # null = load all; otherwise sample this many at random
+  burn_in: 5  # Posterior steps before switching to prior in the open-loop rollout.
 
 hardware:
   device: "mlx"  # "auto", "mlx", "cpu", "gpu", "mps"

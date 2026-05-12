@@ -39,16 +39,6 @@ class Trainer:
     self.tracker   = Tracker(config)
     self.tracker.init()
 
-    self._collect_writer = None
-    self._collect_dump_prob = 0.0
-    if config.training.data.get("collect_dump_path"):
-      self._collect_writer = EpisodeWriter(
-        config.training.data.collect_dump_path,
-        format=config.training.data.collect_dump_format,
-      )
-      self._collect_dump_prob = float(config.training.data.collect_dump_prob)
-    self._dump_rng = np.random.default_rng(config.seed)
-
   def _warmup(self):
     data_cfg = self.config.training.data
     if not os.path.exists(data_cfg.warmup_path):
@@ -73,34 +63,24 @@ class Trainer:
     else:
       raise ValueError(f"Unknown policy type {config.training.policy!r}")
 
-  def _log_episode(self, episode_data, scene, outcome, iteration: int, ep_idx: int):
-    if self._collect_writer is not None and self._dump_rng.random() < self._collect_dump_prob:
-      name = "" if self.config.logging.experiment_name is None else f"{self.config.logging.experiment_name}-"
-      self._collect_writer.write_episode(
-            episode_data,
-            metadata={
-              "config":  asdict(scene),
-              "seed":    self.config.seed,
-              "source":  "sim",
-              "outcome": outcome,
-              "goal_xy": scene.goal_pos,
-            },
-            name_suffix=f"{name}step{iteration:03d}-{ep_idx:03d}",
-          )
-
   def _collect_phase(self, iteration: int):
     collect_data = defaultdict(int)
     for ep_idx in range(self.config.training.num_collect_episodes):
       scene = self.collector.reset()
       if self.config.env.max_steps is not None:
         scene.max_steps = int(self.config.env.max_steps)
+
       episode_data, outcome = self.collector.run()
       collect_data[outcome] += 1
+
       if episode_data is not None:
         self._replay_buffer.add_sim_episode(episode_data)
-        self._log_episode(episode_data, scene, outcome, iteration, ep_idx)
-    self.tracker.derive({"phase": "collect"}).log({
-      "num_episodes": self.config.training.num_collect_episodes,
+        self.tracker.maybe_log_collect_episode(episode_data, scene, outcome, { "iteration": iteration })
+
+    self.tracker.log({
+      "phase": "collect",
+      "iteration": iteration,
+      "num_episodes": sum(collect_data.values()),
       **{f"outcome/{k}": v for k, v in collect_data.items()},
     })
 
