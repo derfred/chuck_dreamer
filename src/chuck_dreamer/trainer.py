@@ -14,6 +14,7 @@ from .training.episode_processor import processor_for
 from .training.replay_buffer import ReplayBuffer
 from .training.tracker import Tracker
 
+from .sim.scripted_policy import ScriptedPolicy
 from .dreamer import build_model, DreamerPolicy
 
 logger = logging.getLogger(__name__)
@@ -30,11 +31,10 @@ class Trainer:
       reward_fn=build_reward_fn(config.env.reward),
     )
 
-    obs_shape  = self.env.model_obs_shape
-    action_dim = int(self.env.action_space.shape[0])
-
+    obs_shape      = self.env.model_obs_shape
+    action_dim     = int(self.env.action_space.shape[0])
     self.model     = build_model(config, obs_shape=obs_shape, action_dim=action_dim)
-    self.policy    = DreamerPolicy(self.model, act_mode=self.env.act_mode)
+    self.policy    = self._build_policy(config, obs_shape, action_dim)
     self.collector = EpisodeCollector(self.env, self.policy)
     self.tracker   = Tracker(config)
     self.tracker.init()
@@ -64,6 +64,14 @@ class Trainer:
       progress=True,
       num_episodes=data_cfg.warmup_num_episodes,
     )
+
+  def _build_policy(self, config, obs_shape, action_dim):
+    if config.training.policy == "dreamer":
+      return DreamerPolicy(self.model, act_mode=self.env.act_mode)
+    elif config.training.policy == "scripted":
+      return ScriptedPolicy(auto_advance_from_ready=True)
+    else:
+      raise ValueError(f"Unknown policy type {config.training.policy!r}")
 
   def _log_episode(self, episode_data, scene, outcome, iteration: int, ep_idx: int):
     if self._collect_writer is not None and self._dump_rng.random() < self._collect_dump_prob:

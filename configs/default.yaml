@@ -39,6 +39,7 @@ model:
     hidden: [300, 300, 300]
 
 training:
+  policy: "dreamer"  # "dreamer" or "scripted"
   batch_size: 32
   seq_len: 50
   num_iterations: 100

@@ -215,13 +215,13 @@ class RerunEpisodeWriter:
             rec.set_time("step", sequence=i)
             rec.set_time("time", duration=float(timestamps[i]))
 
-            rec.log("camera/image",   rr.Image(images[i]))
-            rec.log(action_kind,      rr.Scalars(action[i].tolist()))
-            rec.log("reward",         rr.Scalars(float(rewards[i])))
-            rec.log("joint_qpos",     rr.Scalars(joint_qpos[i].tolist()))
-            rec.log("ee_pos",         rr.Scalars(ee_pos[i].tolist()))
-            rec.log("ee_quat",        rr.Scalars(ee_quat[i].tolist()))
-            rec.log("object_xy",      rr.Scalars(object_xy[i].tolist()))
+            rec.log("camera/image", rr.Image(images[i]))
+            rec.log(action_kind,    rr.Scalars(action[i].tolist()))
+            rec.log("reward",       rr.Scalars(float(rewards[i])))
+            rec.log("joint_qpos",   rr.Scalars(joint_qpos[i].tolist()))
+            rec.log("ee_pos",       rr.Scalars(ee_pos[i].tolist()))
+            rec.log("ee_quat",      rr.Scalars(ee_quat[i].tolist()))
+            rec.log("object_xy",    rr.Scalars(object_xy[i].tolist()))
 
         rec.save(str(ep_path))
         return ep_path

@@ -667,8 +667,8 @@ class DreamerMLXModel:
       return cast(mx.array, ((recon - target) ** 2).sum(axis=(-3, -2, -1)).mean())
     if self.obs_mode == "image_proprio":
       img_target = self._normalize_image(obs["image"])
-      img_loss = ((recon["image"] - img_target) ** 2).sum(axis=(-3, -2, -1)).mean()
-      pro_loss = ((recon["proprio"] - obs["proprio"]) ** 2).sum(-1).mean()
+      img_loss   = ((recon["image"] - img_target) ** 2).sum(axis=(-3, -2, -1)).mean()
+      pro_loss   = ((recon["proprio"] - obs["proprio"]) ** 2).sum(-1).mean()
       return cast(mx.array, img_loss + pro_loss)
     raise ValueError(f"unknown obs_mode={self.obs_mode!r}")
 
