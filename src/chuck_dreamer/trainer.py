@@ -67,6 +67,7 @@ class Trainer:
 
   def _log_episode(self, episode_data, scene, outcome, iteration: int, ep_idx: int):
     if self._collect_writer is not None and self._dump_rng.random() < self._collect_dump_prob:
+      name = "" if self.config.logging.experiment_name is None else f"{self.config.logging.experiment_name}-"
       self._collect_writer.write_episode(
             episode_data,
             metadata={
@@ -76,7 +77,7 @@ class Trainer:
               "outcome": outcome,
               "goal_xy": scene.goal_pos,
             },
-            name_suffix=f"step{iteration:03d}-{ep_idx:03d}",
+            name_suffix=f"{name}step{iteration:03d}-{ep_idx:03d}",
           )
 
   def _collect_phase(self, iteration: int):

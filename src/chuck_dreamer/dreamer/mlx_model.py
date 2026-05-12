@@ -4,6 +4,7 @@ from typing import cast
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+import numpy as np
 from mlx.utils import tree_flatten, tree_unflatten
 from omegaconf import OmegaConf
 
@@ -684,17 +685,17 @@ class DreamerMLXModel:
     embeds = wm_modules.encoder(obs)           # (B, T, embed_dim)
     state  = wm_modules.rssm.initial_state(B)
     states = []
-    kls    = []
+    kls_per_dim = []
     for t in range(T):
       action_t = action[:, t]
       embed_t  = embeds[:, t]
       state    = wm_modules.rssm.obs_step(state, action_t, embed_t)
       states.append(state)
-      kl_t = kl_gaussian(
+      kl_t_per_dim = kl_gaussian(
         state["post_mean"],  state["post_std"],
         state["prior_mean"], state["prior_std"],
-      ).sum(-1)
-      kls.append(kl_t)
+      )
+      kls_per_dim.append(kl_t_per_dim)
 
     feats    = mx.stack([feat(s) for s in states], axis=1)   # (B, T, feat_dim)
     recon    = wm_modules.decoder(feats)
@@ -703,19 +704,22 @@ class DreamerMLXModel:
     recon_loss = self._recon_loss(recon, obs)
     rew_loss   = ((rew_pred - reward) ** 2).mean()
 
-    kl = mx.stack(kls, axis=1).mean()
-    kl = mx.maximum(kl, mx.array(self.config.training.losses.free_nats))
+    # Per-dim KL averaged over batch and time: (stoch_dim,)
+    kl_per_dim_btmean = mx.stack(kls_per_dim, axis=1).mean(axis=(0, 1))
+    kl                = kl_per_dim_btmean.sum()
+    kl                = mx.maximum(kl, mx.array(self.config.training.losses.free_nats))
 
     loss = (self.config.training.losses.recon_scale * recon_loss
          + self.config.training.losses.reward_scale * rew_loss
          + self.config.training.losses.kl_scale     * kl)
 
     aux_out: dict = {"recon": recon_loss, "rew": rew_loss, "kl": kl,
+                     "kl_per_dim": kl_per_dim_btmean,
                      "post_states": states}
     if wm_modules.aux is not None:
-      aux_pred = wm_modules.aux(feats)
-      aux_loss = ((aux_pred - batch["aux_target"]) ** 2).sum(-1).mean()
-      loss = loss + self.config.training.losses.aux_scale * aux_loss
+      aux_pred       = wm_modules.aux(feats)
+      aux_loss       = ((aux_pred - batch["aux_target"]) ** 2).sum(-1).mean()
+      loss           = loss + self.config.training.losses.aux_scale * aux_loss
       aux_out["aux"] = aux_loss
 
     return loss, aux_out
@@ -730,7 +734,7 @@ class DreamerMLXModel:
       grads, grad_norm = optim.clip_grad_norm(grads, max_norm)
     self._opt_wm.update(self._wm_bundle, grads)
 
-    mx.eval(self._wm_bundle.parameters(), loss)
+    mx.eval(self._wm_bundle.parameters(), loss, aux["kl_per_dim"])
 
     if tracker is not None:
       logs = {
@@ -739,6 +743,15 @@ class DreamerMLXModel:
         "wm/rew":   aux["rew"].item(),
         "wm/kl":    aux["kl"].item(),
       }
+      kl_per_dim                   = np.asarray(aux["kl_per_dim"])
+      active_threshold             = 0.1
+      logs["wm/kl_active_dims"]    = float((kl_per_dim > active_threshold).sum())
+      logs["wm/kl_mean_per_dim"]   = float(kl_per_dim.mean())
+      logs["wm/kl_per_dim_min"]    = float(kl_per_dim.min())
+      logs["wm/kl_per_dim_p10"]    = float(np.percentile(kl_per_dim, 10))
+      logs["wm/kl_per_dim_median"] = float(np.percentile(kl_per_dim, 50))
+      logs["wm/kl_per_dim_p90"]    = float(np.percentile(kl_per_dim, 90))
+      logs["wm/kl_per_dim_max"]    = float(kl_per_dim.max())
       if "aux" in aux:
         logs["wm/aux"] = aux["aux"].item()
       if grad_norm is not None:
