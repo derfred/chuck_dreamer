@@ -8,6 +8,8 @@ import numpy as np
 from mlx.utils import tree_flatten, tree_unflatten
 from omegaconf import OmegaConf
 
+from .world_model import Distribution, State
+
 # Key under which the OmegaConf-serialized training config is stored in the
 # safetensors metadata block. Older checkpoints written before this change have
 # no metadata; load() and load_config_from_checkpoint() handle that case.
@@ -45,10 +47,10 @@ def _mlp(in_dim: int, hidden: tuple[int, ...], out_dim: int, act=nn.ELU) -> nn.S
   return nn.Sequential(*layers)
 
 
-def feat(state: dict) -> mx.array:
+def feat(state: State) -> mx.array:
   """Concatenate deterministic and stochastic state into the feature fed
   to decoder, reward head, actor, and critic."""
-  return mx.concatenate([state["h"], state["s"]], axis=-1)
+  return mx.concatenate([state.h, state.s], axis=-1)
 
 
 def kl_gaussian(
@@ -336,19 +338,25 @@ class RSSM(nn.Module):
 
   # ------------------- helpers -------------------
 
-  def initial_state(self, batch_size: int) -> dict:
-    return {
-      "h": mx.zeros((batch_size, self.deter_dim)),
-      "s": mx.zeros((batch_size, self.stoch_dim)),
-    }
+  def initial_state(self, batch_size: int) -> State:
+    """Zero-initialized state.
 
-  def _split_dist(self, out: mx.array) -> tuple[mx.array, mx.array]:
+    The ``prior`` field carries a placeholder distribution (mean=0,
+    std=1); the first dynamics step overwrites it before anything reads
+    it. ``posterior`` is ``None`` until the first :meth:`obs_step`.
+    """
+    h = mx.zeros((batch_size, self.deter_dim))
+    s = mx.zeros((batch_size, self.stoch_dim))
+    placeholder = Distribution(mean=s, std=mx.ones((batch_size, self.stoch_dim)))
+    return State(h=h, s=s, prior=placeholder, posterior=None)
+
+  def _split_dist(self, out: mx.array) -> Distribution:
     mean, std = mx.split(out, 2, axis=-1)
     std = nn.softplus(std) + self.min_std
-    return mean, std
+    return Distribution(mean=cast(mx.array, mean), std=cast(mx.array, std))
 
-  def _sample(self, mean: mx.array, std: mx.array) -> mx.array:
-    return mean + std * mx.random.normal(mean.shape)
+  def _sample(self, dist: Distribution) -> mx.array:
+    return cast(mx.array, dist.mean + dist.std * mx.random.normal(dist.mean.shape))
 
   # ------------------- core ops -------------------
 
@@ -359,36 +367,37 @@ class RSSM(nn.Module):
     h_seq = self.gru(x[:, None, :], prev_h)                       # (B, 1, deter_dim)
     return cast(mx.array, h_seq[:, 0])                            # (B, deter_dim)
 
-  def img_step(self, prev_state: dict, prev_action: mx.array) -> dict:
-    """Imagination step: predict s_t from prior only, no observation."""
-    h                     = self._compute_h(prev_state["s"], prev_action, prev_state["h"])
-    prior_mean, prior_std = self._split_dist(self.prior_net(h))
-    s                     = self._sample(prior_mean, prior_std)
-    return {
-      "h": h, "s": s,
-      "prior_mean": prior_mean, "prior_std": prior_std,
-    }
+  def img_step(self, prev_state: State, prev_action: mx.array, *, sample: bool = True) -> State:
+    """Imagination step: predict s_t from prior only, no observation.
 
-  def obs_step(self, prev_state: dict, prev_action: mx.array, embed: mx.array) -> dict:
-    """Observation step: run prior, then refine with posterior using embed."""
-    h                     = self._compute_h(prev_state["s"], prev_action, prev_state["h"])
-    prior_mean, prior_std = self._split_dist(self.prior_net(h))
-    post_in               = mx.concatenate([h, embed], axis=-1)
-    post_mean, post_std   = self._split_dist(self.post_net(post_in))
-    s                     = self._sample(post_mean, post_std)
-    return {
-      "h": h, "s": s,
-      "prior_mean": prior_mean, "prior_std": prior_std,
-      "post_mean":  post_mean,  "post_std":  post_std,
-    }
+    ``sample=False`` returns ``s = prior.mean`` (no noise) — used for
+    deterministic open-loop rollouts during eval.
+    """
+    h     = self._compute_h(prev_state.s, prev_action, prev_state.h)
+    prior = self._split_dist(self.prior_net(h))
+    s     = self._sample(prior) if sample else prior.mean
+    return State(h=h, s=s, prior=prior, posterior=None)
+
+  def obs_step(self, prev_state: State, prev_action: mx.array, embed: mx.array, *, sample: bool = True) -> State:
+    """Observation step: run prior, then refine with posterior using embed.
+
+    ``sample=False`` returns ``s = posterior.mean`` (no noise) — used for
+    deterministic posterior rollouts during eval / probing.
+    """
+    h         = self._compute_h(prev_state.s, prev_action, prev_state.h)
+    prior     = self._split_dist(self.prior_net(h))
+    post_in   = mx.concatenate([h, embed], axis=-1)
+    posterior = self._split_dist(self.post_net(post_in))
+    s         = self._sample(posterior) if sample else posterior.mean
+    return State(h=h, s=s, prior=prior, posterior=posterior)
 
   def observe(
     self,
     embeds:  mx.array,   # (B, T, embed_dim)
     actions: mx.array,   # (B, T, action_dim)
-    init:    dict | None = None,
-  ) -> list[dict]:
-    """Roll the posterior forward for T steps. Returns list of T state dicts."""
+    init:    State | None = None,
+  ) -> list[State]:
+    """Roll the posterior forward for T steps. Returns a list of T States."""
     B, T   = embeds.shape[0], embeds.shape[1]
     state  = init if init is not None else self.initial_state(B)
     states = []
@@ -399,10 +408,10 @@ class RSSM(nn.Module):
 
   def imagine(
     self,
-    init_state: dict,                          # (N, ...) starting points
-    policy_fn,                                  # feat -> action
+    init_state: State,                          # (N, ...) starting point
+    policy_fn,                                   # feat -> action
     horizon: int,
-  ) -> list[dict]:
+  ) -> list[State]:
     """Roll the prior forward for `horizon` steps using a policy.
     policy_fn maps a feature tensor (N, feat_dim) to an action (N, action_dim).
     Returns a list of length horizon+1 (including the start state)."""
@@ -550,9 +559,12 @@ class DreamerMLXModel:
   decoder: nn.Module
 
   def __init__(self, config, obs_shape, action_dim: int, training: bool = True):
-    self.config   = config
-    self.training = training
-    feat_dim      = config.model.rssm.stoch_size + config.model.rssm.deter_size
+    self.config     = config
+    self.training   = training
+    self.feat_dim   = config.model.rssm.stoch_size + config.model.rssm.deter_size
+    self.action_dim = action_dim
+    self.stoch_dim  = int(config.model.rssm.stoch_size)
+    self.deter_dim  = int(config.model.rssm.deter_size)
 
     obs_mode = config.env.obs_mode
     self.obs_mode = obs_mode
@@ -566,7 +578,7 @@ class DreamerMLXModel:
         raise ValueError(f"state obs_mode expects 1-D obs_shape; got {obs_shape}")
       obs_dim          = int(obs_shape[0])
       self.encoder     = MLPEncoder(obs_dim, enc_hidden, embed_size)
-      self.decoder     = MLPDecoder(feat_dim, dec_hidden, obs_dim)
+      self.decoder     = MLPDecoder(self.feat_dim, dec_hidden, obs_dim)
       self.image_size  = None
       self.proprio_dim = None
 
@@ -587,7 +599,7 @@ class DreamerMLXModel:
         in_channels = int(obs_shape[2])
         self.encoder = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
                                   embed_dim=embed_size, image_size=image_size)
-        self.decoder = CNNDecoder(feat_dim, dec_channels, dec_kernels, dec_strides,
+        self.decoder = CNNDecoder(self.feat_dim, dec_channels, dec_kernels, dec_strides,
                                   out_channels=in_channels, image_size=image_size)
         self.proprio_dim = None
 
@@ -604,10 +616,10 @@ class DreamerMLXModel:
         self.proprio_dim = proprio_dim
         cnn_enc          = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
                                       embed_dim=embed_size, image_size=image_size)
-        cnn_dec          = CNNDecoder(feat_dim, dec_channels, dec_kernels, dec_strides,
+        cnn_dec          = CNNDecoder(self.feat_dim, dec_channels, dec_kernels, dec_strides,
                                       out_channels=in_channels, image_size=image_size)
         self.encoder     = ImageProprioEncoder(cnn_enc, proprio_dim, enc_hidden, embed_size)
-        self.decoder     = ImageProprioDecoder(feat_dim, cnn_dec, dec_hidden, proprio_dim)
+        self.decoder     = ImageProprioDecoder(self.feat_dim, cnn_dec, dec_hidden, proprio_dim)
 
     else:
       raise ValueError(f"unknown obs_mode={obs_mode!r}")
@@ -620,7 +632,7 @@ class DreamerMLXModel:
       hidden=config.model.rssm.hidden_size,
       min_std=config.model.rssm.min_stddev,
     )
-    self.reward_head = RewardHead(feat_dim, tuple(config.model.reward.hidden))
+    self.reward_head = RewardHead(self.feat_dim, tuple(config.model.reward.hidden))
 
     # Aux head: gated by aux_scale > 0. When off, no params on disk and
     # no forward pass. Target dims must match the buffer's aux_target
@@ -628,16 +640,16 @@ class DreamerMLXModel:
     self.aux_head: AuxHead | None = None
     if config.training.losses.aux_scale > 0.0:
       aux_cfg = config.model.aux
-      self.aux_head = AuxHead(feat_dim, target_dim=int(aux_cfg.target_dim), hidden=tuple(aux_cfg.hidden))
+      self.aux_head = AuxHead(self.feat_dim, target_dim=int(aux_cfg.target_dim), hidden=tuple(aux_cfg.hidden))
     self.actor = Actor(
-      feat_dim=feat_dim,
+      feat_dim=self.feat_dim,
       action_dim=action_dim,
       hidden=tuple(config.model.actor.hidden),
       init_std=config.model.actor.init_stddev,
       min_std=config.model.actor.min_stddev,
       mean_scale=config.model.actor.mean_scale,
     )
-    self.critic = Critic(feat_dim, tuple(config.model.critic.hidden))
+    self.critic = Critic(self.feat_dim, tuple(config.model.critic.hidden))
 
     if training:
       self._opt_wm     = optim.Adam(learning_rate=config.training.optimizer.wm_lr,     eps=config.training.optimizer.adam_eps)
@@ -648,6 +660,44 @@ class DreamerMLXModel:
         self.encoder, self.rssm, self.decoder, self.reward_head, self.aux_head
       )
       self._wm_grad   = nn.value_and_grad(self._wm_bundle, self._wm_loss_fn)
+
+  # ---------------------------------------------------------------------
+  # WorldModel protocol (see :mod:`.world_model`). The training-time
+  # methods above (``_wm_loss_fn``, ``wm_update``, ``save``, ``load``) stay
+  # backend-specific; everything below is the surface :func:`rollout`
+  # composes against.
+  # ---------------------------------------------------------------------
+
+  def initial_state(self, batch_size: int) -> State:
+    return self.rssm.initial_state(batch_size)
+
+  def encode(self, obs) -> mx.array:
+    return cast(mx.array, self.encoder(obs))
+
+  def posterior_step(self, state: State, action: mx.array, embed: mx.array, *, sample: bool = True) -> State:
+    return self.rssm.obs_step(state, action, embed, sample=sample)
+
+  def prior_step(self, state: State, action: mx.array, *, sample: bool = True) -> State:
+    return self.rssm.img_step(state, action, sample=sample)
+
+  def feat(self, state: State) -> mx.array:
+    return feat(state)
+
+  def decode(self, feats: mx.array):
+    return self.decoder(feats)
+
+  def predict_reward(self, feats: mx.array) -> mx.array:
+    return cast(mx.array, self.reward_head(feats))
+
+  def actor_action(self, feats: mx.array, *, sample: bool = True) -> mx.array:
+    if sample:
+      action, _, _ = self.actor(feats)
+      return cast(mx.array, action)
+    return self.actor.mode(feats)
+
+  def stack_along_time(self, xs: list[mx.array]) -> mx.array:
+    """Stack a list of per-step backend tensors along a new time axis at index 1."""
+    return cast(mx.array, mx.stack(xs, axis=1))
 
   @staticmethod
   def _normalize_image(img: mx.array) -> mx.array:
@@ -684,16 +734,17 @@ class DreamerMLXModel:
 
     embeds = wm_modules.encoder(obs)           # (B, T, embed_dim)
     state  = wm_modules.rssm.initial_state(B)
-    states = []
+    states: list[State] = []
     kls_per_dim = []
     for t in range(T):
       action_t = action[:, t]
       embed_t  = embeds[:, t]
       state    = wm_modules.rssm.obs_step(state, action_t, embed_t)
       states.append(state)
+      assert state.posterior is not None  # obs_step always populates it
       kl_t_per_dim = kl_gaussian(
-        state["post_mean"],  state["post_std"],
-        state["prior_mean"], state["prior_std"],
+        state.posterior.mean, state.posterior.std,
+        state.prior.mean,     state.prior.std,
       )
       kls_per_dim.append(kl_t_per_dim)
 

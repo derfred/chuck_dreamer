@@ -55,7 +55,10 @@ def test_mlp_decoder_output_shape():
 
 
 def test_feat_concatenates_h_and_s():
-  state = {"h": mx.zeros((4, 200)), "s": mx.ones((4, 30))}
+  from chuck_dreamer.dreamer import Distribution, State
+  zeros = mx.zeros((4, 30))
+  state = State(h=mx.zeros((4, 200)), s=mx.ones((4, 30)),
+                prior=Distribution(mean=zeros, std=mx.ones((4, 30))))
   f = feat(state)
   assert f.shape == (4, 230)
   # First deter_dim entries come from h (zeros), rest from s (ones).
@@ -82,31 +85,35 @@ def _make_rssm(action_dim=6, embed_dim=32, stoch=8, deter=16, hidden=16, min_std
 def test_rssm_initial_state_shapes():
   rssm = _make_rssm()
   st = rssm.initial_state(batch_size=5)
-  assert st["h"].shape == (5, 16)
-  assert st["s"].shape == (5, 8)
+  assert st.h.shape == (5, 16)
+  assert st.s.shape == (5, 8)
+  # Initial posterior is None — no observation has been seen yet.
+  assert st.posterior is None
 
 
 def test_rssm_img_step_returns_prior_only():
   rssm = _make_rssm()
   st = rssm.initial_state(3)
   out = rssm.img_step(st, mx.zeros((3, 6)))
-  assert out["h"].shape == (3, 16)
-  assert out["s"].shape == (3, 8)
-  assert out["prior_mean"].shape == (3, 8)
-  assert out["prior_std"].shape == (3, 8)
+  assert out.h.shape == (3, 16)
+  assert out.s.shape == (3, 8)
+  assert out.prior.mean.shape == (3, 8)
+  assert out.prior.std.shape == (3, 8)
   # img_step doesn't see an observation; no posterior.
-  assert "post_mean" not in out
-  assert "post_std" not in out
+  assert out.posterior is None
 
 
 def test_rssm_obs_step_returns_prior_and_posterior():
   rssm = _make_rssm()
   st = rssm.initial_state(3)
   out = rssm.obs_step(st, mx.zeros((3, 6)), mx.zeros((3, 32)))
-  for k in ("h", "s", "prior_mean", "prior_std", "post_mean", "post_std"):
-    assert k in out, f"missing key {k!r}"
-  assert out["post_mean"].shape == (3, 8)
-  assert out["post_std"].shape == (3, 8)
+  assert out.h.shape == (3, 16)
+  assert out.s.shape == (3, 8)
+  assert out.prior.mean.shape == (3, 8)
+  assert out.prior.std.shape  == (3, 8)
+  assert out.posterior is not None
+  assert out.posterior.mean.shape == (3, 8)
+  assert out.posterior.std.shape  == (3, 8)
 
 
 def test_rssm_std_respects_min_std():
@@ -115,8 +122,9 @@ def test_rssm_std_respects_min_std():
   st = rssm.initial_state(2)
   out = rssm.obs_step(st, mx.zeros((2, 6)), mx.zeros((2, 32)))
   # softplus(.) + min_std >= min_std, always.
-  assert float(mx.min(out["prior_std"])) >= min_std
-  assert float(mx.min(out["post_std"])) >= min_std
+  assert float(mx.min(out.prior.std)) >= min_std
+  assert out.posterior is not None
+  assert float(mx.min(out.posterior.std)) >= min_std
 
 
 def test_rssm_observe_returns_one_state_per_step():
@@ -127,8 +135,8 @@ def test_rssm_observe_returns_one_state_per_step():
   states = rssm.observe(embeds, actions)
   assert len(states) == T
   for s in states:
-    assert s["h"].shape == (B, 16)
-    assert s["s"].shape == (B, 8)
+    assert s.h.shape == (B, 16)
+    assert s.s.shape == (B, 8)
 
 
 def test_rssm_imagine_returns_horizon_plus_one_states():
@@ -281,8 +289,8 @@ def test_dreamer_model_imagine_uses_actor_and_yields_horizon_plus_one():
   traj = model.rssm.imagine(init, policy_fn, horizon=5)
   assert len(traj) == 6
   for st in traj:
-    assert st["h"].shape == (3, cfg.model.rssm.deter_size)
-    assert st["s"].shape == (3, cfg.model.rssm.stoch_size)
+    assert st.h.shape == (3, cfg.model.rssm.deter_size)
+    assert st.s.shape == (3, cfg.model.rssm.stoch_size)
 
 
 def test_dreamer_model_rejects_unsupported_obs_mode():
