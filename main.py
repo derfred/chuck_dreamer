@@ -113,6 +113,46 @@ def generate_scenes(ctx, episodes, output, seed, fmt, overrides):
   click.echo(f"Done. Outcomes: {outcome_counts}")
 
 
+@cli.command("import-lerobot")
+@click.argument("repo_id", type=str)
+@click.option("--output", required=True, type=str, help="Output directory")
+@click.option("--format", "fmt", default="rerun", type=click.Choice(["hdf5", "rerun"]),
+              help="Episode output format (hdf5 or rerun)")
+@click.option("--video-key", default=None, type=str,
+              help="Video feature key (e.g. observation.images.wrist). Defaults to the first one.")
+@click.option("--max-episodes", default=None, type=int,
+              help="Cap on number of episodes to convert (default: all)")
+@click.pass_context
+def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes):
+  """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
+
+  Pulls the parquet + MP4 from Hugging Face, slices per episode using
+  ``meta/episodes/*.parquet``, decodes the matching video range, and
+  writes one episode file per LeRobot episode under --output.
+
+  Fields the repo's format needs but LeRobot teleop data lacks (reward,
+  ee_pos, ee_quat, object_xy) are zero-filled — fine for image-mode
+  training, not for state-mode.
+  """
+  from tqdm import tqdm
+
+  from chuck_dreamer.sim.lerobot_import import import_dataset
+
+  click.echo(f"Importing {repo_id} → {output}  (format={fmt})")
+  count = 0
+  for ep_idx, out_path in tqdm(
+    import_dataset(
+      repo_id, output,
+      format=fmt, video_key=video_key, max_episodes=max_episodes,
+    ),
+    desc="Episodes",
+    total=max_episodes,
+  ):
+    count += 1
+    logger.info("episode %d → %s", ep_idx, out_path)
+  click.echo(f"Done. Wrote {count} episodes.")
+
+
 @cli.command("show-scene")
 @click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
 @click.option("--step-delay", default=0.05, type=float, help="Seconds to sleep between steps (default 0.05)")

@@ -84,8 +84,8 @@ class Trainer:
       **{f"outcome/{k}": v for k, v in collect_data.items()},
     })
 
-  def _train_phase(self):
-    with self.tracker.scope({"phase": "train"}) as tracker:
+  def _train_phase(self, iteration: int):
+    with self.tracker.scope({"phase": "train", "iteration": iteration}) as tracker:
       tracker.log({"replay_buffer_size": len(self._replay_buffer)})
       if not self._replay_buffer.can_sample(self.config.training.batch_size, self.config.training.seq_len):
         logger.warning("Buffer too small to sample (have %d steps); skipping train phase.", len(self._replay_buffer))
@@ -97,8 +97,7 @@ class Trainer:
         # get the world model predictions for this batch
         self.model.wm_update(batch, tracker=tracker)
 
-  def _eval_phase(self):
-    pass
+  def _eval_phase(self, iteration: int):
 
   def _checkpoint_dir(self) -> str:
     name = self.config.logging.experiment_name or "default"
@@ -149,9 +148,9 @@ class Trainer:
     self._warmup()
     for i in range(start, self.config.training.num_iterations):
       self._collect_phase(i)
-      self._train_phase()
+      self._train_phase(i)
       if i % self.config.training.eval_every == 0:
-        self._eval_phase()
+        self._eval_phase(i)
       if i % self.config.training.save_every == 0:
         self._checkpoint(i)
 
