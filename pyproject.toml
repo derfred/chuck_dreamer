@@ -58,8 +58,8 @@ dependencies = [
     "trackio>=0.25.1",
     "datasets>=4.8.5",
     "trimesh>=4.12.2",
-    "rerun-sdk[all]>=0.26.2",
-    "lerobot>=0.5.1",
+    "rerun-sdk[all]>=0.30.0",
+    "lerobot[dataset]",
 ]
 
 [build-system]
@@ -88,6 +88,20 @@ warn_unused_configs = true
 mypy_path = "src"
 explicit_package_bases = true
 namespace_packages = true
+
+[tool.uv.sources]
+lerobot = { git = "https://github.com/huggingface/lerobot", branch = "main" }
+torch = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [[tool.mypy.overrides]]
 module = ["mlx", "mlx.*", "mujoco", "mujoco.*", "h5py", "rerun", "tqdm", "tqdm.*"]
