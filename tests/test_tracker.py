@@ -33,7 +33,7 @@ def _make_root(logger: str = "trackio") -> Tracker:
     logging=SimpleNamespace(
       logger=logger,
       project_name="test",
-      episodes=SimpleNamespace(every_n_collects=None, dump_path=None, dump_format="rerun"),
+      episodes=SimpleNamespace(every_n_collects=None, every_n_evals=None, dump_path=None, dump_format="rerun"),
     ),
   )
   return Tracker(config)
@@ -216,7 +216,7 @@ def test_child_log_does_not_mutate_child_data(calls):
 def test_init_with_unknown_logger_logs_are_silent(calls):
   config = SimpleNamespace(logging=SimpleNamespace(
     logger="none", project_name="test",
-    episodes=SimpleNamespace(every_n_collects=None, dump_path=None, dump_format="rerun"),
+    episodes=SimpleNamespace(every_n_collects=None, every_n_evals=None, dump_path=None, dump_format="rerun"),
   ))
   tracker = Tracker(config)
   tracker.init()
@@ -228,7 +228,7 @@ def test_init_with_unknown_logger_logs_are_silent(calls):
 def test_init_resets_data():
   config = SimpleNamespace(logging=SimpleNamespace(
     logger="none", project_name="test",
-    episodes=SimpleNamespace(every_n_collects=None, dump_path=None, dump_format="rerun"),
+    episodes=SimpleNamespace(every_n_collects=None, every_n_evals=None, dump_path=None, dump_format="rerun"),
   ))
   tracker = Tracker(config, data={"stale": True})
   tracker.init({"fresh": 1})

@@ -128,6 +128,38 @@ class Trajectory:
       return self.stacker(xs)
     return _default_stack(xs)
 
+  # ---- numpy projections for post-processing on CPU ----
+
+  def obs_pred_numpy(self) -> Any:
+    """``obs_pred`` converted to numpy. ``None`` if decoding was skipped.
+
+    Preserves the layout of the decoder output — dict obs (e.g.
+    image_proprio) come back as a dict of numpy arrays.
+    """
+    return None if self.obs_pred is None else as_numpy(self.obs_pred)
+
+  def h_numpy(self) -> Any:
+    """``(B, T, deter_dim)`` deterministic-state trajectory as numpy."""
+    return as_numpy(self.stack_h())
+
+  def s_numpy(self) -> Any:
+    """``(B, T, stoch_dim)`` stochastic-state trajectory as numpy."""
+    return as_numpy(self.stack_s())
+
+
+def as_numpy(x: Any) -> Any:
+  """Convert a backend tensor (or dict of tensors) to numpy.
+
+  Handles ``torch.Tensor`` (via ``detach().cpu().numpy()``) and anything
+  else numpy can ingest (mlx arrays support ``__array__``). Recursive on
+  dicts so dict-shaped obs_pred / inputs round-trip cleanly.
+  """
+  if isinstance(x, dict):
+    return {k: as_numpy(v) for k, v in x.items()}
+  if hasattr(x, "detach"):  # torch.Tensor
+    return x.detach().cpu().numpy()
+  return np.asarray(x)
+
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -158,7 +190,14 @@ class WorldModel(Protocol):
   def encode(self, obs: Any) -> Any:
     """Embed observations. ``obs`` is ``(B, ...)`` or ``(B, T, ...)``;
     the return matches that with the trailing dims replaced by
-    ``(embed_dim,)``. Dict observations are passed through as-is."""
+    ``(embed_dim,)``. Dict observations are passed through as-is.
+
+    Implementations must accept numpy arrays in addition to their native
+    tensor type, coercing them to the backend's native representation
+    before running the encoder. This is the boundary at which loaders
+    (eval data, replay-buffer dicts) hand off to backend ops without
+    callers having to dispatch on ``hardware.device``.
+    """
     ...
 
   def posterior_step(
@@ -271,6 +310,17 @@ def rollout(
     raise ValueError(f"burn_in must be >= 0; got {burn_in}")
   if burn_in > horizon:
     raise ValueError(f"burn_in ({burn_in}) cannot exceed horizon ({horizon})")
+
+  # Allow numpy inputs at the rollout boundary — callers like the
+  # Evaluator hand us numpy arrays from disk. Backends expose ``coerce``
+  # to lift them into their native tensor type; missing means "already
+  # native" (the trainer path).
+  coerce = getattr(model, "coerce", None)
+  if coerce is not None:
+    if actions is not None:
+      actions = coerce(actions)
+    if embeds is not None:
+      embeds = coerce(embeds)
 
   state  = init_state
   states: list[State] = []

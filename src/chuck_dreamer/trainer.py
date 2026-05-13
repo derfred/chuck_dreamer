@@ -11,6 +11,7 @@ from .sim.episode_collector import EpisodeCollector
 from .sim.episode_writer import EpisodeWriter
 
 from .training.episode_processor import processor_for
+from .training.evaluator import Evaluator
 from .training.replay_buffer import ReplayBuffer
 from .training.tracker import Tracker
 
@@ -36,6 +37,7 @@ class Trainer:
     self.model     = build_model(config, obs_shape=obs_shape, action_dim=action_dim)
     self.policy    = self._build_policy(config, obs_shape, action_dim)
     self.collector = EpisodeCollector(self.env, self.policy)
+    self.evaluator = Evaluator(config, self.model)
     self.tracker   = Tracker(config)
     self.tracker.init()
 
@@ -98,7 +100,7 @@ class Trainer:
         self.model.wm_update(batch, tracker=tracker)
 
   def _eval_phase(self, iteration: int):
-    pass
+    self.evaluator.evaluate(iteration, self.tracker)
 
   def _checkpoint_dir(self) -> str:
     name = self.config.logging.experiment_name or "default"

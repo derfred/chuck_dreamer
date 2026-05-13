@@ -681,6 +681,14 @@ class DreamerTorchModel:
       return x.to(self.device)
     return torch.as_tensor(np.asarray(x)).to(self.device)
 
+  def coerce(self, x):
+    """Lift numpy → ``torch.Tensor`` on the model's device.
+
+    Delegates to :meth:`_to_device`, which already handles ndarray and
+    dict-of-ndarray inputs (and is a no-op for tensors already on-device).
+    """
+    return self._to_device(x)
+
   def initial_state(self, batch_size: int) -> State:
     return self.rssm.initial_state(batch_size, device=self.device)
 

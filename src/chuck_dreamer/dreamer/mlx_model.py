@@ -671,8 +671,20 @@ class DreamerMLXModel:
   def initial_state(self, batch_size: int) -> State:
     return self.rssm.initial_state(batch_size)
 
+  def coerce(self, x):
+    """Lift numpy → ``mx.array`` so loader-side inputs feed backend ops.
+
+    Recursive on dicts. ``mx.array`` inputs pass through unchanged so
+    repeat calls are cheap.
+    """
+    if isinstance(x, dict):
+      return {k: self.coerce(v) for k, v in x.items()}
+    if isinstance(x, mx.array):
+      return x
+    return mx.array(np.asarray(x))
+
   def encode(self, obs) -> mx.array:
-    return cast(mx.array, self.encoder(obs))
+    return cast(mx.array, self.encoder(self.coerce(obs)))
 
   def posterior_step(self, state: State, action: mx.array, embed: mx.array, *, sample: bool = True) -> State:
     return self.rssm.obs_step(state, action, embed, sample=sample)

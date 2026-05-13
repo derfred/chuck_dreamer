@@ -11,12 +11,17 @@ class Tracker:
     self.data    = data
     self._parent = parent
 
-    self._collect_writer = None
+    # One writer instance backs both collect and eval dumps — the file
+    # naming differs but the format/output dir are shared.
+    self._episode_writer        = None
     self._collect_episode_count = 0
+    self._eval_episode_count    = 0
     if parent is None:
       ep_cfg = config.logging.episodes
-      if ep_cfg.every_n_collects and ep_cfg.dump_path:
-        self._collect_writer = EpisodeWriter(ep_cfg.dump_path, format=ep_cfg.dump_format)
+      collect_on = bool(ep_cfg.every_n_collects)
+      eval_on    = ep_cfg.every_n_evals is not None
+      if (collect_on or eval_on) and ep_cfg.dump_path:
+        self._episode_writer = EpisodeWriter(ep_cfg.dump_path, format=ep_cfg.dump_format)
 
   def _collect_root(self):
     node = self
@@ -38,32 +43,79 @@ class Tracker:
     else:
       self._tracker = None
 
-  def maybe_log_collect_episode(self, episode_data, scene, outcome, data={}):
+  def _maybe_log_episode(
+    self,
+    *,
+    write_method: str,
+    counter_attr: str,
+    every: int | None,
+    metadata: dict,
+    episode_data,
+    suffix_width: int,
+  ):
+    """Shared logic for periodic episode dumps.
+
+    Increments ``counter_attr`` on the root tracker and, every ``every``
+    calls, asks the root's episode writer to persist ``episode_data``
+    via ``write_method`` (e.g. ``"write_episode"`` or
+    ``"write_eval_episode"``). No-op when the writer is absent or
+    ``every`` is falsy.
+    """
     root = self._collect_root()
-    if root._collect_writer is None:
+    if root._episode_writer is None or not every:
       return
 
-    every = self.config.logging.episodes.every_n_collects
-    root._collect_episode_count += 1
-    if root._collect_episode_count % every != 0:
+    count = getattr(root, counter_attr) + 1
+    setattr(root, counter_attr, count)
+    if count % every != 0:
       return
 
     experiment_name = self.config.logging.experiment_name
     name   = "" if experiment_name is None else f"{experiment_name}-"
-    number = root._collect_episode_count // every
+    number = count // every
+    getattr(root._episode_writer, write_method)(
+      episode_data,
+      metadata=metadata,
+      name_suffix=f"{name}{number:0{suffix_width}d}",
+    )
 
-    root._collect_writer.write_episode(
-          episode_data,
-          metadata={
-            "config":  asdict(scene),
-            "seed":    self.config.seed,
-            "source":  "collect",
-            "outcome": outcome,
-            "goal_xy": scene.goal_pos,
-            **data
-          },
-          name_suffix=f"{name}{number:03d}",
-        )
+  def maybe_log_collect_episode(self, episode_data, scene, outcome, data={}):
+    self._maybe_log_episode(
+      write_method = "write_episode",
+      counter_attr = "_collect_episode_count",
+      every        = self.config.logging.episodes.every_n_collects,
+      suffix_width = 3,
+      episode_data = episode_data,
+      metadata     = {
+        "config":  asdict(scene),
+        "seed":    self.config.seed,
+        "source":  "collect",
+        "outcome": outcome,
+        "goal_xy": scene.goal_pos,
+        **data,
+      },
+    )
+
+  def maybe_log_eval_episode(self, episode_data, data={}):
+    """Persist a per-step record of one eval rollout (raw obs, processed
+    obs, posterior/prior reconstructions, latent ``h`` / ``s``).
+
+    Mirrors :meth:`maybe_log_collect_episode`: writes one file every
+    ``logging.episodes.every_n_evals`` eval episodes seen on the root
+    tracker.
+    """
+    self._maybe_log_episode(
+      write_method = "write_eval_episode",
+      counter_attr = "_eval_episode_count",
+      every        = self.config.logging.episodes.every_n_evals,
+      suffix_width = 4,
+      episode_data = episode_data,
+      metadata     = {
+        "seed":   self.config.seed,
+        "source": "eval",
+        **data,
+      },
+    )
 
   def log(self, data: dict, **kwargs):
     if self._parent:

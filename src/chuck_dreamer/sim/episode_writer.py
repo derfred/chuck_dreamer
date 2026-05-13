@@ -1,4 +1,17 @@
-"""Episode writers — persist sim episodes to HDF5 or Rerun ``.rrd`` files."""
+"""Episode writers — persist sim and eval episodes to HDF5 or Rerun ``.rrd`` files.
+
+Two kinds of episodes share these writers:
+
+  * **Sim collect** — full per-step record from a real rollout (image,
+    action, reward, joint state, …). Written via :meth:`write_episode`.
+  * **Eval** — what the world model saw vs. what it produced under a
+    burn-in / open-loop split (raw obs, processed obs, posterior + prior
+    reconstructions, latent ``h`` / ``s``). Written via
+    :meth:`write_eval_episode`.
+
+Each writer class supports both: the format and on-disk layout differ,
+but the entry-point + metadata handling are shared.
+"""
 
 from __future__ import annotations
 
@@ -15,15 +28,19 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_FORMATS = ("hdf5", "rerun")
 
-# All writer filenames share this prefix so `iter_episodes` can glob them
-# regardless of which call site produced them.
-EPISODE_FILENAME_PREFIX = "episode"
+# Filename prefixes — different kinds of episodes live alongside one
+# another in the same dump dir, so ``iter_episodes`` can find sim
+# episodes without picking up eval dumps and vice versa.
+EPISODE_FILENAME_PREFIX      = "episode"
+EVAL_EPISODE_FILENAME_PREFIX = "eval"
 
 
 def EpisodeWriter(output_dir: str, format: str = "hdf5"):
     """Factory that returns the concrete writer for the requested ``format``.
 
-    Supported formats: ``hdf5`` (default), ``rerun``.
+    The returned writer supports both :meth:`write_episode` (sim) and
+    :meth:`write_eval_episode` (eval), so a single instance can persist
+    both kinds.
     """
     if format == "hdf5":
         return HDF5EpisodeWriter(output_dir)
@@ -33,7 +50,22 @@ def EpisodeWriter(output_dir: str, format: str = "hdf5"):
         f"Unsupported format '{format}'. Supported formats: {SUPPORTED_FORMATS}.")
 
 
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+# Per-step columns shared by all action modes for sim writes.
+# ``joint_action`` xor ``ee_action`` is selected at write time based on
+# which key the episode dict contains.
+_REQUIRED_KEYS = (
+    "image", "reward", "timestamp",
+    "joint_qpos", "ee_pos", "ee_quat", "object_xy",
+)
+
+
 def _serialize_metadata_config(metadata: dict[str, Any] | None) -> str | None:
+    """Return the ``config`` field of metadata as a JSON string, or None."""
     if metadata is None:
         return None
     cfg = metadata.get("config")
@@ -42,15 +74,6 @@ def _serialize_metadata_config(metadata: dict[str, Any] | None) -> str | None:
     if isinstance(cfg, (str, bytes)):
         return cfg if isinstance(cfg, str) else cfg.decode("utf-8")
     return json.dumps(cfg if isinstance(cfg, dict) else asdict(cfg))  # type: ignore[arg-type]
-
-
-# Per-step columns shared by all action modes. ``joint_action`` xor
-# ``ee_action`` is selected at write time based on which key the episode
-# dict contains.
-_REQUIRED_KEYS = (
-    "image", "reward", "timestamp",
-    "joint_qpos", "ee_pos", "ee_quat", "object_xy",
-)
 
 
 def _resolve_action(episode: dict[str, np.ndarray]) -> tuple[str, np.ndarray]:
@@ -66,11 +89,79 @@ def _resolve_action(episode: dict[str, np.ndarray]) -> tuple[str, np.ndarray]:
     raise KeyError("episode is missing an action field (expected joint_action or ee_action)")
 
 
-class HDF5EpisodeWriter:
-    """
-    Writes episodes to HDF5 files.
+def _denormalize_recon_image(recon: np.ndarray) -> np.ndarray:
+    """Map a decoder image output (float in ``[-0.5, 0.5]``) to uint8 RGB.
 
-    Each episode is stored in ``output_dir/episode_NNNNN.hdf5`` with the
+    Out-of-range values are clipped so we get a viewable image even when
+    the model has not converged yet.
+    """
+    arr = np.asarray(recon, dtype=np.float32)
+    arr = np.clip(arr + 0.5, 0.0, 1.0) * 255.0
+    return arr.astype(np.uint8)
+
+
+def _coerce_image_for_log(img: np.ndarray) -> np.ndarray:
+    """Accept uint8 [0,255] or float images in [-0.5, 0.5] / [0, 1] and return uint8."""
+    arr = np.asarray(img)
+    if arr.dtype == np.uint8:
+        return arr
+    arr = arr.astype(np.float32)
+    if arr.min() < 0.0:
+        arr = arr + 0.5
+    arr = np.clip(arr, 0.0, 1.0) * 255.0
+    return arr.astype(np.uint8)
+
+
+def _rerun_metadata_props(metadata: dict[str, Any] | None, extra_keys: tuple[str, ...] = ()) -> dict[str, str]:
+    """Project an episode-metadata dict onto Rerun-loggable string props.
+
+    Always picks up the JSON-serialized ``config``, ``seed``, ``source``,
+    and ``outcome`` fields when present. ``extra_keys`` adds further
+    scalar fields (looked up with ``metadata.get(k)``, str-cast,
+    none-filtered) so eval can surface ``iteration`` / ``episode_index``
+    / ``burn_in`` without forking a second helper.
+    """
+    props: dict[str, str] = {}
+    if metadata is None:
+        return props
+    cfg_json = _serialize_metadata_config(metadata)
+    if cfg_json is not None:
+        props["config"] = cfg_json
+    if "seed" in metadata:
+        props["seed"] = str(int(metadata["seed"]))
+    if metadata.get("source") is not None:
+        props["source"] = str(metadata["source"])
+    if metadata.get("outcome") is not None:
+        props["outcome"] = str(metadata["outcome"])
+    for k in extra_keys:
+        v = metadata.get(k) if metadata else None
+        if v is not None:
+            props[k] = str(v)
+    return props
+
+
+class _BaseEpisodeWriter:
+    """Shared base — owns the output directory and per-recording paths."""
+
+    file_extension: str = ""
+
+    def __init__(self, output_dir: str) -> None:
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _path_for(self, prefix: str, name_suffix: str) -> Path:
+        return self.output_dir / f"{prefix}-{name_suffix}.{self.file_extension}"
+
+
+# ---------------------------------------------------------------------------
+# HDF5 writer
+# ---------------------------------------------------------------------------
+
+
+class HDF5EpisodeWriter(_BaseEpisodeWriter):
+    """Writes both sim and eval episodes to HDF5 files.
+
+    Sim episodes go to ``output_dir/episode-{suffix}.hdf5`` with the
     structure::
 
         images          (T, H, W, 3)    uint8
@@ -89,11 +180,25 @@ class HDF5EpisodeWriter:
             outcome     scalar string
             goal_xy     (2,) float32
             act_mode    scalar string ("joint" | "ee")
+
+    Eval episodes go to ``output_dir/eval-{suffix}.hdf5`` with::
+
+        obs_raw            (T, ...)
+        obs_processed      (T, ...)
+        recon_posterior    (T, ...)
+        recon_prior        (T, ...)
+        h                  (T, deter_dim)
+        s                  (T, stoch_dim)
+        h_prior            (T, deter_dim)
+        s_prior            (T, stoch_dim)
+        metadata/
+            burn_in        int
+            iteration      int (if present)
+            episode_index  int (if present)
+            seed           int (if present)
     """
 
-    def __init__(self, output_dir: str) -> None:
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+    file_extension = "hdf5"
 
     def write_episode(
         self,
@@ -114,7 +219,7 @@ class HDF5EpisodeWriter:
         object_xy  = np.asarray(episode["object_xy"],  dtype=np.float32)
         images     = np.asarray(episode["image"],      dtype=np.uint8)
 
-        ep_path = self.output_dir / f"{EPISODE_FILENAME_PREFIX}-{name_suffix}.hdf5"
+        ep_path = self._path_for(EPISODE_FILENAME_PREFIX, name_suffix)
         with h5py.File(ep_path, "w") as f:
             f.create_dataset("images",     data=images,  compression="gzip", compression_opts=4)
             f.create_dataset(action_kind,  data=action)
@@ -147,22 +252,75 @@ class HDF5EpisodeWriter:
 
         return ep_path
 
+    def write_eval_episode(
+        self,
+        episode: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+        *,
+        name_suffix: str,
+    ) -> Path:
+        ep_path = self._path_for(EVAL_EPISODE_FILENAME_PREFIX, name_suffix)
+        with h5py.File(ep_path, "w") as f:
+            f.create_dataset("obs_raw",         data=np.asarray(episode["raw_obs"]))
+            f.create_dataset("obs_processed",   data=np.asarray(episode["processed_obs"], dtype=np.float32))
+            f.create_dataset("recon_posterior", data=np.asarray(episode["recon_posterior"], dtype=np.float32),
+                             compression="gzip", compression_opts=4)
+            f.create_dataset("recon_prior",     data=np.asarray(episode["recon_prior"], dtype=np.float32),
+                             compression="gzip", compression_opts=4)
+            f.create_dataset("h",               data=np.asarray(episode["h"],       dtype=np.float32))
+            f.create_dataset("s",               data=np.asarray(episode["s"],       dtype=np.float32))
+            f.create_dataset("h_prior",         data=np.asarray(episode["h_prior"], dtype=np.float32))
+            f.create_dataset("s_prior",         data=np.asarray(episode["s_prior"], dtype=np.float32))
 
-class RerunEpisodeWriter:
-    """
-    Writes episodes to Rerun ``.rrd`` files (one per episode).
+            meta_grp = f.create_group("metadata")
+            if metadata is not None:
+                cfg = _serialize_metadata_config(metadata)
+                if cfg is not None:
+                    meta_grp.create_dataset("config", data=cfg)
+                for k in ("burn_in", "iteration", "episode_index", "seed"):
+                    if metadata.get(k) is not None:
+                        meta_grp.create_dataset(k, data=int(metadata[k]))
+                if metadata.get("source") is not None:
+                    meta_grp.create_dataset("source", data=str(metadata["source"]))
+        return ep_path
 
-    Each episode is stored in ``output_dir/episode_NNNNN.rrd``. Images are
-    logged as ``camera/image``; scalar/vector signals use the per-component
-    ``Scalars`` archetype. Whichever of ``joint_action`` / ``ee_action``
-    the episode contains is logged. Metadata is attached on the recording
-    properties entity so it is visible in the viewer.
+
+# ---------------------------------------------------------------------------
+# Rerun writer
+# ---------------------------------------------------------------------------
+
+
+class RerunEpisodeWriter(_BaseEpisodeWriter):
+    """Writes both sim and eval episodes to Rerun ``.rrd`` files.
+
+    See :class:`HDF5EpisodeWriter` for a description of the two payload
+    schemas. Sim recordings log ``camera/image``, ``reward``, the action
+    column, and per-step joint/EE/object signals; eval recordings log
+    raw + processed obs, posterior + prior reconstructions, and the
+    latent trajectories.
+
+    Metadata is logged as static text docs on the ``metadata/`` entity
+    so it surfaces in the viewer.
     """
+
+    file_extension = "rrd"
 
     def __init__(self, output_dir: str) -> None:
-        import rerun as rr  # noqa: F401  — fail fast if rerun is missing
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        import rerun as rr  # noqa: F401 — fail fast if rerun is missing
+        super().__init__(output_dir)
+
+    def _new_recording(self, recording_id: str):
+        import rerun as rr
+        return rr.RecordingStream(
+            application_id="chuck_dreamer",
+            recording_id=recording_id,
+        )
+
+    @staticmethod
+    def _log_metadata(rec, props: dict[str, str]) -> None:
+        import rerun as rr
+        for key, value in props.items():
+            rec.log(f"metadata/{key}", rr.TextDocument(value), static=True)
 
     def write_episode(
         self,
@@ -177,30 +335,16 @@ class RerunEpisodeWriter:
 
         import rerun as rr
 
-        recording_id = f"{EPISODE_FILENAME_PREFIX}-{name_suffix}"
-        ep_path = self.output_dir / f"{recording_id}.rrd"
-        rec = rr.RecordingStream(
-            application_id="chuck_dreamer",
-            recording_id=recording_id,
-        )
+        ep_path = self._path_for(EPISODE_FILENAME_PREFIX, name_suffix)
+        rec = self._new_recording(f"{EPISODE_FILENAME_PREFIX}-{name_suffix}")
 
         act_mode = "joint" if action_kind == "joint_action" else "ee"
-        props: dict[str, Any] = {"act_mode": act_mode}
-        if metadata is not None:
-            cfg_json = _serialize_metadata_config(metadata)
-            if cfg_json is not None:
-                props["config"] = cfg_json
-            if "seed" in metadata:
-                props["seed"] = str(int(metadata["seed"]))
-            if "source" in metadata:
-                props["source"] = str(metadata["source"])
-            if metadata.get("outcome") is not None:
-                props["outcome"] = str(metadata["outcome"])
-            if metadata.get("goal_xy") is not None:
-                goal = np.asarray(metadata["goal_xy"], dtype=np.float32)
-                props["goal_xy"] = f"[{float(goal[0])}, {float(goal[1])}]"
-        for key, value in props.items():
-            rec.log(f"metadata/{key}", rr.TextDocument(value), static=True)
+        props = _rerun_metadata_props(metadata)
+        props["act_mode"] = act_mode
+        if metadata is not None and metadata.get("goal_xy") is not None:
+            goal = np.asarray(metadata["goal_xy"], dtype=np.float32)
+            props["goal_xy"] = f"[{float(goal[0])}, {float(goal[1])}]"
+        self._log_metadata(rec, props)
 
         images     = np.asarray(episode["image"],      dtype=np.uint8)
         rewards    = np.asarray(episode["reward"],     dtype=np.float32)
@@ -222,6 +366,57 @@ class RerunEpisodeWriter:
             rec.log("ee_pos",       rr.Scalars(ee_pos[i].tolist()))
             rec.log("ee_quat",      rr.Scalars(ee_quat[i].tolist()))
             rec.log("object_xy",    rr.Scalars(object_xy[i].tolist()))
+
+        rec.save(str(ep_path))
+        return ep_path
+
+    def write_eval_episode(
+        self,
+        episode: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+        *,
+        name_suffix: str,
+    ) -> Path:
+        import rerun as rr
+
+        recording_id = f"{EVAL_EPISODE_FILENAME_PREFIX}-{name_suffix}"
+        ep_path = self._path_for(EVAL_EPISODE_FILENAME_PREFIX, name_suffix)
+        rec = self._new_recording(recording_id)
+
+        self._log_metadata(rec, _rerun_metadata_props(
+            metadata, extra_keys=("iteration", "episode_index", "burn_in"),
+        ))
+
+        raw_obs       = episode["raw_obs"]
+        processed_obs = episode["processed_obs"]
+        recon_post    = np.asarray(episode["recon_posterior"], dtype=np.float32)
+        recon_prior   = np.asarray(episode["recon_prior"],     dtype=np.float32)
+        h_post        = np.asarray(episode["h"],               dtype=np.float32)
+        s_post        = np.asarray(episode["s"],               dtype=np.float32)
+        h_prior       = np.asarray(episode["h_prior"],         dtype=np.float32)
+        s_prior       = np.asarray(episode["s_prior"],         dtype=np.float32)
+
+        is_image = recon_post.ndim == 4   # (T, H, W, C)
+        T        = recon_post.shape[0]
+
+        for i in range(T):
+            rec.set_time("step", sequence=i)
+
+            if is_image:
+                rec.log("obs/raw",         rr.Image(_coerce_image_for_log(raw_obs[i])))
+                rec.log("obs/processed",   rr.Image(_coerce_image_for_log(processed_obs[i])))
+                rec.log("recon/posterior", rr.Image(_denormalize_recon_image(recon_post[i])))
+                rec.log("recon/prior",     rr.Image(_denormalize_recon_image(recon_prior[i])))
+            else:
+                rec.log("obs/raw",         rr.Scalars(np.asarray(raw_obs[i],       dtype=np.float32).tolist()))
+                rec.log("obs/processed",   rr.Scalars(np.asarray(processed_obs[i], dtype=np.float32).tolist()))
+                rec.log("recon/posterior", rr.Scalars(recon_post[i].tolist()))
+                rec.log("recon/prior",     rr.Scalars(recon_prior[i].tolist()))
+
+            rec.log("latent/h",       rr.Scalars(h_post[i].tolist()))
+            rec.log("latent/s",       rr.Scalars(s_post[i].tolist()))
+            rec.log("latent/h_prior", rr.Scalars(h_prior[i].tolist()))
+            rec.log("latent/s_prior", rr.Scalars(s_prior[i].tolist()))
 
         rec.save(str(ep_path))
         return ep_path

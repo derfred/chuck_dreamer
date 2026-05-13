@@ -46,7 +46,7 @@ def patch_writer(monkeypatch):
 
 
 def _make_config(*, every_n_collects, dump_path="/tmp/episodes", experiment_name=None,
-                 dump_format="rerun", seed=42, logger="none"):
+                 dump_format="rerun", seed=42, logger="none", every_n_evals=None):
   """Build a SimpleNamespace config matching the new logging.episodes shape."""
   return SimpleNamespace(
     seed=seed,
@@ -58,6 +58,7 @@ def _make_config(*, every_n_collects, dump_path="/tmp/episodes", experiment_name
         dump_path=dump_path,
         dump_format=dump_format,
         every_n_collects=every_n_collects,
+        every_n_evals=every_n_evals,
       ),
     ),
   )
