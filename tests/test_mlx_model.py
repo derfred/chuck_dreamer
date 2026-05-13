@@ -303,7 +303,7 @@ def test_dreamer_model_rejects_unsupported_obs_mode():
 def test_build_model_rejects_unknown_device():
   cfg = load_config()
   cfg.env.obs_mode = "state"
-  cfg.hardware.device = "cuda"
+  cfg.hardware.device = "not-a-real-backend"
   with pytest.raises(ValueError):
     build_model(cfg, obs_shape=(15,), action_dim=6)
 
