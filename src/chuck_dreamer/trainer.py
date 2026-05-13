@@ -98,6 +98,7 @@ class Trainer:
         self.model.wm_update(batch, tracker=tracker)
 
   def _eval_phase(self, iteration: int):
+    pass
 
   def _checkpoint_dir(self) -> str:
     name = self.config.logging.experiment_name or "default"
