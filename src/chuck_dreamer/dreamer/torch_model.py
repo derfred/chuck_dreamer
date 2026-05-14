@@ -721,6 +721,10 @@ class DreamerTorchModel:
   def stack_along_time(self, xs: list[torch.Tensor]) -> torch.Tensor:
     return torch.stack(xs, dim=1)
 
+  def broadcast_to(self, x: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+    """Backend-native broadcast. Used by CEM to expand a B=1 state across samples."""
+    return torch.broadcast_to(x, shape)
+
   # ---------------------------------------------------------------------
   # Training-time surface (mirrors mlx_model.DreamerMLXModel)
   # ---------------------------------------------------------------------

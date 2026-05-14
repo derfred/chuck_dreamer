@@ -11,12 +11,12 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-import mlx.core as mx
 import numpy as np
 
 from ..reward import RewardFn
 from ..sim.step_info import StepInfo
-from .episode_loader import Progress, iter_episodes
+from .episode_dataset import EpisodeDataset
+from .episode_loader import Progress
 from .episode_processor import EpisodeProcessor, StateVectorProcessor
 
 Episode = dict[str, Any]
@@ -247,18 +247,21 @@ class ReplayBuffer:
         [si["object_xy"][start:end], si["ee_pos"][start:end]], axis=-1,
       ))
 
-    obs_out: dict | mx.array
+    # Return numpy arrays — backends lift them via their ``coerce`` method
+    # (see WorldModel.encode and rollout()'s coerce hook). Keeping the buffer
+    # backend-agnostic lets the same buffer feed mlx or torch trainers.
+    obs_out: dict | np.ndarray
     if obs_batch_dict is not None:
-      obs_out = {k: mx.array(np.stack(v, axis=0)) for k, v in obs_batch_dict.items()}
+      obs_out = {k: np.stack(v, axis=0) for k, v in obs_batch_dict.items()}
     else:
-      obs_out = mx.array(np.stack(obs_batch, axis=0))
+      obs_out = np.stack(obs_batch, axis=0)
 
     return {
       "obs": obs_out,
-      "action": mx.array(np.stack(action_batch, axis=0)),
-      "reward": mx.array(np.stack(reward_batch, axis=0)),
-      "done": mx.array(np.stack(done_batch, axis=0)),
-      "aux_target": mx.array(np.stack(aux_batch, axis=0).astype(np.float32)),
+      "action": np.stack(action_batch, axis=0),
+      "reward": np.stack(reward_batch, axis=0),
+      "done": np.stack(done_batch, axis=0),
+      "aux_target": np.stack(aux_batch, axis=0).astype(np.float32),
     }
 
   def _reward_slice(self, ep: Episode, start: int, end: int) -> np.ndarray:
@@ -323,9 +326,9 @@ class ReplayBuffer:
     of episodes successfully inserted (short episodes that fail the
     ``min_episode_len`` check are skipped, like ``add_episode``).
 
-    ``progress`` is forwarded to :func:`iter_episodes` — pass ``True``
-    for a tqdm/print progress bar or a ``(i, total, path)`` callable
-    for custom reporting.
+    ``progress`` is forwarded to :meth:`EpisodeDataset.stream` — pass
+    ``True`` for a tqdm/print progress bar or a ``(i, total, path)``
+    callable for custom reporting.
 
     ``num_episodes`` optionally limits ingestion to a random subset of
     that many episode files (drawn without replacement using the
@@ -334,17 +337,16 @@ class ReplayBuffer:
     Parallel-load pool size is set on the buffer at construction time
     via ``default_num_workers`` (or :meth:`from_config`).
     """
+    dataset = EpisodeDataset(directory, format=format)
     count = 0
-    for raw in iter_episodes(
-      directory,
-      format=format,
-      progress=progress,
-      num_episodes=num_episodes,
-      rng=self._rng,
-      num_workers=self._default_num_workers,
+    for episode in dataset.stream(
+      progress     = progress,
+      num_episodes = num_episodes,
+      rng          = self._rng,
+      num_workers  = self._default_num_workers,
     ):
       before = self.num_episodes
-      self.add_sim_episode(raw)
+      self.add_sim_episode(episode.data)
       if self.num_episodes > before:
         count += 1
     return count

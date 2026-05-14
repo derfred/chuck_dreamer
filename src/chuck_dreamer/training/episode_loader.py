@@ -184,7 +184,8 @@ def iter_episodes(
   num_episodes: int | None = None,
   rng: np.random.Generator | None = None,
   num_workers: int = 0,
-) -> Iterator[RawEpisode]:
+  with_paths: bool = False,
+) -> Iterator[Any]:
   """Yield raw episodes from a directory of writer output.
 
   If ``num_episodes`` is given, a random subset of that many episodes is
@@ -198,6 +199,10 @@ def iter_episodes(
   loops in the rerun reader are GIL-bound). Episodes are yielded in
   submission order, with a bounded in-flight window so peak memory stays
   capped at roughly ``num_workers`` episodes.
+
+  ``with_paths=True`` yields ``(Path, RawEpisode)`` instead of just the
+  raw episode — used by callers (the evaluator) that need to thread the
+  source filename through to dump artifacts.
   """
   directory = Path(directory)
   if format == "hdf5":
@@ -219,12 +224,15 @@ def iter_episodes(
   callback = _resolve_progress(progress)
   total    = len(paths)
 
+  def _emit(path: Path, episode: RawEpisode):
+    return (path, episode) if with_paths else episode
+
   if num_workers <= 0 or total <= 1:
     for i, p in enumerate(paths, start=1):
       episode = loader(p)
       if callback is not None:
         callback(i, total, p)
-      yield episode
+      yield _emit(p, episode)
     return
 
   window = min(num_workers, total)
@@ -242,7 +250,7 @@ def iter_episodes(
       yielded += 1
       if callback is not None:
         callback(yielded, total, path)
-      yield episode
+      yield _emit(path, episode)
       if next_submit < total:
         in_flight.append((next_submit, paths[next_submit], pool.submit(loader, paths[next_submit])))
         next_submit += 1

@@ -5,11 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-mx = pytest.importorskip("mlx.core")
-
-from chuck_dreamer.reward import GoalDistanceReward, build_reward_fn  # noqa: E402
-from chuck_dreamer.sim.step_info import StepInfo  # noqa: E402
-from chuck_dreamer.training.replay_buffer import ReplayBuffer  # noqa: E402
+from chuck_dreamer.reward import GoalDistanceReward, build_reward_fn
+from chuck_dreamer.sim.step_info import StepInfo
+from chuck_dreamer.training.replay_buffer import ReplayBuffer
 
 
 def _step_info(distance: float = 0.5) -> StepInfo:

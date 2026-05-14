@@ -13,9 +13,14 @@ class Tracker:
 
     # One writer instance backs both collect and eval dumps — the file
     # naming differs but the format/output dir are shared.
-    self._episode_writer        = None
-    self._collect_episode_count = 0
-    self._eval_episode_count    = 0
+    self._episode_writer         = None
+    self._collect_episode_count  = 0
+    # Eval logging is gated per *phase*: every Nth eval phase dumps every
+    # episode it sees. We track phases by stamping the iteration of the
+    # most recent eval phase that opened, and a running phase counter.
+    self._eval_phase_count        = 0
+    self._eval_phase_iteration    = None
+    self._eval_phase_logging      = False
     if parent is None:
       ep_cfg = config.logging.episodes
       collect_on = bool(ep_cfg.every_n_collects)
@@ -43,50 +48,28 @@ class Tracker:
     else:
       self._tracker = None
 
-  def _maybe_log_episode(
-    self,
-    *,
-    write_method: str,
-    counter_attr: str,
-    every: int | None,
-    metadata: dict,
-    episode_data,
-    suffix_width: int,
-  ):
-    """Shared logic for periodic episode dumps.
-
-    Increments ``counter_attr`` on the root tracker and, every ``every``
-    calls, asks the root's episode writer to persist ``episode_data``
-    via ``write_method`` (e.g. ``"write_episode"`` or
-    ``"write_eval_episode"``). No-op when the writer is absent or
-    ``every`` is falsy.
+  def maybe_log_collect_episode(self, episode_data, scene, outcome, data={}):
+    """Persist one collect-phase episode every Nth call, where N is
+    ``logging.episodes.every_n_collects``. No-op when the writer is
+    absent or ``every`` is falsy.
     """
     root = self._collect_root()
-    if root._episode_writer is None or not every:
+    if root._episode_writer is None:
+      return
+    every = self.config.logging.episodes.every_n_collects
+    if not every:
       return
 
-    count = getattr(root, counter_attr) + 1
-    setattr(root, counter_attr, count)
-    if count % every != 0:
+    root._collect_episode_count += 1
+    if root._collect_episode_count % every != 0:
       return
 
     experiment_name = self.config.logging.experiment_name
     name   = "" if experiment_name is None else f"{experiment_name}-"
-    number = count // every
-    getattr(root._episode_writer, write_method)(
+    number = root._collect_episode_count // every
+    root._episode_writer.write_episode(
       episode_data,
-      metadata=metadata,
-      name_suffix=f"{name}{number:0{suffix_width}d}",
-    )
-
-  def maybe_log_collect_episode(self, episode_data, scene, outcome, data={}):
-    self._maybe_log_episode(
-      write_method = "write_episode",
-      counter_attr = "_collect_episode_count",
-      every        = self.config.logging.episodes.every_n_collects,
-      suffix_width = 3,
-      episode_data = episode_data,
-      metadata     = {
+      metadata = {
         "config":  asdict(scene),
         "seed":    self.config.seed,
         "source":  "collect",
@@ -94,27 +77,49 @@ class Tracker:
         "goal_xy": scene.goal_pos,
         **data,
       },
+      name_suffix = f"{name}{number:03d}",
     )
 
-  def maybe_log_eval_episode(self, episode_data, data={}):
-    """Persist a per-step record of one eval rollout (raw obs, processed
-    obs, posterior/prior reconstructions, latent ``h`` / ``s``).
+  def maybe_log_eval_episode(self, episode_data, *, iteration, source_filename, data={}):
+    """Persist one eval rollout (raw obs, processed obs, posterior/prior
+    reconstructions, latent ``h`` / ``s``).
 
-    Mirrors :meth:`maybe_log_collect_episode`: writes one file every
-    ``logging.episodes.every_n_evals`` eval episodes seen on the root
-    tracker.
+    Gating is per *phase*, not per episode: when ``every_n_evals`` is N,
+    every Nth eval phase dumps every episode it sees. Phases are
+    distinguished by ``iteration`` — the first call seen for a new
+    iteration opens a phase and decides whether it logs.
+
+    ``source_filename`` is the eval episode's source stem (e.g.
+    ``"episode-027"``); it shows up verbatim in the output filename as
+    ``eval-iteration{iteration}-{source_filename}.{ext}``.
     """
-    self._maybe_log_episode(
-      write_method = "write_eval_episode",
-      counter_attr = "_eval_episode_count",
-      every        = self.config.logging.episodes.every_n_evals,
-      suffix_width = 4,
-      episode_data = episode_data,
-      metadata     = {
-        "seed":   self.config.seed,
-        "source": "eval",
+    root = self._collect_root()
+    if root._episode_writer is None:
+      return
+    every = self.config.logging.episodes.every_n_evals
+    if not every:
+      return
+
+    # First call for a new iteration → open a new phase. Decide once
+    # whether this phase logs and stick to that for the rest of the
+    # episodes seen at this iteration.
+    if root._eval_phase_iteration != iteration:
+      root._eval_phase_count    += 1
+      root._eval_phase_iteration = iteration
+      root._eval_phase_logging   = (root._eval_phase_count % every == 0)
+
+    if not root._eval_phase_logging:
+      return
+
+    root._episode_writer.write_eval_episode(
+      episode_data,
+      metadata = {
+        "seed":      self.config.seed,
+        "source":    "eval",
+        "iteration": iteration,
         **data,
       },
+      name_suffix = f"iteration{iteration:04d}-{source_filename}",
     )
 
   def log(self, data: dict, **kwargs):

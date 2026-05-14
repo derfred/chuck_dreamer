@@ -5,9 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-mx = pytest.importorskip("mlx.core")
-
-from chuck_dreamer.training.replay_buffer import ReplayBuffer  # noqa: E402
+from chuck_dreamer.training.replay_buffer import ReplayBuffer
 
 
 # ---------------------------------------------------------------------------
@@ -98,10 +96,10 @@ def test_sample_shapes_and_dtypes():
   assert batch["reward"].shape == (B, T)
   assert batch["done"].shape == (B, T)
 
-  assert batch["obs"].dtype == mx.float32
-  assert batch["action"].dtype == mx.float32
-  assert batch["reward"].dtype == mx.float32
-  assert batch["done"].dtype == mx.bool_
+  assert batch["obs"].dtype == np.float32
+  assert batch["action"].dtype == np.float32
+  assert batch["reward"].dtype == np.float32
+  assert batch["done"].dtype == np.bool_
 
 
 # ---------------------------------------------------------------------------

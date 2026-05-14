@@ -247,6 +247,20 @@ class WorldModel(Protocol):
     deterministic mode (post-squash)."""
     ...
 
+  # ---- backend coercion / shape ops used by backend-agnostic callers
+  # (CEM, evaluator, rollout). Optional — :func:`rollout` only requires
+  # ``coerce`` when callers pass numpy inputs.
+
+  def coerce(self, x: Any) -> Any:
+    """Lift numpy (or already-native tensors) into the backend's native
+    tensor type. Recursive on dicts."""
+    ...
+
+  def broadcast_to(self, x: Any, shape: tuple[int, ...]) -> Any:
+    """Broadcast a tensor to ``shape``. Used by CEM to expand a B=1 state
+    across CEM samples without leaving the backend's tensor type."""
+    ...
+
 
 # A policy is anything that turns a feature batch into an action batch.
 # The trainer's neural actor satisfies this via ``actor_action``; CEM

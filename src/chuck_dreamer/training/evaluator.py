@@ -20,12 +20,13 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any
+import tqdm
 
 import numpy as np
 
 from ..dreamer.world_model import EvalRollout, eval_split_rollout
+from .episode_dataset import EpisodeDataset
 from .episode_processor import processor_for
-from .episode_loader import iter_episodes
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +98,32 @@ class Evaluator:
     self.config     = config
     self.model      = model
     self._processor = processor_for(config)
+    eval_cfg        = config.eval
+    self._dataset   = EpisodeDataset(eval_cfg.data_path, format=eval_cfg.data_format)
 
   # ---------- public API ----------
+
+  def warmup(self):
+    """Eagerly load the eval episode set into memory.
+
+    Idempotent. On a missing or empty eval directory the dataset stays
+    empty and :meth:`evaluate` is a silent no-op.
+    """
+    if self._dataset.loaded:
+      return
+    eval_cfg = self.config.eval
+    if not eval_cfg.data_path or not os.path.exists(eval_cfg.data_path):
+      logger.warning(f"Eval data path {eval_cfg.data_path!r} does not exist. Eval phase will be skipped.")
+      return
+    logger.info(
+      f"Evaluator will read eval episodes from {eval_cfg.data_path!r} "
+      f"with format {eval_cfg.data_format!r}"
+    )
+    self._dataset.load()
+    if len(self._dataset) == 0:
+      logger.warning(
+        f"Eval data path {eval_cfg.data_path!r} contains no episodes. Eval phase will be skipped."
+      )
 
   def evaluate(self, iteration: int, tracker) -> None:
     """Run one eval pass and log to ``tracker``.
@@ -106,10 +131,8 @@ class Evaluator:
     No-op if the eval directory is missing or no episode is long enough
     for one burn-in + one prediction step.
     """
-    eval_cfg  = self.config.eval
-    data_path = eval_cfg.data_path
-    if not data_path or not os.path.exists(data_path):
-      logger.warning(f"Eval data path {data_path!r} does not exist. Skipping eval phase.")
+    eval_cfg = self.config.eval
+    if not self._dataset.loaded or len(self._dataset) == 0:
       return
 
     burn_in = int(eval_cfg.burn_in)
@@ -121,20 +144,19 @@ class Evaluator:
       per_episode_prior: list[np.ndarray] = []
       ep_count = 0
 
-      for ep_idx, raw in enumerate(iter_episodes(
-        data_path,
-        format=eval_cfg.data_format,
-        num_episodes=eval_cfg.num_episodes,
+      for ep_idx, raw_episode in enumerate(tqdm.tqdm(
+        self._dataset, desc=f"Evaluating episodes - iteration {iteration}",
       )):
+        stem = raw_episode.stem
         try:
-          episode = self._processor(raw)
+          episode = self._processor(raw_episode.data)
         except ValueError as exc:
-          logger.warning(f"Skipping eval episode {ep_idx}: {exc}")
+          logger.warning(f"Skipping eval episode {stem!r}: {exc}")
           continue
 
         result = self._run_episode(episode, burn_in)
         if result is None:
-          logger.debug(f"Eval episode {ep_idx} too short for burn_in={burn_in}; skipping")
+          logger.debug(f"Eval episode {stem!r} too short for burn_in={burn_in}; skipping")
           continue
 
         # Log per-episode aggregates and persist artifacts.
@@ -144,7 +166,8 @@ class Evaluator:
         per_episode_prior.append(prior_err)
 
         eval_tracker.log({
-          "episode_index": ep_idx,
+          "episode_index":         ep_idx,
+          "source":                stem,
           "recon/posterior_mean":  float(post_err.mean()),
           "recon/prior_mean":      float(prior_err.mean()),
           "recon/posterior_final": float(post_err[-1]),
@@ -154,8 +177,9 @@ class Evaluator:
 
         eval_tracker.maybe_log_eval_episode(
           self._episode_artifacts(episode, result, burn_in),
-          data={
-            "iteration":     iteration,
+          iteration       = iteration,
+          source_filename = stem,
+          data            = {
             "episode_index": ep_idx,
             "burn_in":       burn_in,
           },
@@ -165,7 +189,7 @@ class Evaluator:
 
       if ep_count == 0:
         logger.warning(
-          f"Eval phase produced no usable episodes from {data_path!r} (burn_in={burn_in})."
+          f"Eval phase produced no usable episodes (burn_in={burn_in})."
         )
         return
 
@@ -215,7 +239,7 @@ class Evaluator:
     recon_post  = self._unbatch(rollout.posterior.obs_pred_numpy())
     recon_prior = self._unbatch(rollout.prior.obs_pred_numpy())
 
-    target = self._slice_obs(obs, burn_in, T)
+    target      = self._slice_obs(obs, burn_in, T)
     error_post  = _recon_error(recon_post,  target)
     error_prior = _recon_error(recon_prior, target)
 
@@ -250,8 +274,8 @@ class Evaluator:
       "processed_obs":   processed,
       "recon_posterior": result["recon_posterior"],
       "recon_prior":     result["recon_prior"],
-      "h":               result["h_post"],
-      "s":               result["s_post"],
+      "h_post":          result["h_post"],
+      "s_post":          result["s_post"],
       "h_prior":         result["h_prior"],
       "s_prior":         result["s_prior"],
     }

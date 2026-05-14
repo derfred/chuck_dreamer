@@ -711,6 +711,10 @@ class DreamerMLXModel:
     """Stack a list of per-step backend tensors along a new time axis at index 1."""
     return cast(mx.array, mx.stack(xs, axis=1))
 
+  def broadcast_to(self, x: mx.array, shape: tuple[int, ...]) -> mx.array:
+    """Backend-native broadcast. Used by CEM to expand a B=1 state across samples."""
+    return cast(mx.array, mx.broadcast_to(x, shape))
+
   @staticmethod
   def _normalize_image(img: mx.array) -> mx.array:
     """Map (uint8 ∈ [0,255]) or float ∈ [0,255] to float ∈ [-0.5, 0.5].
@@ -788,7 +792,12 @@ class DreamerMLXModel:
     return loss, aux_out
 
   def wm_update(self, batch, tracker=None):
-    """Compute model loss and gradients for a batch of sequences."""
+    """Compute model loss and gradients for a batch of sequences.
+
+    The replay buffer hands us numpy arrays so it stays backend-agnostic;
+    we lift to ``mx.array`` once here before entering the autodiff loop.
+    """
+    batch = self.coerce(batch)
     (loss, aux), grads = self._wm_grad(self._wm_bundle, batch)
 
     grad_norm = None

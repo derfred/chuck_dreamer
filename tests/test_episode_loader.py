@@ -7,27 +7,25 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-pytest.importorskip("mlx.core")
-
-from chuck_dreamer.config import (  # noqa: E402
+from chuck_dreamer.config import (
   CNN_BOTTLENECK_HW,
   derive_image_size,
   load_config,
 )
-from chuck_dreamer.training.episode_loader import (  # noqa: E402
+from chuck_dreamer.training.episode_loader import (
   iter_episodes,
   load_hdf5_episode,
   load_rerun_episode,
 )
-from chuck_dreamer.training.episode_processor import (  # noqa: E402
+from chuck_dreamer.training.episode_processor import (
   ImageProcessor,
   ImageProprioProcessor,
   StateVectorProcessor,
   _drop_last_and_pack,
   processor_for,
 )
-from chuck_dreamer.training.replay_buffer import ReplayBuffer  # noqa: E402
-from chuck_dreamer.sim.episode_writer import EpisodeWriter  # noqa: E402
+from chuck_dreamer.training.replay_buffer import ReplayBuffer
+from chuck_dreamer.sim.episode_writer import EpisodeWriter
 
 
 # ---------------------------------------------------------------------------

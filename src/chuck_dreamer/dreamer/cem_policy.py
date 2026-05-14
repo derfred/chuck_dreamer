@@ -13,10 +13,9 @@ from __future__ import annotations
 
 from typing import Any
 
-import mlx.core as mx
 import numpy as np
 
-from .world_model import State, WorldModel, rollout
+from .world_model import State, WorldModel, as_numpy, rollout
 
 
 class CEMPolicy:
@@ -85,10 +84,12 @@ class CEMPolicy:
       raise RuntimeError("CEMPolicy.act() called before reset()")
 
     # 1. Advance the posterior tracker with the previous action and the
-    #    new observation. Batch dim is 1 throughout.
+    #    new observation. Batch dim is 1 throughout. Inputs stay numpy and
+    #    the model lifts them via its native ``coerce`` (mlx → mx.array,
+    #    torch → tensor on-device).
     obs_b   = self._batchify(obs)
     embed   = self.model.encode(obs_b)
-    act_in  = mx.array(self._prev_action[None])  # (1, A)
+    act_in  = self.model.coerce(self._prev_action[None])  # (1, A)
     self._tracker_state = self.model.posterior_step(
       self._tracker_state, act_in, embed, sample=False,
     )
@@ -117,16 +118,21 @@ class CEMPolicy:
   # ------------------------------------------------------------------
 
   def _batchify(self, obs):
-    """Add a leading batch axis. Mirrors the notebook's ``_batch_obs``."""
+    """Add a leading batch axis. The model.encode() call lifts numpy →
+    its native tensor type via ``coerce``."""
     if isinstance(obs, dict):
-      return {k: mx.array(np.asarray(v)[None]) for k, v in obs.items()}
-    return mx.array(np.asarray(obs)[None])
+      return {k: np.asarray(v)[None] for k, v in obs.items()}
+    return np.asarray(obs)[None]
 
   def _broadcast_state(self, state: State, n: int) -> State:
-    """Repeat a batch-size-1 state to batch size ``n`` for CEM scoring."""
+    """Repeat a batch-size-1 state to batch size ``n`` for CEM scoring.
+
+    Uses the backend's ``broadcast_to`` so the operation stays in the
+    model's native tensor type (mlx.array or torch.Tensor).
+    """
     from .world_model import Distribution
     def rep(x):
-      return mx.broadcast_to(x, (n,) + x.shape[1:])
+      return self.model.broadcast_to(x, (n,) + tuple(x.shape[1:]))
     return State(
       h         = rep(state.h),
       s         = rep(state.s),
@@ -152,16 +158,22 @@ class CEMPolicy:
     return np.clip(samples, self.action_low, self.action_high)
 
   def _score(self, plan_state: State, samples: np.ndarray) -> np.ndarray:
-    """Return ``(N,)`` sums of predicted reward over the horizon."""
-    actions_mx = mx.array(samples)  # (N, H, A)
+    """Return ``(N,)`` sums of predicted reward over the horizon.
+
+    Numpy ``samples`` are passed straight through — :func:`rollout`
+    coerces them into the model's native tensor type via ``model.coerce``.
+    """
     traj = rollout(
       self.model,
       init_state     = plan_state,
       horizon        = self.horizon,
       mode           = "prior",
-      actions        = actions_mx,
+      actions        = samples,  # (N, H, A) numpy — rollout() coerces it
       sample         = False,
       predict_reward = True,
     )
-    rewards = np.asarray(traj.rewards)  # (N, H)
+    # ``as_numpy`` handles both mlx.array (numpy-compatible) and
+    # torch.Tensor (needs ``detach().cpu()`` since the model params have
+    # ``requires_grad=True``).
+    rewards = as_numpy(traj.rewards)  # (N, H)
     return rewards.sum(axis=-1)
