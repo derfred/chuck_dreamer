@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from .observation_image import ObservationImage
 from .scene_config import SceneConfig
 from .step_info import StepInfo, stack_step_infos
 
@@ -31,9 +32,45 @@ RawEpisode = dict[str, Any]
 
 
 _SHARED_KEYS = (
-  "image", "reward", "timestamp",
+  "reward", "timestamp",
   "joint_qpos", "ee_pos", "ee_quat", "object_xy",
 )
+
+
+def _stack_image_obs(image_obs_list: list[ObservationImage]) -> dict[str, np.ndarray]:
+  """Stack a per-step list of :class:`ObservationImage` into T-stacked arrays.
+
+  Returns ``image`` ``(T, H, W, 3)`` and a ``segmentation_*`` field per
+  named mask (``target``, ``goal``, ``background``, plus per-piece
+  ``clutter_{i}`` if any). The per-piece clutter masks are also stacked
+  along a leading clutter axis under ``segmentation_clutter`` as
+  ``(T, K, H, W)`` for convenience (K is the scene's clutter count, fixed
+  across the episode).
+  """
+  images = np.stack([np.asarray(io.image, dtype=np.uint8) for io in image_obs_list], axis=0)
+  target = np.stack([io.target_mask for io in image_obs_list], axis=0).astype(bool)
+  goal   = np.stack([io.goal_mask   for io in image_obs_list], axis=0).astype(bool)
+
+  out: dict[str, np.ndarray] = {
+    "image":              images,
+    "segmentation_target": target,
+    "segmentation_goal":   goal,
+  }
+
+  bg_list = [io.background_mask for io in image_obs_list]
+  if all(m is not None for m in bg_list):
+    out["segmentation_background"] = np.stack(bg_list, axis=0).astype(bool)  # type: ignore[arg-type]
+
+  # Clutter count is fixed by the scene, so stack into (T, K, H, W).
+  k = len(image_obs_list[0].clutter_masks)
+  if k > 0:
+    clutter = np.stack(
+      [np.stack(io.clutter_masks, axis=0) for io in image_obs_list],
+      axis=0,
+    ).astype(bool)
+    out["segmentation_clutter"] = clutter
+
+  return out
 
 
 def _stack_steps(steps: list[dict[str, Any]], action_kind: str) -> RawEpisode:
@@ -41,6 +78,7 @@ def _stack_steps(steps: list[dict[str, Any]], action_kind: str) -> RawEpisode:
   out: RawEpisode = {
     k: np.stack([np.asarray(s[k]) for s in steps], axis=0) for k in _SHARED_KEYS
   }
+  out.update(_stack_image_obs([s["image_obs"] for s in steps]))
   out[action_kind] = np.stack([np.asarray(s["action"]) for s in steps], axis=0)
   out["step_info"] = stack_step_infos([s["step_info"] for s in steps])
   return out
@@ -89,7 +127,7 @@ class EpisodeCollector:
 
         step_info: StepInfo = info["step_info"]
         steps.append({
-          "image":      obs["image"],
+          "image_obs":  obs["image"],
           "action":     np.asarray(action, dtype=np.float32),
           "reward":     float(reward),
           "timestamp":  float(step_info.time),

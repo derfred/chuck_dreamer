@@ -10,6 +10,7 @@ import numpy as np
 from gymnasium import spaces
 
 from ..reward import GoalDistanceReward
+from .observation_image import ObservationImage
 from .scene_builder import SceneBuilder
 from .scene_generator import SceneGenerator
 from .scene_config import SceneConfig
@@ -335,8 +336,9 @@ class PushingEnv(gym.Env):
 
   def policy_obs(self, full_obs: Observation) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Project the full obs dict to the modal observation the policy/model consumes."""
+    image_obs: ObservationImage = full_obs["image"]
     if self.obs_mode == "image":
-      return np.asarray(full_obs["image"], dtype=np.uint8)
+      return np.asarray(image_obs.image, dtype=np.uint8)
 
     proprio = np.concatenate([
       np.asarray(full_obs["ee_pos"], dtype=np.float32),
@@ -345,7 +347,7 @@ class PushingEnv(gym.Env):
     ])
 
     if self.obs_mode == "image_proprio":
-      return (np.asarray(full_obs["image"], dtype=np.uint8), proprio)
+      return (np.asarray(image_obs.image, dtype=np.uint8), proprio)
 
     return np.concatenate([
       proprio[:7],  # ee_pos + ee_quat
@@ -371,13 +373,15 @@ class PushingEnv(gym.Env):
     super().reset(seed=seed)
 
     self.scene = scene
-    self.model  = self.builder.build(scene, render_size=self.render_size)
-    self.data   = mujoco.MjData(self.model)
+    self.model = self.builder.build(scene, render_size=self.render_size)
+    self.data  = mujoco.MjData(self.model)
     self.controller.reset(self.model, scene)
 
     if self.renderer is not None:
       self.renderer.close()
     self.renderer = mujoco.Renderer(self.model, self.render_size[0], self.render_size[1])
+    self._setup_seg_ids()
+
     mujoco.mj_forward(self.model, self.data)
 
     initial_qpos = scene.joint_initial_qpos
@@ -409,11 +413,27 @@ class PushingEnv(gym.Env):
     info: dict[str, Any] = {"step_info": step_info}
     return obs, reward, terminated, truncated, info
 
-  def render(self) -> np.ndarray | None:  # type: ignore[override]
+  def render(self) -> ObservationImage | None:  # type: ignore[override]
+    """Render the current scene as an :class:`ObservationImage`.
+
+    Captures the RGB frame and the segmentation pass back-to-back so the
+    returned object carries both the image and per-geom masks aligned to
+    the same camera state. Returns ``None`` before :meth:`reset` has been
+    called.
+    """
     if self.renderer is None or self.data is None:
       return None
+
     self.renderer.update_scene(self.data)
-    return np.asarray(self.renderer.render())
+    image = np.asarray(self.renderer.render())
+
+    self.renderer.enable_segmentation_rendering()
+    self.renderer.update_scene(self.data)
+    seg = self.renderer.render()   # (H, W, 2)
+    self.renderer.disable_segmentation_rendering()
+    self.renderer.update_scene(self.data)
+
+    return ObservationImage.from_seg(image, self._segmentation_masks(seg))
 
   def close(self) -> None:
     if self.renderer is not None:
@@ -424,16 +444,51 @@ class PushingEnv(gym.Env):
   # Internal helpers
   # ------------------------------------------------------------------
 
+  def _setup_seg_ids(self):
+    """Resolve the geoms we care about to their IDs, once."""
+    names = ['goal_marker', 'target_object_geom']
+
+    # clutter is numbered from 0; stop at the first gap
+    i = 0
+    while True:
+        name = f'clutter_{i}_geom'
+        if mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name) == -1:
+            break
+        names.append(name)
+        i += 1
+
+    self._seg_geom_ids = {
+        name: self.model.geom(name).id
+        for name in names
+    }
+
+  def _segmentation_masks(self, seg):
+    """seg: (H, W, 2) array from the segmentation renderer.
+    Returns dict[str, (H, W) bool array]."""
+    ids     = seg[..., 0]
+    types   = seg[..., 1]
+    is_geom = types == mujoco.mjtObj.mjOBJ_GEOM
+
+    masks   = { "background": ids == -1 }
+    covered = np.zeros(ids.shape, dtype=bool)
+    for name, gid in self._seg_geom_ids.items():
+      m = is_geom & (ids == gid)
+      masks[name] = m
+      covered |= m
+
+    masks["background"] |= ~covered
+    return masks
+
   def _get_obs(self) -> Observation:
     assert (
         self.renderer is not None
         and self.data is not None
         and self.scene is not None
     )
-    self.renderer.update_scene(self.data)
-    image = self.renderer.render()
+    image_obs = self.render()
+    assert image_obs is not None
     return {
-        "image": image,
+        "image": image_obs,
         "ee_pos": self.controller.get_ee_pos(self.data),
         "ee_quat": self.controller.get_ee_quat(self.data),
         "arm_qpos": self.controller.get_arm_qpos(self.data),

@@ -112,6 +112,34 @@ def _coerce_image_for_log(img: np.ndarray) -> np.ndarray:
     return arr.astype(np.uint8)
 
 
+def _to_unit_float(img: np.ndarray) -> np.ndarray:
+    """Map an obs/recon image to float32 in ``[0, 1]`` for diffing.
+
+    Mirrors :func:`_coerce_image_for_log` / :func:`_denormalize_recon_image`
+    but keeps the result as floats so per-pixel differences keep their sign
+    range and don't underflow at uint8.
+    """
+    arr = np.asarray(img)
+    if arr.dtype == np.uint8:
+        return arr.astype(np.float32) / 255.0
+    arr = arr.astype(np.float32)
+    if arr.min() < 0.0:
+        arr = arr + 0.5
+    return np.clip(arr, 0.0, 1.0)
+
+
+def _pixel_diff(obs: np.ndarray, recon: np.ndarray) -> np.ndarray:
+    """Return signed per-pixel difference ``obs - recon`` in ``[-1, 1]``."""
+    return _to_unit_float(obs) - _to_unit_float(recon)
+
+
+def _diff_to_uint8(diff: np.ndarray) -> np.ndarray:
+    """Map a signed diff in ``[-1, 1]`` to a viewable uint8 image centred at 128."""
+    arr = np.clip(diff, -1.0, 1.0)
+    arr = (arr * 0.5 + 0.5) * 255.0
+    return arr.astype(np.uint8)
+
+
 def _rerun_metadata_props(metadata: dict[str, Any] | None, extra_keys: tuple[str, ...] = ()) -> dict[str, str]:
     """Project an episode-metadata dict onto Rerun-loggable string props.
 
@@ -173,6 +201,11 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
         ee_pos          (T, 3)          float32
         ee_quat         (T, 4)          float32
         object_xy       (T, 2)          float32
+        segmentation/                              — optional, present iff env produced masks
+            target      (T, H, W)       bool
+            goal        (T, H, W)       bool
+            background  (T, H, W)       bool      — optional
+            clutter     (T, K, H, W)    bool      — optional, K = scene clutter count
         metadata/
             config      scalar string (JSON)
             seed        scalar int64
@@ -187,6 +220,8 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
         obs_processed      (T, ...)
         recon_posterior    (T, ...)
         recon_prior        (T, ...)
+        diff_posterior     (T, ...) float32 — obs_processed - recon_posterior (image only)
+        diff_prior         (T, ...) float32 — obs_processed - recon_prior     (image only)
         h                  (T, deter_dim)
         s                  (T, stoch_dim)
         h_prior            (T, deter_dim)
@@ -199,6 +234,29 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
     """
 
     file_extension = "hdf5"
+
+    @staticmethod
+    def _write_segmentation_hdf5(f, episode: dict[str, Any]) -> None:
+        """Persist any segmentation_* arrays in ``episode`` under ``segmentation/``.
+
+        No-op for episodes that don't carry masks (e.g. lerobot imports).
+        Mask names are stored without the ``segmentation_`` prefix.
+        """
+        seg_items = {
+            k[len("segmentation_"):]: v
+            for k, v in episode.items()
+            if k.startswith("segmentation_")
+        }
+        if not seg_items:
+            return
+        seg_grp = f.create_group("segmentation")
+        for name, mask in seg_items.items():
+            seg_grp.create_dataset(
+                name,
+                data=np.asarray(mask, dtype=bool),
+                compression="gzip",
+                compression_opts=4,
+            )
 
     def write_episode(
         self,
@@ -230,6 +288,8 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
             f.create_dataset("ee_quat",    data=ee_quat)
             f.create_dataset("object_xy",  data=object_xy)
 
+            self._write_segmentation_hdf5(f, episode)
+
             meta_grp = f.create_group("metadata")
             act_mode = "joint" if action_kind == "joint_action" else "ee"
             meta_grp.create_dataset("act_mode", data=act_mode)
@@ -260,13 +320,23 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
         name_suffix: str,
     ) -> Path:
         ep_path = self._path_for(EVAL_EPISODE_FILENAME_PREFIX, name_suffix)
+        processed_obs = np.asarray(episode["processed_obs"], dtype=np.float32)
+        recon_post    = np.asarray(episode["recon_posterior"], dtype=np.float32)
+        recon_prior   = np.asarray(episode["recon_prior"],     dtype=np.float32)
         with h5py.File(ep_path, "w") as f:
             f.create_dataset("obs_raw",         data=np.asarray(episode["raw_obs"]))
-            f.create_dataset("obs_processed",   data=np.asarray(episode["processed_obs"], dtype=np.float32))
-            f.create_dataset("recon_posterior", data=np.asarray(episode["recon_posterior"], dtype=np.float32),
+            f.create_dataset("obs_processed",   data=processed_obs)
+            f.create_dataset("recon_posterior", data=recon_post,
                              compression="gzip", compression_opts=4)
-            f.create_dataset("recon_prior",     data=np.asarray(episode["recon_prior"], dtype=np.float32),
+            f.create_dataset("recon_prior",     data=recon_prior,
                              compression="gzip", compression_opts=4)
+            if recon_post.ndim == 4:
+                f.create_dataset("diff_posterior",
+                                 data=_pixel_diff(processed_obs, recon_post).astype(np.float32),
+                                 compression="gzip", compression_opts=4)
+                f.create_dataset("diff_prior",
+                                 data=_pixel_diff(processed_obs, recon_prior).astype(np.float32),
+                                 compression="gzip", compression_opts=4)
             f.create_dataset("h",               data=np.asarray(episode["h"],       dtype=np.float32))
             f.create_dataset("s",               data=np.asarray(episode["s"],       dtype=np.float32))
             f.create_dataset("h_prior",         data=np.asarray(episode["h_prior"], dtype=np.float32))
@@ -354,6 +424,11 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         ee_quat    = np.asarray(episode["ee_quat"],    dtype=np.float32)
         object_xy  = np.asarray(episode["object_xy"],  dtype=np.float32)
 
+        seg_target     = episode.get("segmentation_target")
+        seg_goal       = episode.get("segmentation_goal")
+        seg_background = episode.get("segmentation_background")
+        seg_clutter    = episode.get("segmentation_clutter")  # (T, K, H, W) or None
+
         T = action.shape[0]
         for i in range(T):
             rec.set_time("step", sequence=i)
@@ -366,6 +441,24 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             rec.log("ee_pos",       rr.Scalars(ee_pos[i].tolist()))
             rec.log("ee_quat",      rr.Scalars(ee_quat[i].tolist()))
             rec.log("object_xy",    rr.Scalars(object_xy[i].tolist()))
+
+            if seg_target is not None:
+                rec.log("camera/seg/target",
+                        rr.SegmentationImage(np.asarray(seg_target[i], dtype=np.uint8)))
+            if seg_goal is not None:
+                rec.log("camera/seg/goal",
+                        rr.SegmentationImage(np.asarray(seg_goal[i], dtype=np.uint8)))
+            if seg_background is not None:
+                rec.log("camera/seg/background",
+                        rr.SegmentationImage(np.asarray(seg_background[i], dtype=np.uint8)))
+            if seg_clutter is not None:
+                # Aggregate clutter mask (union over K pieces).
+                clutter_union = np.any(seg_clutter[i], axis=0)
+                rec.log("camera/seg/clutter",
+                        rr.SegmentationImage(clutter_union.astype(np.uint8)))
+                for k in range(seg_clutter.shape[1]):
+                    rec.log(f"camera/seg/clutter_{k}",
+                            rr.SegmentationImage(np.asarray(seg_clutter[i, k], dtype=np.uint8)))
 
         rec.save(str(ep_path))
         return ep_path
@@ -380,8 +473,8 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         import rerun as rr
 
         recording_id = f"{EVAL_EPISODE_FILENAME_PREFIX}-{name_suffix}"
-        ep_path = self._path_for(EVAL_EPISODE_FILENAME_PREFIX, name_suffix)
-        rec = self._new_recording(recording_id)
+        ep_path      = self._path_for(EVAL_EPISODE_FILENAME_PREFIX, name_suffix)
+        rec          = self._new_recording(recording_id)
 
         self._log_metadata(rec, _rerun_metadata_props(
             metadata, extra_keys=("iteration", "episode_index", "burn_in"),
@@ -407,6 +500,10 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
                 rec.log("obs/processed",   rr.Image(_coerce_image_for_log(processed_obs[i])))
                 rec.log("recon/posterior", rr.Image(_denormalize_recon_image(recon_post[i])))
                 rec.log("recon/prior",     rr.Image(_denormalize_recon_image(recon_prior[i])))
+                rec.log("recon/diff_posterior",
+                        rr.Image(_diff_to_uint8(_pixel_diff(processed_obs[i], recon_post[i]))))
+                rec.log("recon/diff_prior",
+                        rr.Image(_diff_to_uint8(_pixel_diff(processed_obs[i], recon_prior[i]))))
             else:
                 rec.log("obs/raw",         rr.Scalars(np.asarray(raw_obs[i],       dtype=np.float32).tolist()))
                 rec.log("obs/processed",   rr.Scalars(np.asarray(processed_obs[i], dtype=np.float32).tolist()))

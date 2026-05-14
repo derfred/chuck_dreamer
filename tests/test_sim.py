@@ -242,8 +242,11 @@ class TestPushingEnv:
   def test_reset_returns_correct_shapes(self, env):
     cfg = _make_simple_config()
     obs, info = env.reset(scene=cfg)
-    assert obs["image"].shape == (64, 64, 3)
-    assert obs["image"].dtype == np.uint8
+    assert obs["image"].image.shape == (64, 64, 3)
+    assert obs["image"].image.dtype == np.uint8
+    assert obs["image"].target_mask.shape == (64, 64)
+    assert obs["image"].target_mask.dtype == bool
+    assert obs["image"].goal_mask.shape == (64, 64)
     assert obs["ee_pos"].shape == (3,)
     assert obs["object_xy"].shape == (2,)
 
@@ -252,7 +255,7 @@ class TestPushingEnv:
     env.reset(scene=cfg)
     action = _zero_joint_action(len(cfg.joint_names))
     obs, reward, terminated, truncated, info = env.step(action)
-    assert obs["image"].shape == (64, 64, 3)
+    assert obs["image"].image.shape == (64, 64, 3)
     assert isinstance(reward, float)
     assert isinstance(terminated, bool)
     assert isinstance(truncated, bool)
@@ -266,7 +269,7 @@ class TestPushingEnv:
     # Oversized joint action should be clipped without error.
     action = np.full(len(cfg.joint_names), 100.0, dtype=np.float32)
     obs, reward, terminated, truncated, info = env.step(action)
-    assert obs["image"].shape == (64, 64, 3)
+    assert obs["image"].image.shape == (64, 64, 3)
 
   def test_episode_truncates_on_timeout(self, env):
     cfg = _make_simple_config()
@@ -308,8 +311,9 @@ class TestPushingEnv:
     env.reset(scene=cfg)
     img = env.render()
     assert img is not None
-    assert img.shape == (64, 64, 3)
-    assert img.dtype == np.uint8
+    assert img.image.shape == (64, 64, 3)
+    assert img.image.dtype == np.uint8
+    assert img.target_mask.shape == (64, 64)
 
   def test_render_before_reset_returns_none(self, env):
     assert env.render() is None
@@ -727,8 +731,17 @@ class TestScriptedPolicy:
 
 
 def _fake_obs(step: int, n_joints: int = 6):
+  from chuck_dreamer.sim.observation_image import ObservationImage
+  H = W = 4
+  image_obs = ObservationImage(
+    image=np.full((H, W, 3), step % 256, dtype=np.uint8),
+    target_mask=np.zeros((H, W), dtype=bool),
+    goal_mask=np.zeros((H, W), dtype=bool),
+    clutter_masks=[],
+    background_mask=np.ones((H, W), dtype=bool),
+  )
   return {
-      "image":    np.full((4, 4, 3), step % 256, dtype=np.uint8),
+      "image":    image_obs,
       "ee_pos":   np.array([0.0, 0.0, 0.1], dtype=np.float32),
       "ee_quat":  np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
       "arm_qpos": np.zeros(n_joints, dtype=np.float32),
