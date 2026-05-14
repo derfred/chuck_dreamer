@@ -391,8 +391,8 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         processed_obs = episode["processed_obs"]
         recon_post    = np.asarray(episode["recon_posterior"], dtype=np.float32)
         recon_prior   = np.asarray(episode["recon_prior"],     dtype=np.float32)
-        h_post        = np.asarray(episode["h"],               dtype=np.float32)
-        s_post        = np.asarray(episode["s"],               dtype=np.float32)
+        h_post        = np.asarray(episode["h_post"],          dtype=np.float32)
+        s_post        = np.asarray(episode["s_post"],          dtype=np.float32)
         h_prior       = np.asarray(episode["h_prior"],         dtype=np.float32)
         s_prior       = np.asarray(episode["s_prior"],         dtype=np.float32)
 
