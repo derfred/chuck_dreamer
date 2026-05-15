@@ -112,13 +112,9 @@ class Trajectory:
   def stack_feat(self) -> Any:
     """``(B, T, feat_dim)`` — concatenated ``[h, s]`` across the rollout."""
     if "feat" not in self._cache:
-      # Some backends provide a dedicated feat() that does the right
-      # concatenation; we ask the caller-supplied stacker since we don't
-      # hold a model reference. Defer to stacking [h, s] per step.
       def _feat(state: State) -> Any:
-        # Concatenate via numpy. Backend tensors that aren't numpy-arrays
-        # (mlx, torch) all support __array__ or convert cleanly here for
-        # cases where the trajectory is being post-processed on CPU.
+        # Concatenate via numpy so mlx/torch tensors round-trip cleanly
+        # when the trajectory is post-processed on CPU.
         return np.concatenate([np.asarray(state.h), np.asarray(state.s)], axis=-1)
       self._cache["feat"] = self._stack([_feat(s) for s in self.states])
     return self._cache["feat"]

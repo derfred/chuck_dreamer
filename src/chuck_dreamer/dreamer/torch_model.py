@@ -532,9 +532,8 @@ def load_config_from_checkpoint(path: str):
   """Read the embedded training config from a torch safetensors checkpoint.
 
   Returns the DictConfig that was saved alongside the weights, or
-  ``None`` for legacy checkpoints written before metadata was embedded.
-  Mirrors the MLX backend's helper of the same name (kept as a separate
-  function because the load codepath differs).
+  ``None`` if the checkpoint has no metadata. Mirrors the MLX backend's
+  helper of the same name; kept separate because the load codepath differs.
   """
   # safetensors stores metadata in the file header; load_file does NOT
   # return it. We re-open with the low-level interface.
@@ -877,10 +876,7 @@ class DreamerTorchModel:
 
   def save(self, path: str, extra_metadata: dict[str, str] | None = None) -> None:
     """Persist weights to a safetensors file with the training config in
-    metadata. Optimizer state is NOT included — same as if the MLX
-    backend's optimizer round-trip were considered out of scope. (We can
-    add it if resume-mid-training becomes important; it requires
-    flattening the Adam state across param groups.)
+    metadata. Optimizer state is NOT included.
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     weights = self._named_param_dict()
@@ -892,8 +888,8 @@ class DreamerTorchModel:
     _st_save_file(weights, path, metadata=metadata)
 
   def load(self, path: str) -> dict[str, str]:
-    """Load weights previously written by :meth:`save`. Returns the
-    caller-supplied ``extra_metadata`` dict that was passed at save time.
+    """Load weights written by :meth:`save`. Returns the caller-supplied
+    ``extra_metadata`` dict that was passed at save time.
     """
     from safetensors import safe_open
     weights: dict[str, torch.Tensor] = _st_load_file(path)

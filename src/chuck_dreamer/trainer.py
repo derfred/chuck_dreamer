@@ -118,7 +118,7 @@ class Trainer:
 
     The starting iteration is read from the safetensors metadata block
     (``"iteration"`` key) written by :meth:`_checkpoint`. Missing key →
-    start from 0 (pre-migration checkpoints).
+    start from 0.
     """
     if not resume:
       return 0

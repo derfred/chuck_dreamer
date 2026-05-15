@@ -390,7 +390,7 @@ class TestPushingEnv:
     obs, _ = env.reset(scene=cfg)
     expected = {"image", "ee_pos", "ee_quat", "arm_qpos", "object_xy", "goal_xy"}
     assert expected.issubset(obs.keys())
-    # Full data.qpos and step/time are no longer in obs (step/time live in StepInfo).
+    # step/time live in StepInfo, not obs.
     assert "qpos" not in obs
     assert "step" not in obs
     assert "time" not in obs

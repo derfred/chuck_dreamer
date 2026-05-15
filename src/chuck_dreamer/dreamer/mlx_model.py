@@ -11,18 +11,17 @@ from omegaconf import OmegaConf
 from .world_model import Distribution, State
 
 # Key under which the OmegaConf-serialized training config is stored in the
-# safetensors metadata block. Older checkpoints written before this change have
-# no metadata; load() and load_config_from_checkpoint() handle that case.
+# safetensors metadata block.
 CONFIG_METADATA_KEY = "config_yaml"
 
 
 def load_config_from_checkpoint(path: str):
   """Read the embedded training config from a .safetensors checkpoint.
 
-  Returns the DictConfig that was saved alongside the weights, or ``None`` for
-  legacy checkpoints written before metadata was embedded. Callers that need
-  shape-affecting fields (env.obs_mode, env.act_mode, model.*) should use this
-  rather than re-reading the on-disk default config, which may have drifted.
+  Returns the DictConfig that was saved alongside the weights, or ``None``
+  if the checkpoint has no metadata. Callers that need shape-affecting
+  fields (env.obs_mode, env.act_mode, model.*) should use this rather than
+  re-reading the on-disk default config, which may have drifted.
 
   The saved YAML is fully resolved (see :meth:`DreamerMLXModel.save`), so
   this does not depend on any custom OmegaConf resolvers being registered.
@@ -866,7 +865,7 @@ class DreamerMLXModel:
     mx.save_safetensors(path, weights, metadata=metadata)
 
   def load(self, path: str) -> dict[str, str]:
-    """Load weights previously written by :meth:`save`.
+    """Load weights written by :meth:`save`.
 
     Returns the caller-supplied ``extra_metadata`` dict that was passed to
     :meth:`save` (the reserved ``CONFIG_METADATA_KEY`` is filtered out).

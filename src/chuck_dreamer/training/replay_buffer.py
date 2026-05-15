@@ -80,7 +80,7 @@ class ReplayBuffer:
     ``0`` keeps loading sequential.
 
     ``processor`` and ``reward_fn`` stay as explicit args because they
-    aren't expressible in the config schema today.
+    aren't expressible in the config schema.
     """
     data_cfg = config.training.data
     cfg_workers = data_cfg.get("warmup_num_workers")
