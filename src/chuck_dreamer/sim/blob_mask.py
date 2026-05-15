@@ -56,12 +56,42 @@ def _detect_trajectory(frames_rgb: np.ndarray) -> _Trajectory:
   return _Trajectory(cx=cx, cy=cy, r=r, detected=detected)
 
 
+def _reject_radius_outliers(traj: _Trajectory, n_std: float = 1.0) -> _Trajectory:
+  """Drop detections whose radius is more than ``n_std`` std from the mean.
+
+  The marker is a rigid disk; under a fixed camera its on-screen radius
+  should be near-constant for the episode. Detections that drift far in
+  radius are usually mis-segmentations (e.g. a stray bright patch picked
+  up because the real marker was occluded) — marking them not-detected
+  lets the Kalman smoother bridge across them instead of being pulled
+  off-course.
+  """
+  if not traj.detected.any():
+    return traj
+  r_valid = traj.r[traj.detected]
+  if r_valid.size < 2:
+    return traj
+  mu = float(r_valid.mean())
+  sigma = float(r_valid.std())
+  if sigma <= 0:
+    return traj
+  keep = traj.detected & (np.abs(traj.r - mu) <= n_std * sigma)
+  rejected = int(traj.detected.sum() - keep.sum())
+  if rejected == 0:
+    return traj
+  cx = np.where(keep, traj.cx, np.nan)
+  cy = np.where(keep, traj.cy, np.nan)
+  r  = np.where(keep, traj.r,  np.nan)
+  return _Trajectory(cx=cx, cy=cy, r=r, detected=keep)
+
+
 def _kalman_smooth_cv(
   z:   np.ndarray,            # (T,) measurement, NaN where missing
   *,
   q_pos: float,               # process noise on position (px^2 per step)
   r_pos: float,               # measurement noise (px^2)
   init_var: float = 1e4,      # initial state covariance
+  gate_chi2: float | None = 9.0,  # reject |y|^2/S > gate_chi2 (None = off)
 ) -> np.ndarray:
   """1D constant-velocity Kalman RTS smoother for a single coordinate.
 
@@ -69,6 +99,13 @@ def _kalman_smooth_cv(
   measurements (NaN in ``z``) are skipped at the update step, so the
   filter just propagates the prediction across the gap and the smoother
   ties both ends together.
+
+  ``gate_chi2`` is a Mahalanobis-distance gate on the innovation: a
+  measurement whose squared normalised residual ``y^2 / S`` exceeds the
+  threshold is treated as an outlier and skipped (the filter only
+  propagates its prediction). 9.0 ≈ 3σ for the 1-DoF chi-squared; this
+  is what makes large frame-to-frame jumps stay flagged as outliers
+  rather than dragging the state along.
   """
   T = z.shape[0]
 
@@ -100,13 +137,14 @@ def _kalman_smooth_cv(
     P = F @ P @ F.T + Q
     x_pred[t] = x
     P_pred[t] = P
-    # Update if we have a measurement.
+    # Update if we have a measurement that passes the chi-squared gate.
     if np.isfinite(z[t]):
       y = z[t] - (H @ x)[0]
       S = (H @ P @ H.T + R)[0, 0]
-      K = (P @ H.T).ravel() / S
-      x = x + K * y
-      P = P - np.outer(K, H @ P)
+      if gate_chi2 is None or (y * y) <= gate_chi2 * S:
+        K = (P @ H.T).ravel() / S
+        x = x + K * y
+        P = P - np.outer(K, H @ P)
     x_filt[t] = x
     P_filt[t] = P
 
@@ -193,19 +231,31 @@ def _rasterize_circles(
 def derive_target_mask(
   frames_rgb: np.ndarray,
   *,
-  q_pos:    float = 4.0,      # ~2 px / step expected motion
-  r_pos:    float = 9.0,      # ~3 px detection jitter
-  q_radius: float = 0.25,
-  r_radius: float = 4.0,
+  q_pos:           float = 0.25,    # tight: penalise jumps, expect ~0.5 px/step accel
+  r_pos:           float = 9.0,     # ~3 px detection jitter
+  gate_chi2:       float = 9.0,     # 3σ innovation gate (1-DoF chi²)
+  q_radius:        float = 0.05,
+  r_radius:        float = 4.0,
+  radius_n_std:    float = 1.0,     # drop detections > N stds from per-episode mean
 ) -> np.ndarray:
   """Derive a ``(T, H, W)`` bool ``segmentation_target`` mask from RGB frames.
 
-  Runs blob detection per frame, smooths the (cx, cy) trajectory with a
-  constant-velocity Kalman RTS smoother and the radius with a
-  constant-position one, then rasterises the smoothed circles back into
-  binary masks. Frames where detection failed are filled in from the
-  smoother, so the resulting mask sequence has no gaps as long as at
-  least one frame in the episode had a successful detection.
+  Pipeline:
+    1. Per-frame blob detection.
+    2. Discard detections whose radius is > ``radius_n_std`` stds from
+       the episode mean — these are almost always mis-segmentations.
+    3. Smooth (cx, cy) with a constant-velocity Kalman RTS smoother
+       that uses a chi-squared innovation gate to reject jumpy
+       measurements, and the radius with a constant-position smoother.
+    4. Rasterise the smoothed circles back into binary masks.
+
+  The combination of a small ``q_pos`` and the innovation gate makes
+  the smoother strongly biased toward smooth trajectories: a single
+  detection that disagrees with the constant-velocity prediction by
+  more than ~3σ is treated as an outlier and ignored. Frames where
+  detection failed (or was rejected) are filled from the smoother, so
+  the mask sequence has no gaps as long as at least one frame had a
+  good detection.
 
   Returns an all-False mask if no frame had a detection.
   """
@@ -216,8 +266,11 @@ def derive_target_mask(
   traj = _detect_trajectory(frames_rgb)
   if not traj.detected.any():
     return np.zeros((T, H, W), dtype=bool)
+  traj = _reject_radius_outliers(traj, n_std=radius_n_std)
+  if not traj.detected.any():
+    return np.zeros((T, H, W), dtype=bool)
 
-  cx_smooth = _kalman_smooth_cv(traj.cx, q_pos=q_pos, r_pos=r_pos)
-  cy_smooth = _kalman_smooth_cv(traj.cy, q_pos=q_pos, r_pos=r_pos)
+  cx_smooth = _kalman_smooth_cv(traj.cx, q_pos=q_pos, r_pos=r_pos, gate_chi2=gate_chi2)
+  cy_smooth = _kalman_smooth_cv(traj.cy, q_pos=q_pos, r_pos=r_pos, gate_chi2=gate_chi2)
   r_smooth  = _kalman_smooth_cp(traj.r,  q=q_radius, r=r_radius)
   return _rasterize_circles(cx_smooth, cy_smooth, r_smooth, H, W)
