@@ -31,12 +31,12 @@ override_option = click.option(
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose logging')
 @click.pass_context
 def cli(ctx, config, verbose):
-    """Chuck Dreamer CLI - Robotics ML with MLX."""
-    if verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+  """Chuck Dreamer CLI - Robotics ML with MLX."""
+  if verbose:
+    logging.getLogger().setLevel(logging.DEBUG)
 
-    ctx.ensure_object(dict)
-    ctx.obj['config'] = load_config(config)
+  ctx.ensure_object(dict)
+  ctx.obj['config'] = load_config(config)
 
 
 def _resolve_cfg(ctx, overrides: tuple[str, ...] = ()) -> DictConfig:

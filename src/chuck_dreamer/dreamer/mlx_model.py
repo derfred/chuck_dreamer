@@ -566,14 +566,13 @@ class DreamerMLXModel:
     self.stoch_dim  = int(config.model.rssm.stoch_size)
     self.deter_dim  = int(config.model.rssm.deter_size)
 
-    obs_mode = config.env.obs_mode
-    self.obs_mode = obs_mode
+    self.obs_mode = config.env.obs_mode
 
     enc_hidden = tuple(config.model.encoder.mlp_hidden)
     dec_hidden = tuple(config.model.decoder.mlp_hidden)
     embed_size = int(config.model.encoder.embed_size)
 
-    if obs_mode == "state":
+    if self.obs_mode == "state":
       if not (isinstance(obs_shape, tuple) and len(obs_shape) == 1):
         raise ValueError(f"state obs_mode expects 1-D obs_shape; got {obs_shape}")
       obs_dim          = int(obs_shape[0])
@@ -582,7 +581,7 @@ class DreamerMLXModel:
       self.image_size  = None
       self.proprio_dim = None
 
-    elif obs_mode in ("image", "image_proprio"):
+    elif self.obs_mode in ("image", "image_proprio"):
       enc_channels    = tuple(config.model.encoder.cnn_channels)
       enc_kernels     = tuple(config.model.encoder.cnn_kernels)
       enc_strides     = tuple(config.model.encoder.cnn_strides)
@@ -592,7 +591,7 @@ class DreamerMLXModel:
       image_size      = int(config.model.encoder.image_size)
       self.image_size = image_size
 
-      if obs_mode == "image":
+      if self.obs_mode == "image":
         # obs_shape is the image shape (H, W, 3); 3-D ndarray.
         if not (isinstance(obs_shape, tuple) and len(obs_shape) == 3):
           raise ValueError(f"image obs_mode expects 3-D obs_shape; got {obs_shape}")
@@ -622,7 +621,7 @@ class DreamerMLXModel:
         self.decoder     = ImageProprioDecoder(self.feat_dim, cnn_dec, dec_hidden, proprio_dim)
 
     else:
-      raise ValueError(f"unknown obs_mode={obs_mode!r}")
+      raise ValueError(f"unknown obs_mode={self.obs_mode!r}")
 
     self.rssm = RSSM(
       action_dim=action_dim,
@@ -797,8 +796,7 @@ class DreamerMLXModel:
     The replay buffer hands us numpy arrays so it stays backend-agnostic;
     we lift to ``mx.array`` once here before entering the autodiff loop.
     """
-    batch = self.coerce(batch)
-    (loss, aux), grads = self._wm_grad(self._wm_bundle, batch)
+    (loss, aux), grads = self._wm_grad(self._wm_bundle, self.coerce(batch))
 
     grad_norm = None
     if self.config.training.optimizer.gradient_clipping > 0:

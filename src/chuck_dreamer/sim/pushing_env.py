@@ -323,14 +323,14 @@ class PushingEnv(gym.Env):
     if self.act_mode == "joint":
       if self.scene is None:
         n_joints = 6
-        low = np.full((n_joints,), -np.inf, dtype=np.float32)
+        low  = np.full((n_joints,), -np.inf, dtype=np.float32)
         high = np.full((n_joints,), np.inf, dtype=np.float32)
       else:
-        low = self.controller.arm_ctrl_range[:, 0].astype(np.float32)
+        low  = self.controller.arm_ctrl_range[:, 0].astype(np.float32)
         high = self.controller.arm_ctrl_range[:, 1].astype(np.float32)
       return spaces.Box(low=low, high=high, dtype=np.float32)
 
-    low = np.concatenate([_EE_POS_LOW, np.full(4, -1.0, dtype=np.float32)])
+    low  = np.concatenate([_EE_POS_LOW, np.full(4, -1.0, dtype=np.float32)])
     high = np.concatenate([_EE_POS_HIGH, np.full(4, 1.0, dtype=np.float32)])
     return spaces.Box(low=low, high=high, dtype=np.float32)
 

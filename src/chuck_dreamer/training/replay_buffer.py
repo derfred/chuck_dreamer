@@ -58,10 +58,10 @@ class ReplayBuffer:
     self.reward_fn       = reward_fn
 
     self._episodes: deque[Episode] = deque()
-    self._total_steps: int = 0
-    self._rng = np.random.default_rng(seed)
+    self._total_steps: int         = 0
+    self._rng                      = np.random.default_rng(seed)
 
-    self._sim_processor = processor if processor is not None else StateVectorProcessor()
+    self._sim_processor       = processor if processor is not None else StateVectorProcessor()
     self._default_num_workers = default_num_workers
 
   @classmethod
@@ -217,23 +217,23 @@ class ReplayBuffer:
       )
 
     weights_arr = np.asarray(weights, dtype=np.float64)
-    probs = weights_arr / weights_arr.sum()
-    ep_indices = self._rng.choice(len(eligible), size=batch_size, p=probs)
+    probs       = weights_arr / weights_arr.sum()
+    ep_indices  = self._rng.choice(len(eligible), size=batch_size, p=probs)
 
     is_dict_obs = isinstance(eligible[0][0]["obs"], dict)
     obs_batch: list = [] if not is_dict_obs else None  # type: ignore[assignment]
     obs_batch_dict: dict[str, list] | None = (
       {k: [] for k in eligible[0][0]["obs"].keys()} if is_dict_obs else None
     )
-    action_batch = []
-    reward_batch = []
-    done_batch = []
+    action_batch                = []
+    reward_batch                = []
+    done_batch                  = []
     aux_batch: list[np.ndarray] = []
 
     for idx in ep_indices:
       ep, valid_starts = eligible[idx]
-      start = int(self._rng.integers(0, valid_starts))
-      end = start + seq_len
+      start            = int(self._rng.integers(0, valid_starts))
+      end              = start + seq_len
       if obs_batch_dict is not None:
         for k, lst in obs_batch_dict.items():
           lst.append(ep["obs"][k][start:end])
@@ -274,9 +274,9 @@ class ReplayBuffer:
     if self.reward_fn is None or "goal_xy" not in ep:
       return np.asarray(ep["reward"][start:end], dtype=np.float32)
 
-    si = ep["step_info"]
+    si      = ep["step_info"]
     goal_xy = np.asarray(ep["goal_xy"], dtype=np.float32)
-    out = np.empty((end - start,), dtype=np.float32)
+    out     = np.empty((end - start,), dtype=np.float32)
     for i, t in enumerate(range(start, end)):
       info = StepInfo(
         object_xy=si["object_xy"][t],
@@ -338,7 +338,7 @@ class ReplayBuffer:
     via ``default_num_workers`` (or :meth:`from_config`).
     """
     dataset = EpisodeDataset(directory, format=format)
-    count = 0
+    count   = 0
     for episode in dataset.stream(
       progress     = progress,
       num_episodes = num_episodes,
