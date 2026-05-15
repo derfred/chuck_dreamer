@@ -392,15 +392,17 @@ def test_dreamer_model_builds_image_proprio_mode():
   assert isinstance(model.decoder, ImageProprioDecoder)
 
 
-def test_dreamer_image_recon_loss_handles_uint8_obs():
+def test_dreamer_image_recon_loss_on_normalized_obs():
   cfg = load_config()
   cfg.env.obs_mode = "image"
   img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
   model = build_model(cfg, obs_shape=(img, img, 3), action_dim=6)
+  # Obs arrive pre-normalized from :class:`ImageProcessor` (float in
+  # ``[-0.5, 0.5]``). Use uint8-zero's normalized value (-0.5) as a
+  # fixed target so the per-pixel error is 0.5.
   recon = mx.zeros((2, 3, img, img, 3))
-  obs   = mx.zeros((2, 3, img, img, 3), dtype=mx.uint8)
+  obs   = mx.full((2, 3, img, img, 3), -0.5)
   loss = model._recon_loss(recon, obs)
-  # uint8 zeros normalize to -0.5; recon=0 makes per-pixel error 0.5.
   expected = 0.25 * img * img * 3
   assert abs(float(loss.item()) - expected) < 1e-3
 
@@ -412,7 +414,8 @@ def test_dreamer_image_proprio_recon_loss_sums_image_and_proprio():
   model = build_model(cfg, obs_shape={"image": (img, img, 3), "proprio": (4,)}, action_dim=6)
   recon = {"image":   mx.zeros((2, 3, img, img, 3)),
            "proprio": mx.zeros((2, 3, 4))}
-  obs   = {"image":   mx.zeros((2, 3, img, img, 3), dtype=mx.uint8),
+  # Image obs pre-normalized to -0.5 (uint8-zero post-normalize).
+  obs   = {"image":   mx.full((2, 3, img, img, 3), -0.5),
            "proprio": mx.ones((2, 3, 4))}
   loss = model._recon_loss(recon, obs)
   expected_img = 0.25 * img * img * 3

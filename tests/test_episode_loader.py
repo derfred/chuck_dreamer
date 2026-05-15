@@ -128,7 +128,7 @@ def test_state_vector_processor_concatenates_state_fields():
   np.testing.assert_array_equal(ep["obs"][0, 9:15], [1.0] * 6)
 
 
-def test_image_processor_returns_image_as_uint8():
+def test_image_processor_returns_normalized_float32():
   N = 5
   raw = {
     "image": np.stack([np.full((8, 8, 3), t, dtype=np.uint8) for t in range(N)]),
@@ -142,8 +142,10 @@ def test_image_processor_returns_image_as_uint8():
   }
   ep = ImageProcessor(image_size=8)(raw)
   assert ep["obs"].shape == (N, 8, 8, 3)
-  assert ep["obs"].dtype == np.uint8
-  assert int(ep["obs"][3].mean()) == 3
+  assert ep["obs"].dtype == np.float32
+  # Each timestep's uint8 fill ``t`` maps to ``t/255 - 0.5``.
+  for t in range(N):
+    np.testing.assert_allclose(ep["obs"][t].mean(), t / 255.0 - 0.5, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -209,10 +211,11 @@ def test_replay_buffer_loads_rerun_directory(tmp_path):
   ep = buf._episodes[0]
   assert ep["obs"].shape == (20, 16, 16, 3)
   assert ep["action"].shape == (19, 3)
-  # Image[t] is filled with constant t — a good check that step ordering
-  # survives the rerun chunk round-trip.
+  # Image[t] is filled with constant ``t`` uint8 → ``t/255 - 0.5`` after
+  # the processor normalizes. The ordering check survives normalization
+  # since the mapping is monotonic.
   for t in range(20):
-    assert float(ep["obs"][t].mean()) == float(t)
+    np.testing.assert_allclose(float(ep["obs"][t].mean()), t / 255.0 - 0.5, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -368,16 +371,16 @@ def test_image_processor_resizes_to_target_size():
   raw = _state_only_raw(N=4, img_hw=(32, 32))
   ep = ImageProcessor(image_size=8)(raw)
   assert ep["obs"].shape == (4, 8, 8, 3)
-  assert ep["obs"].dtype == np.uint8
+  assert ep["obs"].dtype == np.float32
 
 
 def test_image_processor_passthrough_when_already_target_size():
   raw = _state_only_raw(N=3, img_hw=(8, 8))
   ep = ImageProcessor(image_size=8)(raw)
   assert ep["obs"].shape == (3, 8, 8, 3)
-  # When sizes match the resize is a no-op.
+  # When sizes match the resize is a no-op; values are then normalized.
   for t in range(3):
-    assert int(ep["obs"][t].mean()) == t
+    np.testing.assert_allclose(ep["obs"][t].mean(), t / 255.0 - 0.5, atol=1e-6)
 
 
 def test_image_proprio_processor_returns_dict_obs():
@@ -387,7 +390,7 @@ def test_image_proprio_processor_returns_dict_obs():
   assert isinstance(ep["obs"], dict)
   assert set(ep["obs"].keys()) == {"image", "proprio"}
   assert ep["obs"]["image"].shape == (5, 8, 8, 3)
-  assert ep["obs"]["image"].dtype == np.uint8
+  assert ep["obs"]["image"].dtype == np.float32
   # proprio = ee_pos (3) + ee_quat (4) + joint_qpos (6) = 13.
   assert ep["obs"]["proprio"].shape == (5, 13)
   assert ep["obs"]["proprio"].dtype == np.float32

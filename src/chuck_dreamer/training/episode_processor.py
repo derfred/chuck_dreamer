@@ -108,6 +108,19 @@ def _resize_image_stack(images: np.ndarray, target: int) -> np.ndarray:
   return out
 
 
+def _normalize_image_stack(images: np.ndarray) -> np.ndarray:
+  """Map a (N, H, W, 3) uint8 stack to float32 in ``[-0.5, 0.5]``.
+
+  Matches the CNN encoder's input contract so downstream code can feed
+  the processor output straight to the encoder without re-normalizing.
+  Float inputs are returned as float32 unchanged.
+  """
+  arr = np.asarray(images)
+  if arr.dtype == np.uint8:
+    return arr.astype(np.float32) / 255.0 - 0.5
+  return arr.astype(np.float32, copy=False)
+
+
 class StateVectorProcessor:
   """Default processor: concat ee_pos + ee_quat + object_xy + joint_qpos.
 
@@ -125,22 +138,11 @@ class StateVectorProcessor:
 
 
 class ImageProcessor:
-  """Image-only obs: ``(N, image_size, image_size, 3)`` uint8 per episode."""
+  """Image-only obs: ``(N, image_size, image_size, 3)`` float32 per episode.
 
-  def __init__(self, image_size: int):
-    self.image_size = int(image_size)
-
-  def __call__(self, raw: RawEpisode) -> Episode:
-    images = np.asarray(raw["image"], dtype=np.uint8)
-    obs = _resize_image_stack(images, self.image_size)
-    return _drop_last_and_pack(obs, raw)
-
-
-class ImageProprioProcessor:
-  """Image + proprio obs as a dict ``{"image": ..., "proprio": ...}``.
-
-  proprio = ee_pos (3) + ee_quat (4) + joint_qpos (n_joints). No object_xy:
-  proprioception is body-internal. Images are resized to ``image_size``.
+  Images are resized to ``image_size`` then normalized to ``[-0.5, 0.5]``
+  to match the encoder's input contract, so the model can consume the
+  obs straight from the buffer without re-normalizing.
   """
 
   def __init__(self, image_size: int):
@@ -148,7 +150,25 @@ class ImageProprioProcessor:
 
   def __call__(self, raw: RawEpisode) -> Episode:
     images = np.asarray(raw["image"], dtype=np.uint8)
-    images = _resize_image_stack(images, self.image_size)
+    obs = _normalize_image_stack(_resize_image_stack(images, self.image_size))
+    return _drop_last_and_pack(obs, raw)
+
+
+class ImageProprioProcessor:
+  """Image + proprio obs as a dict ``{"image": ..., "proprio": ...}``.
+
+  proprio = ee_pos (3) + ee_quat (4) + joint_qpos (n_joints). No object_xy:
+  proprioception is body-internal. Images are resized to ``image_size``
+  then normalized to float32 in ``[-0.5, 0.5]`` so they're ready for the
+  encoder without further normalization.
+  """
+
+  def __init__(self, image_size: int):
+    self.image_size = int(image_size)
+
+  def __call__(self, raw: RawEpisode) -> Episode:
+    images = np.asarray(raw["image"], dtype=np.uint8)
+    images = _normalize_image_stack(_resize_image_stack(images, self.image_size))
     ee_pos = np.asarray(raw["ee_pos"], dtype=np.float32)
     ee_quat = np.asarray(raw["ee_quat"], dtype=np.float32)
     joint_qpos = np.asarray(raw["joint_qpos"], dtype=np.float32)

@@ -714,26 +714,20 @@ class DreamerMLXModel:
     """Backend-native broadcast. Used by CEM to expand a B=1 state across samples."""
     return cast(mx.array, mx.broadcast_to(x, shape))
 
-  @staticmethod
-  def _normalize_image(img: mx.array) -> mx.array:
-    """Map (uint8 ∈ [0,255]) or float ∈ [0,255] to float ∈ [-0.5, 0.5].
-
-    Matches :class:`CNNEncoder`'s normalization so encoder/decoder operate
-    in the same range and the MSE is well-scaled.
-    """
-    return img.astype(mx.float32) / 255.0 - 0.5 if img.dtype == mx.uint8 else img
-
   def _recon_loss(self, recon, obs) -> mx.array:
-    """Reconstruction loss appropriate for the configured ``obs_mode``."""
+    """Reconstruction loss appropriate for the configured ``obs_mode``.
+
+    ``obs`` arrives pre-normalized from :class:`ImageProcessor` /
+    :class:`ImageProprioProcessor` (float in ``[-0.5, 0.5]``), so the
+    decoder output and target already share a scale.
+    """
     if self.obs_mode == "state":
       return cast(mx.array, ((recon - obs) ** 2).sum(-1).mean())
     if self.obs_mode == "image":
-      target = self._normalize_image(obs)
-      return cast(mx.array, ((recon - target) ** 2).sum(axis=(-3, -2, -1)).mean())
+      return cast(mx.array, ((recon - obs) ** 2).sum(axis=(-3, -2, -1)).mean())
     if self.obs_mode == "image_proprio":
-      img_target = self._normalize_image(obs["image"])
-      img_loss   = ((recon["image"] - img_target) ** 2).sum(axis=(-3, -2, -1)).mean()
-      pro_loss   = ((recon["proprio"] - obs["proprio"]) ** 2).sum(-1).mean()
+      img_loss = ((recon["image"]   - obs["image"])   ** 2).sum(axis=(-3, -2, -1)).mean()
+      pro_loss = ((recon["proprio"] - obs["proprio"]) ** 2).sum(-1).mean()
       return cast(mx.array, img_loss + pro_loss)
     raise ValueError(f"unknown obs_mode={self.obs_mode!r}")
 

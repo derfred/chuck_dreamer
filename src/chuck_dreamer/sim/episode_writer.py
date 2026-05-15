@@ -216,14 +216,13 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
 
     Eval episodes go to ``output_dir/eval-{suffix}.hdf5`` with::
 
-        obs_raw            (T, ...)
-        obs_processed      (T, ...)
+        obs                (T, ...)            float32 — encoder input
         recon_posterior    (T, ...)
         recon_prior        (T, ...)
-        diff_posterior     (T, ...) float32 — obs_processed - recon_posterior (image only)
-        diff_prior         (T, ...) float32 — obs_processed - recon_prior     (image only)
-        h                  (T, deter_dim)
-        s                  (T, stoch_dim)
+        diff_posterior     (T, ...) float32 — obs - recon_posterior (image only)
+        diff_prior         (T, ...) float32 — obs - recon_prior     (image only)
+        h_posterior        (T, deter_dim)
+        s_posterior        (T, stoch_dim)
         h_prior            (T, deter_dim)
         s_prior            (T, stoch_dim)
         metadata/
@@ -320,27 +319,26 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
         name_suffix: str,
     ) -> Path:
         ep_path = self._path_for(EVAL_EPISODE_FILENAME_PREFIX, name_suffix)
-        processed_obs = np.asarray(episode["processed_obs"], dtype=np.float32)
-        recon_post    = np.asarray(episode["recon_posterior"], dtype=np.float32)
-        recon_prior   = np.asarray(episode["recon_prior"],     dtype=np.float32)
+        obs             = np.asarray(episode["obs"],             dtype=np.float32)
+        recon_posterior = np.asarray(episode["recon_posterior"], dtype=np.float32)
+        recon_prior     = np.asarray(episode["recon_prior"],     dtype=np.float32)
         with h5py.File(ep_path, "w") as f:
-            f.create_dataset("obs_raw",         data=np.asarray(episode["raw_obs"]))
-            f.create_dataset("obs_processed",   data=processed_obs)
-            f.create_dataset("recon_posterior", data=recon_post,
+            f.create_dataset("obs",             data=obs)
+            f.create_dataset("recon_posterior", data=recon_posterior,
                              compression="gzip", compression_opts=4)
             f.create_dataset("recon_prior",     data=recon_prior,
                              compression="gzip", compression_opts=4)
-            if recon_post.ndim == 4:
+            if recon_posterior.ndim == 4:
                 f.create_dataset("diff_posterior",
-                                 data=_pixel_diff(processed_obs, recon_post).astype(np.float32),
+                                 data=_pixel_diff(obs, recon_posterior).astype(np.float32),
                                  compression="gzip", compression_opts=4)
                 f.create_dataset("diff_prior",
-                                 data=_pixel_diff(processed_obs, recon_prior).astype(np.float32),
+                                 data=_pixel_diff(obs, recon_prior).astype(np.float32),
                                  compression="gzip", compression_opts=4)
-            f.create_dataset("h",               data=np.asarray(episode["h"],       dtype=np.float32))
-            f.create_dataset("s",               data=np.asarray(episode["s"],       dtype=np.float32))
-            f.create_dataset("h_prior",         data=np.asarray(episode["h_prior"], dtype=np.float32))
-            f.create_dataset("s_prior",         data=np.asarray(episode["s_prior"], dtype=np.float32))
+            f.create_dataset("h_posterior", data=np.asarray(episode["h_posterior"], dtype=np.float32))
+            f.create_dataset("s_posterior", data=np.asarray(episode["s_posterior"], dtype=np.float32))
+            f.create_dataset("h_prior",     data=np.asarray(episode["h_prior"],     dtype=np.float32))
+            f.create_dataset("s_prior",     data=np.asarray(episode["s_prior"],     dtype=np.float32))
 
             meta_grp = f.create_group("metadata")
             if metadata is not None:
@@ -480,38 +478,35 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             metadata, extra_keys=("iteration", "episode_index", "burn_in"),
         ))
 
-        raw_obs       = episode["raw_obs"]
-        processed_obs = episode["processed_obs"]
-        recon_post    = np.asarray(episode["recon_posterior"], dtype=np.float32)
-        recon_prior   = np.asarray(episode["recon_prior"],     dtype=np.float32)
-        h_post        = np.asarray(episode["h_post"],          dtype=np.float32)
-        s_post        = np.asarray(episode["s_post"],          dtype=np.float32)
-        h_prior       = np.asarray(episode["h_prior"],         dtype=np.float32)
-        s_prior       = np.asarray(episode["s_prior"],         dtype=np.float32)
+        obs             = episode["obs"]
+        recon_posterior = np.asarray(episode["recon_posterior"], dtype=np.float32)
+        recon_prior     = np.asarray(episode["recon_prior"],     dtype=np.float32)
+        h_posterior     = np.asarray(episode["h_posterior"],     dtype=np.float32)
+        s_posterior     = np.asarray(episode["s_posterior"],     dtype=np.float32)
+        h_prior         = np.asarray(episode["h_prior"],         dtype=np.float32)
+        s_prior         = np.asarray(episode["s_prior"],         dtype=np.float32)
 
-        is_image = recon_post.ndim == 4   # (T, H, W, C)
-        T        = recon_post.shape[0]
+        is_image = recon_posterior.ndim == 4   # (T, H, W, C)
+        T        = recon_posterior.shape[0]
 
         for i in range(T):
             rec.set_time("step", sequence=i)
 
             if is_image:
-                rec.log("obs/raw",         rr.Image(_coerce_image_for_log(raw_obs[i])))
-                rec.log("obs/processed",   rr.Image(_coerce_image_for_log(processed_obs[i])))
-                rec.log("recon/posterior", rr.Image(_denormalize_recon_image(recon_post[i])))
+                rec.log("obs",             rr.Image(_coerce_image_for_log(obs[i])))
+                rec.log("recon/posterior", rr.Image(_denormalize_recon_image(recon_posterior[i])))
                 rec.log("recon/prior",     rr.Image(_denormalize_recon_image(recon_prior[i])))
                 rec.log("recon/diff_posterior",
-                        rr.Image(_diff_to_uint8(_pixel_diff(processed_obs[i], recon_post[i]))))
+                        rr.Image(_diff_to_uint8(_pixel_diff(obs[i], recon_posterior[i]))))
                 rec.log("recon/diff_prior",
-                        rr.Image(_diff_to_uint8(_pixel_diff(processed_obs[i], recon_prior[i]))))
+                        rr.Image(_diff_to_uint8(_pixel_diff(obs[i], recon_prior[i]))))
             else:
-                rec.log("obs/raw",         rr.Scalars(np.asarray(raw_obs[i],       dtype=np.float32).tolist()))
-                rec.log("obs/processed",   rr.Scalars(np.asarray(processed_obs[i], dtype=np.float32).tolist()))
-                rec.log("recon/posterior", rr.Scalars(recon_post[i].tolist()))
+                rec.log("obs",             rr.Scalars(np.asarray(obs[i], dtype=np.float32).tolist()))
+                rec.log("recon/posterior", rr.Scalars(recon_posterior[i].tolist()))
                 rec.log("recon/prior",     rr.Scalars(recon_prior[i].tolist()))
 
-            rec.log("latent/h",       rr.Scalars(h_post[i].tolist()))
-            rec.log("latent/s",       rr.Scalars(s_post[i].tolist()))
+            rec.log("latent/h",       rr.Scalars(h_posterior[i].tolist()))
+            rec.log("latent/s",       rr.Scalars(s_posterior[i].tolist()))
             rec.log("latent/h_prior", rr.Scalars(h_prior[i].tolist()))
             rec.log("latent/s_prior", rr.Scalars(s_prior[i].tolist()))
 

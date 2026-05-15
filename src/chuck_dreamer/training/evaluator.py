@@ -11,8 +11,8 @@ through the world model under two regimes that share a burn-in:
 It logs scalar reconstruction errors (per-step and aggregate) to the
 :class:`Tracker`, and dumps per-episode artifacts via
 ``Tracker.maybe_log_eval_episode`` when ``logging.episodes.dump_path`` is
-set — observation input, the processed image fed to the encoder,
-posterior/prior reconstructions, and the latent ``h`` / ``s`` trajectories.
+set — observation input, posterior/prior reconstructions, and the latent
+``h`` / ``s`` trajectories.
 """
 
 from __future__ import annotations
@@ -32,32 +32,6 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Image preprocessing — match the encoder's normalization
-# ---------------------------------------------------------------------------
-
-
-def _normalize_image(img: np.ndarray) -> np.ndarray:
-  """Match :class:`CNNEncoder`'s input normalization (uint8 → [-0.5, 0.5])."""
-  arr = np.asarray(img)
-  if arr.dtype == np.uint8:
-    return arr.astype(np.float32) / 255.0 - 0.5
-  return arr.astype(np.float32, copy=False)
-
-
-def _processed_view(obs: Any) -> Any:
-  """The tensor as the encoder actually consumes it (post-normalize).
-
-  For dict obs, recurse leaf-by-leaf and only normalize the image leaf.
-  """
-  if isinstance(obs, dict):
-    out: dict[str, np.ndarray] = {}
-    for k, v in obs.items():
-      out[k] = _normalize_image(v) if k == "image" else np.asarray(v, dtype=np.float32)
-    return out
-  return _normalize_image(obs)
-
-
-# ---------------------------------------------------------------------------
 # Reconstruction error helpers
 # ---------------------------------------------------------------------------
 
@@ -65,9 +39,9 @@ def _processed_view(obs: Any) -> Any:
 def _recon_error(recon: Any, target: Any) -> np.ndarray:
   """Per-step squared error summed over the obs feature axes.
 
-  ``recon`` is the decoder output (already in normalized space for image
-  obs); ``target`` is the raw episode obs that needs the same
-  normalization applied before comparison. Both have a leading time axis.
+  Both ``recon`` (decoder output) and ``target`` (processor output) are in
+  the same float32 ``[-0.5, 0.5]`` range for image obs, so no
+  normalization step is needed here. Both have a leading time axis.
   """
   if isinstance(recon, dict):
     img_err = _recon_error(recon["image"],   target["image"])
@@ -75,7 +49,7 @@ def _recon_error(recon: Any, target: Any) -> np.ndarray:
     return img_err + pro_err
 
   recon = np.asarray(recon, dtype=np.float32)
-  tgt   = _normalize_image(target) if recon.ndim >= 3 else np.asarray(target, dtype=np.float32)
+  tgt   = np.asarray(target, dtype=np.float32)
   diff  = recon - tgt
   axes  = tuple(range(1, diff.ndim))
   return np.asarray((diff ** 2).sum(axis=axes), dtype=np.float32)
@@ -140,8 +114,8 @@ class Evaluator:
       raise ValueError(f"eval.burn_in must be >= 0; got {burn_in}")
 
     with tracker.scope({"phase": "eval", "iteration": iteration}) as eval_tracker:
-      per_episode_post: list[np.ndarray] = []
-      per_episode_prior: list[np.ndarray] = []
+      per_episode_posterior: list[np.ndarray] = []
+      per_episode_prior:     list[np.ndarray] = []
       ep_count = 0
 
       for ep_idx, raw_episode in enumerate(tqdm.tqdm(
@@ -160,17 +134,17 @@ class Evaluator:
           continue
 
         # Log per-episode aggregates and persist artifacts.
-        post_err  = result["error_posterior"]
-        prior_err = result["error_prior"]
-        per_episode_post.append(post_err)
+        posterior_err = result["error_posterior"]
+        prior_err     = result["error_prior"]
+        per_episode_posterior.append(posterior_err)
         per_episode_prior.append(prior_err)
 
         eval_tracker.log({
           "episode_index":         ep_idx,
           "source":                stem,
-          "recon/posterior_mean":  float(post_err.mean()),
+          "recon/posterior_mean":  float(posterior_err.mean()),
           "recon/prior_mean":      float(prior_err.mean()),
-          "recon/posterior_final": float(post_err[-1]),
+          "recon/posterior_final": float(posterior_err[-1]),
           "recon/prior_final":     float(prior_err[-1]),
           "horizon":               int(prior_err.shape[0]),
         })
@@ -193,13 +167,13 @@ class Evaluator:
         )
         return
 
-      post_curve  = self._stack_curve(per_episode_post)
-      prior_curve = self._stack_curve(per_episode_prior)
+      posterior_curve = self._stack_curve(per_episode_posterior)
+      prior_curve     = self._stack_curve(per_episode_prior)
       eval_tracker.log({
         "num_episodes":          ep_count,
-        "recon/posterior_mean":  float(np.nanmean(post_curve)),
+        "recon/posterior_mean":  float(np.nanmean(posterior_curve)),
         "recon/prior_mean":      float(np.nanmean(prior_curve)),
-        "recon/posterior_final": float(np.nanmean(post_curve[:, -1])),
+        "recon/posterior_final": float(np.nanmean(posterior_curve[:, -1])),
         "recon/prior_final":     float(np.nanmean(prior_curve[:, -1])),
       })
 
@@ -236,26 +210,26 @@ class Evaluator:
       predict_reward=False,
     )
 
-    recon_post  = self._unbatch(rollout.posterior.obs_pred_numpy())
-    recon_prior = self._unbatch(rollout.prior.obs_pred_numpy())
+    recon_posterior = self._unbatch(rollout.posterior.obs_pred_numpy())
+    recon_prior     = self._unbatch(rollout.prior.obs_pred_numpy())
 
-    target      = self._slice_obs(obs, burn_in, T)
-    error_post  = _recon_error(recon_post,  target)
-    error_prior = _recon_error(recon_prior, target)
+    target          = self._slice_obs(obs, burn_in, T)
+    error_posterior = _recon_error(recon_posterior, target)
+    error_prior     = _recon_error(recon_prior,     target)
 
-    h_post  = self._unbatch(rollout.posterior.h_numpy())
-    s_post  = self._unbatch(rollout.posterior.s_numpy())
-    h_prior = self._unbatch(rollout.prior.h_numpy())
-    s_prior = self._unbatch(rollout.prior.s_numpy())
+    h_posterior = self._unbatch(rollout.posterior.h_numpy())
+    s_posterior = self._unbatch(rollout.posterior.s_numpy())
+    h_prior     = self._unbatch(rollout.prior.h_numpy())
+    s_prior     = self._unbatch(rollout.prior.s_numpy())
 
     return {
-      "recon_posterior": recon_post,
+      "recon_posterior": recon_posterior,
       "recon_prior":     recon_prior,
       "target_window":   target,
-      "error_posterior": error_post,
+      "error_posterior": error_posterior,
       "error_prior":     error_prior,
-      "h_post":          h_post,
-      "s_post":          s_post,
+      "h_posterior":     h_posterior,
+      "s_posterior":     s_posterior,
       "h_prior":         h_prior,
       "s_prior":         s_prior,
     }
@@ -263,19 +237,19 @@ class Evaluator:
   def _episode_artifacts(
     self, episode: dict[str, Any], result: dict[str, Any], burn_in: int,
   ) -> dict[str, Any]:
-    """Pack the per-step record consumed by :class:`EvalEpisodeWriter`."""
-    # We log only the post-burn-in window so the writer's arrays all line
-    # up on the same time axis — that's the segment where posterior vs
-    # prior actually diverge.
-    obs        = self._slice_obs(episode["obs"], burn_in, burn_in + result["error_prior"].shape[0])
-    processed  = _processed_view(obs)
+    """Pack the per-step record consumed by :class:`EvalEpisodeWriter`.
+
+    We log only the post-burn-in window so the writer's arrays all line
+    up on the same time axis — that's the segment where posterior vs
+    prior actually diverge.
+    """
+    obs = self._slice_obs(episode["obs"], burn_in, burn_in + result["error_prior"].shape[0])
     return {
-      "raw_obs":         obs,
-      "processed_obs":   processed,
+      "obs":             obs,
       "recon_posterior": result["recon_posterior"],
       "recon_prior":     result["recon_prior"],
-      "h_post":          result["h_post"],
-      "s_post":          result["s_post"],
+      "h_posterior":     result["h_posterior"],
+      "s_posterior":     result["s_posterior"],
       "h_prior":         result["h_prior"],
       "s_prior":         result["s_prior"],
     }

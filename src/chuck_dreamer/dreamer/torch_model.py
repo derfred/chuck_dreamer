@@ -729,23 +729,17 @@ class DreamerTorchModel:
   # Training-time surface (mirrors mlx_model.DreamerMLXModel)
   # ---------------------------------------------------------------------
 
-  @staticmethod
-  def _normalize_image(img: torch.Tensor) -> torch.Tensor:
-    """uint8 [0, 255] → float [-0.5, 0.5]. Floats are passed through."""
-    if img.dtype == torch.uint8:
-      return img.float() / 255.0 - 0.5
-    return img
-
   def _recon_loss(self, recon, obs) -> torch.Tensor:
+    # ``obs`` arrives pre-normalized from :class:`ImageProcessor` /
+    # :class:`ImageProprioProcessor` (float in ``[-0.5, 0.5]``), so the
+    # decoder output and target already share a scale.
     if self.obs_mode == "state":
       return ((recon - obs) ** 2).sum(-1).mean()
     if self.obs_mode == "image":
-      target = self._normalize_image(obs)
-      return ((recon - target) ** 2).sum(dim=(-3, -2, -1)).mean()
+      return ((recon - obs) ** 2).sum(dim=(-3, -2, -1)).mean()
     if self.obs_mode == "image_proprio":
-      img_target = self._normalize_image(obs["image"])
-      img_loss   = ((recon["image"] - img_target) ** 2).sum(dim=(-3, -2, -1)).mean()
-      pro_loss   = ((recon["proprio"] - obs["proprio"]) ** 2).sum(-1).mean()
+      img_loss = ((recon["image"]   - obs["image"])   ** 2).sum(dim=(-3, -2, -1)).mean()
+      pro_loss = ((recon["proprio"] - obs["proprio"]) ** 2).sum(-1).mean()
       return img_loss + pro_loss
     raise ValueError(f"unknown obs_mode={self.obs_mode!r}")
 
