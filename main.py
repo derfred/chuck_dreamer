@@ -122,8 +122,12 @@ def generate_scenes(ctx, episodes, output, seed, fmt, overrides):
               help="Video feature key (e.g. observation.images.wrist). Defaults to the first one.")
 @click.option("--max-episodes", default=None, type=int,
               help="Cap on number of episodes to convert (default: all)")
+@click.option("--derive-target-mask/--no-derive-target-mask", default=True,
+              help="Derive a segmentation_target mask per frame via white-blob detection "
+                   "+ Kalman smoothing (default: on). Provides the focus-loss path with "
+                   "a target mask for datasets that ship without segmentation.")
 @click.pass_context
-def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes):
+def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes, derive_target_mask):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
 
   Pulls the parquet + MP4 from Hugging Face, slices per episode using
@@ -138,12 +142,13 @@ def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes):
 
   from chuck_dreamer.sim.lerobot_import import import_dataset
 
-  click.echo(f"Importing {repo_id} → {output}  (format={fmt})")
+  click.echo(f"Importing {repo_id} → {output}  (format={fmt}, derive_target_mask={derive_target_mask})")
   count = 0
   for ep_idx, out_path in tqdm(
     import_dataset(
       repo_id, output,
       format=fmt, video_key=video_key, max_episodes=max_episodes,
+      derive_target_mask=derive_target_mask,
     ),
     desc="Episodes",
     total=max_episodes,

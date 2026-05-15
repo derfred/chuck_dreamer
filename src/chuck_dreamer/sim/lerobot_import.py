@@ -217,6 +217,7 @@ def import_dataset(
   format: str = "hdf5",
   video_key: str | None = None,
   max_episodes: int | None = None,
+  derive_target_mask: bool = True,
 ) -> Iterator[tuple[int, Path]]:
   """Yield ``(episode_index, output_path)`` per converted episode.
 
@@ -224,10 +225,21 @@ def import_dataset(
   the path to an on-disk LeRobot v3 dataset directory. The latter is
   detected by ``Path(repo_id).is_dir()``.
 
+  ``derive_target_mask`` (default True) runs the white-blob detector
+  from :mod:`chuck_dreamer.sim.blob_mask` over each episode's frames and
+  attaches the resulting Kalman-smoothed circle mask as
+  ``segmentation_target``. This gives the reconstruction-loss focus
+  path a usable target mask even though LeRobot teleop data ships
+  without segmentation.
+
   Generator so callers can wrap in ``tqdm`` and show progress. The
   returned path points at the file produced by :class:`HDF5EpisodeWriter`
   or :class:`RerunEpisodeWriter`.
   """
+  if derive_target_mask:
+    from .blob_mask import derive_target_mask as _derive_target_mask
+  else:
+    _derive_target_mask = None
   local_root: Path | None = None
   if Path(repo_id).is_dir():
     local_root = Path(repo_id)
@@ -297,6 +309,8 @@ def import_dataset(
       "ee_quat":      np.zeros((T, 4),        dtype=np.float32),
       "object_xy":    np.zeros((T, 2),        dtype=np.float32),
     }
+    if _derive_target_mask is not None:
+      episode["segmentation_target"] = _derive_target_mask(images)
     metadata = {
       "config": {
         "source_repo":   repo_id,
