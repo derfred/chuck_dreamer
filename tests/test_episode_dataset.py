@@ -14,12 +14,11 @@ from chuck_dreamer.config import (
 )
 from chuck_dreamer.training.episode_dataset import Episode, EpisodeDataset
 from chuck_dreamer.training.episode_processor import (
-  ImageProcessor,
-  ImageProprioProcessor,
-  StateVectorProcessor,
-  _drop_last_and_pack,
+  EpisodeProcessor,
+  _pack,
   processor_for,
 )
+from chuck_dreamer.training.observation import Observation
 from chuck_dreamer.training.replay_buffer import ReplayBuffer
 from chuck_dreamer.sim.episode_writer import EpisodeWriter
 
@@ -67,15 +66,15 @@ def _step_info_columns(N: int) -> dict:
   }
 
 
-def test_drop_last_and_pack_enforces_buffer_invariants():
+def test_pack_enforces_buffer_invariants():
   N = 10
-  obs = np.arange(N * 4, dtype=np.float32).reshape(N, 4)
+  obs = Observation.state_vector(np.arange(N * 4, dtype=np.float32).reshape(N, 4))
   raw = {
     "joint_action": np.arange(N * 2, dtype=np.float32).reshape(N, 2),
     "reward": np.arange(N, dtype=np.float32),
     **_step_info_columns(N),
   }
-  ep = _drop_last_and_pack(obs, raw)
+  ep = _pack(obs, raw)
 
   assert ep["obs"].shape == (N, 4)
   assert ep["action"].shape == (N - 1, 2)
@@ -88,10 +87,10 @@ def test_drop_last_and_pack_enforces_buffer_invariants():
   assert ep["step_info"]["object_xy"].shape == (N - 1, 2)
 
 
-def test_drop_last_rejects_single_step_episode():
+def test_pack_rejects_single_step_episode():
   with pytest.raises(ValueError):
-    _drop_last_and_pack(
-      np.zeros((1, 3), dtype=np.float32),
+    _pack(
+      Observation.state_vector(np.zeros((1, 3), dtype=np.float32)),
       {"joint_action": np.zeros((1, 2), dtype=np.float32),
        "reward": np.zeros((1,)),
        **_step_info_columns(1)},
@@ -115,7 +114,7 @@ def test_state_vector_processor_concatenates_state_fields():
     "ee_quat": np.full((N, 4), 3.0, dtype=np.float32),
     "object_xy": np.full((N, 2), 4.0, dtype=np.float32),
   }
-  ep = StateVectorProcessor()(raw)
+  ep = EpisodeProcessor("state")(raw)
 
   assert ep["obs"].shape == (N, 15)
   np.testing.assert_array_equal(ep["obs"][0, 0:3], [2.0, 2.0, 2.0])
@@ -136,12 +135,93 @@ def test_image_processor_returns_normalized_float32():
     "ee_quat": np.zeros((N, 4), dtype=np.float32),
     "object_xy": np.zeros((N, 2), dtype=np.float32),
   }
-  ep = ImageProcessor(image_size=8)(raw)
+  ep = EpisodeProcessor("image", image_size=8)(raw)
   assert ep["obs"].shape == (N, 8, 8, 3)
   assert ep["obs"].dtype == np.float32
   # Each timestep's uint8 fill ``t`` maps to ``t/255 - 0.5``.
   for t in range(N):
     np.testing.assert_allclose(ep["obs"][t].mean(), t / 255.0 - 0.5, atol=1e-6)
+
+
+def test_image_processor_attaches_focus_mask_when_sources_present():
+  N, H, W = 4, 8, 8
+  raw = {
+    "image":                 np.zeros((N, H, W, 3), dtype=np.uint8),
+    "segmentation_target":   np.zeros((N, H, W),    dtype=bool),
+    "segmentation_arm":      np.zeros((N, H, W),    dtype=bool),
+    "joint_action": np.zeros((N, 3), dtype=np.float32),
+    "reward":       np.zeros((N,),   dtype=np.float32),
+    "timestamp":    np.zeros((N,),   dtype=np.float32),
+    "joint_qpos":   np.zeros((N, 6), dtype=np.float32),
+    "ee_pos":       np.zeros((N, 3), dtype=np.float32),
+    "ee_quat":      np.zeros((N, 4), dtype=np.float32),
+    "object_xy":    np.zeros((N, 2), dtype=np.float32),
+  }
+  # target lights up a (2,2) corner at each step; arm lights up a different corner.
+  raw["segmentation_target"][:, :2, :2] = True
+  raw["segmentation_arm"][:,    -2:, -2:] = True
+
+  proc = EpisodeProcessor(
+    "image", image_size=H,
+    focus_mask_sources=("segmentation_target", "segmentation_arm"),
+  )
+  ep = proc(raw)
+  assert "focus_mask" in ep
+  fm = ep["focus_mask"]
+  assert fm.shape == (N, H, W)
+  assert fm.dtype == np.float32
+  # Union of the two masks ⇒ both corners on.
+  assert np.allclose(fm[:, :2, :2], 1.0)
+  assert np.allclose(fm[:, -2:, -2:], 1.0)
+  # Off-mask regions stay 0.
+  assert np.allclose(fm[:, 3:5, 3:5], 0.0)
+
+
+def test_image_processor_omits_focus_mask_when_no_sources_match():
+  # Sources named but no segmentation_* key present → focus_mask absent.
+  N = 3
+  raw = {
+    "image": np.zeros((N, 4, 4, 3), dtype=np.uint8),
+    "joint_action": np.zeros((N, 2), dtype=np.float32),
+    "reward":       np.zeros((N,),   dtype=np.float32),
+    "timestamp":    np.zeros((N,),   dtype=np.float32),
+    "joint_qpos":   np.zeros((N, 6), dtype=np.float32),
+    "ee_pos":       np.zeros((N, 3), dtype=np.float32),
+    "ee_quat":      np.zeros((N, 4), dtype=np.float32),
+    "object_xy":    np.zeros((N, 2), dtype=np.float32),
+  }
+  ep = EpisodeProcessor("image", image_size=4, focus_mask_sources=("segmentation_target",))(raw)
+  assert "focus_mask" not in ep
+
+
+def test_focus_mask_resizes_alongside_image():
+  # Mask of shape (N, 32, 32) should be downsampled to (N, 8, 8) with the image.
+  N = 2
+  raw_H = 32
+  raw = {
+    "image":               np.zeros((N, raw_H, raw_H, 3), dtype=np.uint8),
+    "segmentation_target": np.zeros((N, raw_H, raw_H),    dtype=bool),
+    "joint_action": np.zeros((N, 2), dtype=np.float32),
+    "reward":       np.zeros((N,),   dtype=np.float32),
+    "timestamp":    np.zeros((N,),   dtype=np.float32),
+    "joint_qpos":   np.zeros((N, 6), dtype=np.float32),
+    "ee_pos":       np.zeros((N, 3), dtype=np.float32),
+    "ee_quat":      np.zeros((N, 4), dtype=np.float32),
+    "object_xy":    np.zeros((N, 2), dtype=np.float32),
+  }
+  # 16x16 patch in the top-left ⇒ should remain on after a 4x downsample.
+  raw["segmentation_target"][:, :16, :16] = True
+
+  ep = EpisodeProcessor(
+    "image", image_size=8, focus_mask_sources=("segmentation_target",),
+  )(raw)
+  fm = ep["focus_mask"]
+  assert fm.shape == (N, 8, 8)
+  # Nearest-neighbor downsample keeps 0/1 — no in-between values from blur.
+  assert set(np.unique(fm).tolist()).issubset({0.0, 1.0})
+  # The half that was masked is still masked.
+  assert np.allclose(fm[:, :4, :4], 1.0)
+  assert np.allclose(fm[:, 4:, 4:], 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +296,7 @@ def test_replay_buffer_loads_hdf5_directory(tmp_path):
   # 20 raw steps → 20 obs + 19 actions per episode.
   assert len(buf) == 2 * 19
   ep = buf._episodes[0]
-  assert ep["obs"].shape == (20, 15)
+  assert ep["obs"].state.shape == (20, 15)
   assert ep["action"].shape == (20 - 1, 3)
   assert bool(ep["done"][-1])
 
@@ -233,18 +313,18 @@ def test_replay_buffer_loads_rerun_directory(tmp_path):
   _write_sim_episode(tmp_path, "rerun", T=20, idx=0)
   _write_sim_episode(tmp_path, "rerun", T=20, idx=1)
 
-  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, processor=ImageProcessor(image_size=16), seed=0)
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, processor=EpisodeProcessor("image", image_size=16), seed=0)
   n = buf.load_sim_episodes(tmp_path, format="rerun")
 
   assert n == 2
   ep = buf._episodes[0]
-  assert ep["obs"].shape == (20, 16, 16, 3)
+  assert ep["obs"].image.shape == (20, 16, 16, 3)
   assert ep["action"].shape == (19, 3)
   # Image[t] is filled with constant ``t`` uint8 → ``t/255 - 0.5`` after
   # the processor normalizes. The ordering check survives normalization
   # since the mapping is monotonic.
   for t in range(20):
-    np.testing.assert_allclose(float(ep["obs"][t].mean()), t / 255.0 - 0.5, atol=1e-6)
+    np.testing.assert_allclose(float(ep["obs"].image[t].mean()), t / 255.0 - 0.5, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -459,14 +539,14 @@ def _state_only_raw(N: int, img_hw: tuple[int, int]) -> dict:
 
 def test_image_processor_resizes_to_target_size():
   raw = _state_only_raw(N=4, img_hw=(32, 32))
-  ep = ImageProcessor(image_size=8)(raw)
+  ep = EpisodeProcessor("image", image_size=8)(raw)
   assert ep["obs"].shape == (4, 8, 8, 3)
   assert ep["obs"].dtype == np.float32
 
 
 def test_image_processor_passthrough_when_already_target_size():
   raw = _state_only_raw(N=3, img_hw=(8, 8))
-  ep = ImageProcessor(image_size=8)(raw)
+  ep = EpisodeProcessor("image", image_size=8)(raw)
   assert ep["obs"].shape == (3, 8, 8, 3)
   # When sizes match the resize is a no-op; values are then normalized.
   for t in range(3):
@@ -475,7 +555,7 @@ def test_image_processor_passthrough_when_already_target_size():
 
 def test_image_proprio_processor_returns_dict_obs():
   raw = _state_only_raw(N=5, img_hw=(16, 16))
-  ep = ImageProprioProcessor(image_size=8)(raw)
+  ep = EpisodeProcessor("image_proprio", image_size=8)(raw)
 
   assert isinstance(ep["obs"], dict)
   assert set(ep["obs"].keys()) == {"image", "proprio"}
@@ -489,7 +569,7 @@ def test_image_proprio_processor_returns_dict_obs():
 def test_image_proprio_processor_excludes_object_xy_from_proprio():
   raw = _state_only_raw(N=3, img_hw=(8, 8))
   raw["object_xy"] = np.full((3, 2), 999.0, dtype=np.float32)
-  ep = ImageProprioProcessor(image_size=8)(raw)
+  ep = EpisodeProcessor("image_proprio", image_size=8)(raw)
   # proprio is body-internal, so object_xy must not bleed in.
   assert not np.any(np.isclose(ep["obs"]["proprio"], 999.0))
 
@@ -503,7 +583,9 @@ def test_processor_for_state_mode_returns_state_processor():
   cfg = load_config()
   cfg.env.obs_mode = "state"
   p = processor_for(cfg)
-  assert isinstance(p, StateVectorProcessor)
+  assert isinstance(p, EpisodeProcessor)
+  assert p.obs_mode == "state"
+  assert p.image_size is None
 
 
 def test_processor_for_image_mode_uses_derived_size():
@@ -511,7 +593,8 @@ def test_processor_for_image_mode_uses_derived_size():
   cfg.env.obs_mode = "image"
   cfg.model.encoder.cnn_strides = [2, 2, 2]   # 3 layers -> image_size = 32
   p = processor_for(cfg)
-  assert isinstance(p, ImageProcessor)
+  assert isinstance(p, EpisodeProcessor)
+  assert p.obs_mode == "image"
   assert p.image_size == derive_image_size((2, 2, 2))
 
 
@@ -520,7 +603,8 @@ def test_processor_for_image_proprio_uses_derived_size():
   cfg.env.obs_mode = "image_proprio"
   cfg.model.encoder.cnn_strides = [2, 2]      # 2 layers -> image_size = 16
   p = processor_for(cfg)
-  assert isinstance(p, ImageProprioProcessor)
+  assert isinstance(p, EpisodeProcessor)
+  assert p.obs_mode == "image_proprio"
   assert p.image_size == derive_image_size((2, 2))
 
 

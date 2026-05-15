@@ -47,6 +47,7 @@ from omegaconf import OmegaConf
 from safetensors.torch import load_file as _st_load_file
 from safetensors.torch import save_file as _st_save_file
 
+from ..training.observation import Observation
 from .world_model import Distribution, State
 
 # Same key as the MLX backend so the YAML round-trip stays consistent
@@ -728,19 +729,23 @@ class DreamerTorchModel:
   # Training-time surface (mirrors mlx_model.DreamerMLXModel)
   # ---------------------------------------------------------------------
 
-  def _recon_loss(self, recon, obs) -> torch.Tensor:
-    # ``obs`` arrives pre-normalized from :class:`ImageProcessor` /
-    # :class:`ImageProprioProcessor` (float in ``[-0.5, 0.5]``), so the
-    # decoder output and target already share a scale.
-    if self.obs_mode == "state":
-      return ((recon - obs) ** 2).sum(-1).mean()
-    if self.obs_mode == "image":
-      return ((recon - obs) ** 2).sum(dim=(-3, -2, -1)).mean()
-    if self.obs_mode == "image_proprio":
-      img_loss = ((recon["image"]   - obs["image"])   ** 2).sum(dim=(-3, -2, -1)).mean()
-      pro_loss = ((recon["proprio"] - obs["proprio"]) ** 2).sum(-1).mean()
+  def _recon_loss(self, recon: Observation, target: Observation) -> torch.Tensor:
+    # ``recon`` and ``target`` are both Observations in the same mode.
+    # Image fields arrive pre-normalized (``[-0.5, 0.5]``) so the decoder
+    # output and target share a scale. ``target.focus_mask`` (B, T, H, W)
+    # multiplies image-pixel errors by ``1 + focus_scale * mask``.
+    if target.mode == "state":
+      return ((recon.state - target.state) ** 2).sum(-1).mean()
+    diff = (recon.image - target.image) ** 2
+    if target.focus_mask is not None:
+      diff = diff * (1 + self.config.training.losses.focus_scale * target.focus_mask[..., None])
+    img_loss = diff.sum(dim=(-3, -2, -1)).mean()
+    if target.mode == "image":
+      return img_loss
+    if target.mode == "image_proprio":
+      pro_loss = ((recon.proprio - target.proprio) ** 2).sum(-1).mean()
       return img_loss + pro_loss
-    raise ValueError(f"unknown obs_mode={self.obs_mode!r}")
+    raise ValueError(f"unknown obs mode: {target.mode!r}")
 
   def _move_batch(self, batch: dict) -> dict:
     """Move every leaf in ``batch`` to ``self.device``. Image leaves stay
@@ -754,16 +759,14 @@ class DreamerTorchModel:
     return out
 
   def _wm_loss(self, batch: dict) -> tuple[torch.Tensor, dict]:
-    obs    = batch["obs"]
+    target_obs = Observation.from_buffer_value(
+      batch["obs"], self.obs_mode, focus_mask=batch.get("focus_mask"),
+    )
     action = batch["action"]
     reward = batch["reward"]
-    if isinstance(obs, dict):
-      any_leaf = next(iter(obs.values()))
-      B, T     = any_leaf.shape[0], any_leaf.shape[1]
-    else:
-      B, T = obs.shape[0], obs.shape[1]
+    B, T   = target_obs.leading_shape[0], target_obs.leading_shape[1]
 
-    embeds = self._wm_bundle.encoder(obs)               # (B, T, embed_dim)
+    embeds = self._wm_bundle.encoder(target_obs.to_buffer_value())   # (B, T, embed_dim)
     state  = self._wm_bundle.rssm.initial_state(B, device=self.device)
     states: list[State] = []
     kls_per_dim = []
@@ -781,7 +784,8 @@ class DreamerTorchModel:
     recon    = self._wm_bundle.decoder(feats)
     rew_pred = self._wm_bundle.reward(feats)
 
-    recon_loss = self._recon_loss(recon, obs)
+    recon_obs  = Observation.from_buffer_value(recon, self.obs_mode)
+    recon_loss = self._recon_loss(recon_obs, target_obs)
     rew_loss   = ((rew_pred - reward) ** 2).mean()
 
     kl_per_dim_btmean = torch.stack(kls_per_dim, dim=1).mean(dim=(0, 1))  # (stoch_dim,)

@@ -8,6 +8,7 @@ import numpy as np
 from mlx.utils import tree_flatten, tree_unflatten
 from omegaconf import OmegaConf
 
+from ..training.observation import Observation
 from .world_model import Distribution, State
 
 # Key under which the OmegaConf-serialized training config is stored in the
@@ -713,34 +714,42 @@ class DreamerMLXModel:
     """Backend-native broadcast. Used by CEM to expand a B=1 state across samples."""
     return cast(mx.array, mx.broadcast_to(x, shape))
 
-  def _recon_loss(self, recon, obs) -> mx.array:
+  def _recon_loss(self, recon: Observation, target: Observation) -> mx.array:
     """Reconstruction loss appropriate for the configured ``obs_mode``.
 
-    ``obs`` arrives pre-normalized from :class:`ImageProcessor` /
-    :class:`ImageProprioProcessor` (float in ``[-0.5, 0.5]``), so the
-    decoder output and target already share a scale.
+    ``recon`` and ``target`` are both :class:`Observation` instances in
+    the same mode (state / image / image_proprio). Image fields arrive
+    pre-normalized (``[-0.5, 0.5]``) so the decoder output and target
+    already share a scale. ``target.focus_mask``, when present, weights
+    image-pixel errors by ``1 + focus_scale * mask``.
     """
-    if self.obs_mode == "state":
-      return cast(mx.array, ((recon - obs) ** 2).sum(-1).mean())
-    if self.obs_mode == "image":
-      return cast(mx.array, ((recon - obs) ** 2).sum(axis=(-3, -2, -1)).mean())
-    if self.obs_mode == "image_proprio":
-      img_loss = ((recon["image"]   - obs["image"])   ** 2).sum(axis=(-3, -2, -1)).mean()
-      pro_loss = ((recon["proprio"] - obs["proprio"]) ** 2).sum(-1).mean()
+    if target.mode == "state":
+      return cast(mx.array, ((recon.state - target.state) ** 2).sum(-1).mean())
+    diff = (recon.image - target.image) ** 2
+    if target.focus_mask is not None:
+      # focus_mask is (B, T, H, W); add trailing axis to broadcast over channels.
+      diff = diff * (1 + self.config.training.losses.focus_scale * target.focus_mask[..., None])
+    img_loss = diff.sum(axis=(-3, -2, -1)).mean()
+    if target.mode == "image":
+      return cast(mx.array, img_loss)
+    if target.mode == "image_proprio":
+      pro_loss = ((recon.proprio - target.proprio) ** 2).sum(-1).mean()
       return cast(mx.array, img_loss + pro_loss)
-    raise ValueError(f"unknown obs_mode={self.obs_mode!r}")
+    raise ValueError(f"unknown obs mode: {target.mode!r}")
 
   def _wm_loss_fn(self, wm_modules, batch):
-    obs    = batch["obs"]      # (B, T, ...) ndarray or dict of ndarrays
+    # Wrap once: (B, T, ...) numpy/tensor from the buffer becomes an
+    # Observation carrying whichever leaves the mode uses. The encoder
+    # still consumes the unwrapped buffer-value (its forward predates
+    # the wrapper); _recon_loss consumes Observation on both sides.
+    target_obs = Observation.from_buffer_value(
+      batch["obs"], self.obs_mode, focus_mask=batch.get("focus_mask"),
+    )
     action = batch["action"]   # (B, T, action_dim)
     reward = batch["reward"]   # (B, T)
-    if isinstance(obs, dict):
-      any_leaf = next(iter(obs.values()))
-      B, T     = any_leaf.shape[0], any_leaf.shape[1]
-    else:
-      B, T = obs.shape[0], obs.shape[1]
+    B, T   = target_obs.leading_shape[0], target_obs.leading_shape[1]
 
-    embeds = wm_modules.encoder(obs)           # (B, T, embed_dim)
+    embeds = wm_modules.encoder(target_obs.to_buffer_value())   # (B, T, embed_dim)
     state  = wm_modules.rssm.initial_state(B)
     states: list[State] = []
     kls_per_dim = []
@@ -760,7 +769,8 @@ class DreamerMLXModel:
     recon    = wm_modules.decoder(feats)
     rew_pred = wm_modules.reward(feats)
 
-    recon_loss = self._recon_loss(recon, obs)
+    recon_obs  = Observation.from_buffer_value(recon, self.obs_mode)
+    recon_loss = self._recon_loss(recon_obs, target_obs)
     rew_loss   = ((rew_pred - reward) ** 2).mean()
 
     # Per-dim KL averaged over batch and time: (stoch_dim,)

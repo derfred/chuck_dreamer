@@ -1,22 +1,23 @@
 """Convert raw sim-recorded episodes into the replay buffer's schema.
 
 :class:`~chuck_dreamer.training.episode_dataset.Episode` carries raw
-dicts of arrays straight from the writer format. Processors here
-project them onto the modal observation chosen by ``config.env.obs_mode``
-and align with the buffer's ``(T+1 obs, T action)`` invariant.
+dicts of arrays straight from the writer format. The processor here
+projects them onto the modal observation chosen by ``config.env.obs_mode``
+and aligns with the buffer's ``(T+1 obs, T action)`` invariant.
 
-The set of processors mirrors the env's ``policy_obs()`` projection on the
-online side: ``StateVectorProcessor`` matches ``obs_mode="state"``,
-``ImageProcessor`` matches ``"image"``, ``ImageProprioProcessor`` matches
-``"image_proprio"``.
+A single :class:`EpisodeProcessor` parameterized by ``obs_mode`` replaces
+the three per-mode processor classes that used to live here. Per-mode
+transformations (resize, normalize, proprio concat) are owned by
+:class:`~chuck_dreamer.training.observation.Observation`.
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol
 
-import cv2  # type: ignore[import-not-found]
 import numpy as np
+
+from .observation import ObsMode, Observation
 
 
 RawEpisode = dict[str, Any]
@@ -26,13 +27,8 @@ Episode = dict[str, Any]
 _STEP_INFO_KEYS = ("object_xy", "ee_pos", "ee_quat")
 
 
-class EpisodeProcessor(Protocol):
-  """Converts a raw sim episode into replay-buffer schema.
-
-  A processor must return a dict with keys ``obs`` (T+1, *obs_shape),
-  ``action`` (T, action_dim), ``reward`` (T,), ``done`` (T,), and
-  ``step_info`` (a dict of T+1-length arrays mirroring StepInfo columns).
-  """
+class EpisodeProcessorProtocol(Protocol):
+  """Converts a raw sim episode into replay-buffer schema."""
 
   def __call__(self, raw: RawEpisode) -> Episode: ...
 
@@ -61,138 +57,126 @@ def _resolve_action(raw: RawEpisode) -> np.ndarray:
   raise KeyError("raw episode missing an action field (joint_action / ee_action)")
 
 
-def _drop_last_and_pack(obs: np.ndarray, raw: RawEpisode) -> Episode:
-  """Align a per-step obs array with the buffer's (T+1 obs, T action) layout.
+def _pack(obs: Observation, raw: RawEpisode) -> Episode:
+  """Align a per-step :class:`Observation` with the buffer's layout.
 
   Sim episodes record N aligned steps of (obs_t, action_t, reward_t).
   We treat the N recorded obs as ``obs[0..N-1]`` and drop the last
   action/reward, yielding N obs and N-1 actions — i.e. T = N-1 with
   T+1 = N obs. The final ``done`` is set to True. ``step_info`` is
-  sliced to length N (matching obs).
+  sliced to length T.
+
+  ``focus_mask`` (when present on ``obs``) rides in the episode dict as
+  a sibling key — kept separate from ``obs`` so legacy consumers that
+  read ``ep["obs"]`` as a plain ndarray/dict stay backwards-compatible.
   """
-  N = obs.shape[0]
+  N = obs.leading_shape[0]
   if N < 2:
     raise ValueError(f"episode too short: {N} steps (need >= 2)")
 
-  action = _resolve_action(raw)[: N - 1]
-  reward = np.asarray(raw["reward"], dtype=np.float32)[: N - 1]
-  done = np.zeros((N - 1,), dtype=bool)
+  action   = _resolve_action(raw)[: N - 1]
+  reward   = np.asarray(raw["reward"], dtype=np.float32)[: N - 1]
+  done     = np.zeros((N - 1,), dtype=bool)
   done[-1] = True
 
-  goal_xy = None
-  if "goal_xy" in raw:
-    goal_xy = np.asarray(raw["goal_xy"], dtype=np.float32)
-
   ep: Episode = {
-    "obs": obs.astype(obs.dtype, copy=False),
+    "obs": obs.to_buffer_value(),
     "action": action,
     "reward": reward,
     "done": done,
     "step_info": _slice_step_info(raw, N - 1),
   }
-  if goal_xy is not None:
-    ep["goal_xy"] = goal_xy
+  if obs.focus_mask is not None:
+    ep["focus_mask"] = obs.focus_mask
+  if "goal_xy" in raw:
+    ep["goal_xy"] = np.asarray(raw["goal_xy"], dtype=np.float32)
   return ep
 
 
-def _resize_image_stack(images: np.ndarray, target: int) -> np.ndarray:
-  """Resize a (N, H, W, 3) uint8 stack to (N, target, target, 3) uint8."""
-  if images.ndim != 4 or images.shape[-1] != 3:
-    raise ValueError(f"expected (N, H, W, 3) image stack; got shape {images.shape}")
-  N, H, W, _ = images.shape
-  if H == target and W == target:
-    return images.astype(np.uint8, copy=False)
-  out = np.empty((N, target, target, 3), dtype=np.uint8)
-  for i in range(N):
-    out[i] = cv2.resize(images[i], (target, target), interpolation=cv2.INTER_AREA)
-  return out
+def _union_focus_mask(raw: RawEpisode, sources: tuple[str, ...]) -> np.ndarray | None:
+  """OR-combine the named ``segmentation_*`` masks present in ``raw``.
 
-
-def _normalize_image_stack(images: np.ndarray) -> np.ndarray:
-  """Map a (N, H, W, 3) uint8 stack to float32 in ``[-0.5, 0.5]``.
-
-  Matches the CNN encoder's input contract so downstream code can feed
-  the processor output straight to the encoder without re-normalizing.
-  Float inputs are returned as float32 unchanged.
+  Returns ``None`` if none of the sources are present (silent fallback —
+  loaders without segmentation data should still work). Missing
+  individual sources are skipped (they may not be recorded for every
+  episode), but at least one source must be present for the mask to be
+  produced. The returned mask is float32 in ``{0, 1}``, shape ``(T, H, W)``.
   """
-  arr = np.asarray(images)
-  if arr.dtype == np.uint8:
-    return arr.astype(np.float32) / 255.0 - 0.5
-  return arr.astype(np.float32, copy=False)
+  layers: list[np.ndarray] = []
+  for key in sources:
+    if key in raw:
+      layers.append(np.asarray(raw[key], dtype=bool))
+  if not layers:
+    return None
+  union = layers[0]
+  for layer in layers[1:]:
+    union = union | layer
+  return union.astype(np.float32)
 
 
-class StateVectorProcessor:
-  """Default processor: concat ee_pos + ee_quat + object_xy + joint_qpos.
+def _build_observation(
+  raw: RawEpisode,
+  obs_mode: ObsMode,
+  image_size: int | None,
+  focus_mask_sources: tuple[str, ...] = (),
+) -> Observation:
+  """Project a raw recorded episode onto the configured observation mode.
 
-  Produces a flat float32 observation vector per step. Order is fixed
-  so downstream consumers can unpack it consistently.
+  The transformations (resize, normalize, proprio concat) all live as
+  methods on :class:`Observation` — this function just composes them.
   """
-
-  def __call__(self, raw: RawEpisode) -> Episode:
-    ee_pos = np.asarray(raw["ee_pos"], dtype=np.float32)
-    ee_quat = np.asarray(raw["ee_quat"], dtype=np.float32)
-    object_xy = np.asarray(raw["object_xy"], dtype=np.float32)
+  if obs_mode == "state":
+    ee_pos     = np.asarray(raw["ee_pos"],     dtype=np.float32)
+    ee_quat    = np.asarray(raw["ee_quat"],    dtype=np.float32)
+    object_xy  = np.asarray(raw["object_xy"],  dtype=np.float32)
     joint_qpos = np.asarray(raw["joint_qpos"], dtype=np.float32)
-    obs = np.concatenate([ee_pos, ee_quat, object_xy, joint_qpos], axis=1)
-    return _drop_last_and_pack(obs, raw)
+    return Observation.state_vector(
+      np.concatenate([ee_pos, ee_quat, object_xy, joint_qpos], axis=1),
+    )
 
+  if image_size is None:
+    raise ValueError(f"obs_mode={obs_mode!r} requires an image_size")
+  images = np.asarray(raw["image"], dtype=np.uint8)
+  fmask  = _union_focus_mask(raw, focus_mask_sources)
 
-class ImageProcessor:
-  """Image-only obs: ``(N, image_size, image_size, 3)`` float32 per episode.
+  if obs_mode == "image":
+    obs = Observation.image_only(images, focus_mask=fmask)
+    return obs.resize_image(image_size).normalize_image()
 
-  Images are resized to ``image_size`` then normalized to ``[-0.5, 0.5]``
-  to match the encoder's input contract, so the model can consume the
-  obs straight from the buffer without re-normalizing.
-  """
-
-  def __init__(self, image_size: int):
-    self.image_size = int(image_size)
-
-  def __call__(self, raw: RawEpisode) -> Episode:
-    images = np.asarray(raw["image"], dtype=np.uint8)
-    obs = _normalize_image_stack(_resize_image_stack(images, self.image_size))
-    return _drop_last_and_pack(obs, raw)
-
-
-class ImageProprioProcessor:
-  """Image + proprio obs as a dict ``{"image": ..., "proprio": ...}``.
-
-  proprio = ee_pos (3) + ee_quat (4) + joint_qpos (n_joints). No object_xy:
-  proprioception is body-internal. Images are resized to ``image_size``
-  then normalized to float32 in ``[-0.5, 0.5]`` so they're ready for the
-  encoder without further normalization.
-  """
-
-  def __init__(self, image_size: int):
-    self.image_size = int(image_size)
-
-  def __call__(self, raw: RawEpisode) -> Episode:
-    images = np.asarray(raw["image"], dtype=np.uint8)
-    images = _normalize_image_stack(_resize_image_stack(images, self.image_size))
-    ee_pos = np.asarray(raw["ee_pos"], dtype=np.float32)
-    ee_quat = np.asarray(raw["ee_quat"], dtype=np.float32)
+  if obs_mode == "image_proprio":
+    ee_pos     = np.asarray(raw["ee_pos"],     dtype=np.float32)
+    ee_quat    = np.asarray(raw["ee_quat"],    dtype=np.float32)
     joint_qpos = np.asarray(raw["joint_qpos"], dtype=np.float32)
-    proprio = np.concatenate([ee_pos, ee_quat, joint_qpos], axis=1)
+    proprio    = np.concatenate([ee_pos, ee_quat, joint_qpos], axis=1)
+    obs = Observation.image_proprio(images, proprio, focus_mask=fmask)
+    return obs.resize_image(image_size).normalize_image()
 
-    N = images.shape[0]
-    if N < 2:
-      raise ValueError(f"episode too short: {N} steps (need >= 2)")
+  raise ValueError(f"unknown obs_mode={obs_mode!r}")
 
-    action = _resolve_action(raw)[: N - 1]
-    reward = np.asarray(raw["reward"], dtype=np.float32)[: N - 1]
-    done = np.zeros((N - 1,), dtype=bool)
-    done[-1] = True
 
-    ep: Episode = {
-      "obs": {"image": images, "proprio": proprio},
-      "action": action,
-      "reward": reward,
-      "done": done,
-      "step_info": _slice_step_info(raw, N - 1),
-    }
-    if "goal_xy" in raw:
-      ep["goal_xy"] = np.asarray(raw["goal_xy"], dtype=np.float32)
-    return ep
+class EpisodeProcessor:
+  """Project raw sim episodes onto a configured observation mode.
+
+  One processor handles all three obs modes — ``state``, ``image``,
+  ``image_proprio``. ``image_size`` is required for image modes and
+  ignored for ``state``. ``focus_mask_sources`` names raw segmentation
+  keys (e.g. ``"segmentation_target"``) whose union becomes the per-step
+  focus mask attached to the observation; empty disables it.
+  """
+
+  def __init__(
+    self,
+    obs_mode: ObsMode,
+    image_size: int | None = None,
+    focus_mask_sources: tuple[str, ...] = (),
+  ):
+    self.obs_mode = obs_mode
+    self.image_size = None if image_size is None else int(image_size)
+    self.focus_mask_sources = tuple(focus_mask_sources)
+
+  def __call__(self, raw: RawEpisode) -> Episode:
+    obs = _build_observation(raw, self.obs_mode, self.image_size, self.focus_mask_sources)
+    return _pack(obs, raw)
 
 
 def processor_for(config) -> EpisodeProcessor:
@@ -200,12 +184,18 @@ def processor_for(config) -> EpisodeProcessor:
 
   For image modes ``config.model.encoder.image_size`` (computed by the
   ``derive_image_size`` OmegaConf resolver from the encoder strides) is
-  the side length the loader resizes captured frames to.
+  the side length captured frames are resized to. ``focus_mask_sources``
+  is pulled from ``training.losses.focus_masks`` and only applied to
+  image-having modes.
   """
   obs_mode = str(config.env.obs_mode)
   if obs_mode == "state":
-    return StateVectorProcessor()
+    return EpisodeProcessor("state")
   if obs_mode in ("image", "image_proprio"):
-    image_size = int(config.model.encoder.image_size)
-    return ImageProcessor(image_size) if obs_mode == "image" else ImageProprioProcessor(image_size)
+    focus_sources = tuple(config.training.losses.get("focus_masks", []) or [])
+    return EpisodeProcessor(
+      obs_mode,
+      image_size=int(config.model.encoder.image_size),
+      focus_mask_sources=focus_sources,
+    )
   raise ValueError(f"Unknown obs_mode: {obs_mode!r}")

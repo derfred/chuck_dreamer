@@ -73,6 +73,8 @@ training:
     entropy_scale: 1.0
     # Auxiliary head loss (object_xy + ee_pos regression from the latent).
     aux_scale: 0.0
+    focus_masks: ["segmentation_target", "segmentation_arm", "segmentation_goal"]  # obs keys to apply "focus" weighting to
+    focus_scale: 5.0 # an additional weight on obs reconstruction loss for the "focus region"
 
 logging:
   logger: "trackio" # "none", "wandb", "trackio"

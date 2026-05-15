@@ -16,9 +16,39 @@ import numpy as np
 from ..reward import RewardFn
 from ..sim.step_info import StepInfo
 from .episode_dataset import EpisodeDataset, Progress
-from .episode_processor import EpisodeProcessor, StateVectorProcessor
+from .episode_processor import EpisodeProcessor
+from .observation import Observation
 
 Episode = dict[str, Any]
+
+
+def _coerce_to_observation(raw_obs: Any, focus_mask: Any = None) -> Observation:
+  """Wrap a buffer-side obs value (ndarray / dict / Observation) into an Observation.
+
+  Infers the mode from the value's structure since the buffer doesn't
+  carry obs_mode metadata:
+    * already an :class:`Observation` → returned unchanged
+    * dict with ``"image"`` / ``"proprio"`` → ``image_proprio``
+    * ndarray with ``ndim == 4`` (assumed (T+1, H, W, C)) → ``image``
+    * any other ndarray → ``state``
+
+  ``focus_mask`` (per-step ``(T+1, H, W)`` float32) rides alongside
+  image-having observations when supplied — it's silently ignored on
+  ``state`` mode since there's no spatial axis for it to weight.
+  """
+  if isinstance(raw_obs, Observation):
+    if focus_mask is not None and raw_obs.focus_mask is None:
+      return Observation.from_buffer_value(raw_obs, raw_obs.mode, focus_mask=np.asarray(focus_mask, dtype=np.float32))
+    return raw_obs
+  fm = None if focus_mask is None else np.asarray(focus_mask, dtype=np.float32)
+  if isinstance(raw_obs, dict):
+    img = np.asarray(raw_obs["image"])
+    pro = np.asarray(raw_obs["proprio"]).astype(np.float32, copy=False)
+    return Observation.image_proprio(img, pro, focus_mask=fm)
+  arr = np.asarray(raw_obs)
+  if arr.ndim == 4:
+    return Observation.image_only(arr, focus_mask=fm)
+  return Observation.state_vector(arr)
 
 
 class ReplayBuffer:
@@ -60,7 +90,7 @@ class ReplayBuffer:
     self._total_steps: int         = 0
     self._rng                      = np.random.default_rng(seed)
 
-    self._sim_processor       = processor if processor is not None else StateVectorProcessor()
+    self._sim_processor       = processor if processor is not None else EpisodeProcessor("state")
     self._default_num_workers = default_num_workers
 
   @classmethod
@@ -117,35 +147,21 @@ class ReplayBuffer:
       if col not in si:
         raise ValueError(f"step_info missing required column: {col!r}")
 
-    raw_obs = episode["obs"]
-    action  = np.asarray(episode["action"], dtype=np.float32)
-    reward  = np.asarray(episode["reward"], dtype=np.float32)
-    done    = np.asarray(episode["done"], dtype=bool)
+    raw_obs    = episode["obs"]
+    focus_mask = episode.get("focus_mask")
+    action     = np.asarray(episode["action"], dtype=np.float32)
+    reward     = np.asarray(episode["reward"], dtype=np.float32)
+    done       = np.asarray(episode["done"], dtype=bool)
+    T          = action.shape[0]
 
-    T = action.shape[0]
-    obs: dict[str, np.ndarray] | np.ndarray
-    if isinstance(raw_obs, dict):
-      # Composite obs (e.g. image_proprio): each leaf is (T+1, ...). Image
-      # leaves stay uint8; everything else is cast to float32.
-      obs = {}
-      for k, v in raw_obs.items():
-        arr = np.asarray(v)
-        if arr.dtype != np.uint8:
-          arr = arr.astype(np.float32, copy=False)
-        if arr.shape[0] != T + 1:
-          raise ValueError(
-            f"obs[{k!r}] must have T+1 entries; got {arr.shape[0]}, action={T}"
-          )
-        obs[k] = arr
-    else:
-      arr = np.asarray(raw_obs)
-      if arr.dtype != np.uint8:
-        arr = arr.astype(np.float32, copy=False)
-      if arr.shape[0] != T + 1:
-        raise ValueError(
-          f"obs must have T+1 entries; got obs={arr.shape[0]}, action={T}"
-        )
-      obs = arr
+    obs = _coerce_to_observation(raw_obs, focus_mask=focus_mask)
+    leading = obs.leading_shape
+    if leading[0] != T + 1:
+      raise ValueError(f"obs must have T+1 entries; got {leading[0]}, action={T}")
+    if obs.focus_mask is not None and obs.focus_mask.shape[0] != T + 1:
+      raise ValueError(
+        f"focus_mask must have T+1 entries; got {obs.focus_mask.shape[0]}, action={T}"
+      )
 
     if reward.shape != (T,):
       raise ValueError(f"reward must have shape ({T},); got {reward.shape}")
@@ -219,25 +235,17 @@ class ReplayBuffer:
     probs       = weights_arr / weights_arr.sum()
     ep_indices  = self._rng.choice(len(eligible), size=batch_size, p=probs)
 
-    is_dict_obs = isinstance(eligible[0][0]["obs"], dict)
-    obs_batch: list = [] if not is_dict_obs else None  # type: ignore[assignment]
-    obs_batch_dict: dict[str, list] | None = (
-      {k: [] for k in eligible[0][0]["obs"].keys()} if is_dict_obs else None
-    )
-    action_batch                = []
-    reward_batch                = []
-    done_batch                  = []
-    aux_batch: list[np.ndarray] = []
+    obs_slices: list[Observation] = []
+    action_batch                  = []
+    reward_batch                  = []
+    done_batch                    = []
+    aux_batch: list[np.ndarray]   = []
 
     for idx in ep_indices:
       ep, valid_starts = eligible[idx]
       start            = int(self._rng.integers(0, valid_starts))
       end              = start + seq_len
-      if obs_batch_dict is not None:
-        for k, lst in obs_batch_dict.items():
-          lst.append(ep["obs"][k][start:end])
-      else:
-        obs_batch.append(ep["obs"][start:end])  # type: ignore[union-attr]
+      obs_slices.append(ep["obs"][start:end])
       action_batch.append(ep["action"][start:end])
       reward_batch.append(self._reward_slice(ep, start, end))
       done_batch.append(ep["done"][start:end])
@@ -246,22 +254,23 @@ class ReplayBuffer:
         [si["object_xy"][start:end], si["ee_pos"][start:end]], axis=-1,
       ))
 
-    # Return numpy arrays — backends lift them via their ``coerce`` method
-    # (see WorldModel.encode and rollout()'s coerce hook). Keeping the buffer
-    # backend-agnostic lets the same buffer feed mlx or torch trainers.
-    obs_out: dict | np.ndarray
-    if obs_batch_dict is not None:
-      obs_out = {k: np.stack(v, axis=0) for k, v in obs_batch_dict.items()}
-    else:
-      obs_out = np.stack(obs_batch, axis=0)
+    # The buffer's wire format keeps obs as a plain ndarray or dict so
+    # backends lift them via their ``coerce`` method (see WorldModel.encode
+    # and rollout()'s coerce hook). Internally we stack via Observation so
+    # the dict-vs-array branching lives in one place. ``focus_mask`` rides
+    # in a sibling key — present only when the stored episodes have it.
+    obs_batched = Observation.stack(obs_slices, axis=0)
 
-    return {
-      "obs": obs_out,
+    batch: dict[str, Any] = {
+      "obs": obs_batched.to_buffer_value(),
       "action": np.stack(action_batch, axis=0),
       "reward": np.stack(reward_batch, axis=0),
       "done": np.stack(done_batch, axis=0),
       "aux_target": np.stack(aux_batch, axis=0).astype(np.float32),
     }
+    if obs_batched.focus_mask is not None:
+      batch["focus_mask"] = obs_batched.focus_mask
+    return batch
 
   def _reward_slice(self, ep: Episode, start: int, end: int) -> np.ndarray:
     """Return ``reward[start:end]`` recomputed via ``self.reward_fn`` if possible.
@@ -321,7 +330,7 @@ class ReplayBuffer:
 
     ``processor`` converts each raw sim episode into the buffer's
     ``(obs, action, reward, done)`` schema. Defaults to
-    ``StateVectorProcessor`` (low-dim state obs). Returns the number
+    ``EpisodeProcessor("state")`` (low-dim state obs). Returns the number
     of episodes successfully inserted (short episodes that fail the
     ``min_episode_len`` check are skipped, like ``add_episode``).
 

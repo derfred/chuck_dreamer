@@ -205,7 +205,8 @@ def test_save_and_load_round_trip(tmp_path):
 
   # Every episode is byte-identical.
   for orig, new in zip(buf._episodes, restored._episodes):
-    for key in ("obs", "action", "reward", "done"):
+    np.testing.assert_array_equal(orig["obs"].state, new["obs"].state)
+    for key in ("action", "reward", "done"):
       np.testing.assert_array_equal(orig[key], new[key])
     for col in ("object_xy", "ee_pos"):
       np.testing.assert_array_equal(orig["step_info"][col], new["step_info"][col])
@@ -315,10 +316,11 @@ def test_dict_obs_round_trips_through_buffer():
   buf.add_episode(_make_image_proprio_episode(episode_id=0, length=20))
 
   ep = buf._episodes[0]
-  assert isinstance(ep["obs"], dict)
-  assert ep["obs"]["image"].dtype == np.uint8
-  assert ep["obs"]["image"].shape == (21, 8, 8, 3)
-  assert ep["obs"]["proprio"].shape == (21, 13)
+  obs = ep["obs"]
+  assert obs.mode == "image_proprio"
+  assert obs.image.dtype == np.uint8
+  assert obs.image.shape == (21, 8, 8, 3)
+  assert obs.proprio.shape == (21, 13)
 
 
 def test_dict_obs_sample_yields_dict_batch_with_correct_shapes():
@@ -350,6 +352,46 @@ def test_dict_obs_sampled_sequences_stay_within_episode():
     within = seq - ep_ids * 1000
     diffs = np.diff(within)
     assert np.all(diffs == 1), f"non-contiguous within episode: {seq}"
+
+
+def test_focus_mask_round_trips_through_buffer():
+  # Episode carries a (T+1, H, W) focus mask; verify it survives validation,
+  # storage, slicing, and stacking into a (B, T, H, W) batch field.
+  T, H = 20, 8
+  ep = _make_image_proprio_episode(episode_id=0, length=T, image_size=H)
+  fm = np.zeros((T + 1, H, H), dtype=np.float32)
+  fm[:, :2, :2] = 1.0  # corner patch lit at every step
+  ep["focus_mask"] = fm
+
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  buf.add_episode(ep)
+
+  stored = buf._episodes[0]
+  assert stored["obs"].focus_mask.shape == (T + 1, H, H)
+
+  batch = buf.sample(batch_size=4, seq_len=10)
+  assert "focus_mask" in batch
+  assert batch["focus_mask"].shape == (4, 10, H, H)
+  # Patch survives slicing/stacking.
+  assert np.allclose(batch["focus_mask"][:, :, :2, :2], 1.0)
+
+
+def test_focus_mask_absent_when_episode_lacks_it():
+  # When no episode carries focus_mask, sample() should not include the key.
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  for ep_id in range(3):
+    buf.add_episode(_make_episode(ep_id, length=30))
+  batch = buf.sample(batch_size=4, seq_len=10)
+  assert "focus_mask" not in batch
+
+
+def test_focus_mask_length_mismatch_rejected():
+  T = 10
+  ep = _make_image_proprio_episode(episode_id=0, length=T)
+  ep["focus_mask"] = np.zeros((T, 8, 8), dtype=np.float32)  # WRONG: T not T+1
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  with pytest.raises(ValueError):
+    buf.add_episode(ep)
 
 
 def test_aux_target_shape():

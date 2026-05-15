@@ -15,6 +15,7 @@ from typing import Any
 
 import numpy as np
 
+from ..training.observation import Observation
 from .world_model import State, WorldModel, as_numpy, rollout
 
 
@@ -120,9 +121,14 @@ class CEMPolicy:
   def _batchify(self, obs):
     """Add a leading batch axis. The model.encode() call lifts numpy →
     its native tensor type via ``coerce``."""
-    if isinstance(obs, dict):
-      return {k: np.asarray(v)[None] for k, v in obs.items()}
-    return np.asarray(obs)[None]
+    mode = getattr(self.model, "obs_mode", None)
+    if mode is None:
+      # Backend lacks an obs_mode attribute — fall back to the legacy
+      # shape sniff so older test models still work.
+      if isinstance(obs, dict):
+        return {k: np.asarray(v)[None] for k, v in obs.items()}
+      return np.asarray(obs)[None]
+    return Observation.from_buffer_value(obs, mode).add_batch_axis().to_buffer_value()
 
   def _broadcast_state(self, state: State, n: int) -> State:
     """Repeat a batch-size-1 state to batch size ``n`` for CEM scoring.

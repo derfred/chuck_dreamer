@@ -30,6 +30,7 @@ from chuck_dreamer.dreamer.mlx_model import (  # noqa: E402
   feat,
 )
 from chuck_dreamer.config import derive_image_size  # noqa: E402
+from chuck_dreamer.training.observation import Observation  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -400,11 +401,35 @@ def test_dreamer_image_recon_loss_on_normalized_obs():
   # Obs arrive pre-normalized from :class:`ImageProcessor` (float in
   # ``[-0.5, 0.5]``). Use uint8-zero's normalized value (-0.5) as a
   # fixed target so the per-pixel error is 0.5.
-  recon = mx.zeros((2, 3, img, img, 3))
-  obs   = mx.full((2, 3, img, img, 3), -0.5)
-  loss = model._recon_loss(recon, obs)
+  recon  = Observation.image_only(mx.zeros((2, 3, img, img, 3)))
+  target = Observation.image_only(mx.full((2, 3, img, img, 3), -0.5))
+  loss = model._recon_loss(recon, target)
   expected = 0.25 * img * img * 3
   assert abs(float(loss.item()) - expected) < 1e-3
+
+
+def test_dreamer_image_recon_loss_with_focus_mask_applies_per_pixel_weighting():
+  # focus_mask is (B, T, H, W); should multiply the squared image error
+  # pixel-wise by ``1 + focus_scale * mask``. Sanity check:
+  #   * mask=0 everywhere ⇒ same loss as unmasked.
+  #   * mask=1 everywhere ⇒ loss scales by ``1 + focus_scale``.
+  cfg = load_config()
+  cfg.env.obs_mode = "image"
+  cfg.training.losses.focus_scale = 4.0
+  img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
+  model = build_model(cfg, obs_shape=(img, img, 3), action_dim=6)
+
+  recon  = Observation.image_only(mx.zeros((2, 3, img, img, 3)))
+  target = Observation.image_only(mx.full((2, 3, img, img, 3), -0.5))
+  base   = float(model._recon_loss(recon, target).item())
+
+  target_zero = Observation.image_only(target.image, focus_mask=mx.zeros((2, 3, img, img)))
+  target_one  = Observation.image_only(target.image, focus_mask=mx.ones((2, 3, img, img)))
+  loss_zero   = float(model._recon_loss(recon, target_zero).item())
+  loss_one    = float(model._recon_loss(recon, target_one).item())
+
+  assert abs(loss_zero - base) < 1e-3
+  assert abs(loss_one - (1 + 4.0) * base) < 1e-2
 
 
 def test_dreamer_image_proprio_recon_loss_sums_image_and_proprio():
@@ -412,12 +437,12 @@ def test_dreamer_image_proprio_recon_loss_sums_image_and_proprio():
   cfg.env.obs_mode = "image_proprio"
   img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
   model = build_model(cfg, obs_shape={"image": (img, img, 3), "proprio": (4,)}, action_dim=6)
-  recon = {"image":   mx.zeros((2, 3, img, img, 3)),
-           "proprio": mx.zeros((2, 3, 4))}
+  recon  = Observation.image_proprio(mx.zeros((2, 3, img, img, 3)),
+                                     mx.zeros((2, 3, 4)))
   # Image obs pre-normalized to -0.5 (uint8-zero post-normalize).
-  obs   = {"image":   mx.full((2, 3, img, img, 3), -0.5),
-           "proprio": mx.ones((2, 3, 4))}
-  loss = model._recon_loss(recon, obs)
+  target = Observation.image_proprio(mx.full((2, 3, img, img, 3), -0.5),
+                                     mx.ones((2, 3, 4)))
+  loss = model._recon_loss(recon, target)
   expected_img = 0.25 * img * img * 3
   expected_pro = 4.0  # ((0 - 1)**2).sum(-1) == 4 per (b,t), mean over (B,T) = 4.
   assert abs(float(loss.item()) - (expected_img + expected_pro)) < 1e-3
@@ -427,9 +452,9 @@ def test_dreamer_state_recon_loss_unchanged():
   cfg = load_config()
   cfg.env.obs_mode = "state"
   model = build_model(cfg, obs_shape=(5,), action_dim=6)
-  recon = mx.zeros((2, 3, 5))
-  obs   = mx.ones((2, 3, 5))
-  loss = model._recon_loss(recon, obs)
+  recon  = Observation.state_vector(mx.zeros((2, 3, 5)))
+  target = Observation.state_vector(mx.ones((2, 3, 5)))
+  loss = model._recon_loss(recon, target)
   assert abs(float(loss.item()) - 5.0) < 1e-6  # 5 dims, all (0-1)^2 = 1, summed.
 
 

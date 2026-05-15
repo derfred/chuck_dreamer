@@ -27,6 +27,7 @@ import numpy as np
 from ..dreamer.world_model import EvalRollout, eval_split_rollout
 from .episode_dataset import EpisodeDataset
 from .episode_processor import processor_for
+from .observation import Observation
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ class Evaluator:
   def __init__(self, config, model):
     self.config     = config
     self.model      = model
+    self._obs_mode  = str(config.env.obs_mode)
     self._processor = processor_for(config)
     eval_cfg        = config.eval
     self._dataset   = EpisodeDataset(eval_cfg.data_path, format=eval_cfg.data_format)
@@ -184,7 +186,7 @@ class Evaluator:
 
     Returns ``None`` if the episode is shorter than ``burn_in + 1`` steps.
     """
-    obs    = episode["obs"]
+    obs    = Observation.from_buffer_value(episode["obs"], self._obs_mode)  # type: ignore[arg-type]
     action = np.asarray(episode["action"], dtype=np.float32)
     T      = action.shape[0]
     horizon = T - burn_in
@@ -194,10 +196,10 @@ class Evaluator:
     # Align embeddings with actions: T entries of both. The window we
     # actually evaluate over is [0, T) — burn_in steps then horizon prior
     # steps.
-    obs_batched    = self._add_batch(obs, T)
+    obs_batched    = obs[:T].add_batch_axis()
     action_batched = action[None]  # (1, T, action_dim)
 
-    embeds = self.model.encode(obs_batched)
+    embeds = self.model.encode(obs_batched.to_buffer_value())
 
     rollout: EvalRollout = eval_split_rollout(
       self.model,
@@ -213,7 +215,7 @@ class Evaluator:
     recon_posterior = self._unbatch(rollout.posterior.obs_pred_numpy())
     recon_prior     = self._unbatch(rollout.prior.obs_pred_numpy())
 
-    target          = self._slice_obs(obs, burn_in, T)
+    target          = obs[burn_in:T].to_buffer_value()
     error_posterior = _recon_error(recon_posterior, target)
     error_prior     = _recon_error(recon_prior,     target)
 
@@ -243,9 +245,10 @@ class Evaluator:
     up on the same time axis — that's the segment where posterior vs
     prior actually diverge.
     """
-    obs = self._slice_obs(episode["obs"], burn_in, burn_in + result["error_prior"].shape[0])
+    obs = Observation.from_buffer_value(episode["obs"], self._obs_mode)  # type: ignore[arg-type]
+    hi  = burn_in + result["error_prior"].shape[0]
     return {
-      "obs":             obs,
+      "obs":             obs[burn_in:hi].to_buffer_value(),
       "recon_posterior": result["recon_posterior"],
       "recon_prior":     result["recon_prior"],
       "h_posterior":     result["h_posterior"],
@@ -253,24 +256,6 @@ class Evaluator:
       "h_prior":         result["h_prior"],
       "s_prior":         result["s_prior"],
     }
-
-  @staticmethod
-  def _add_batch(obs: Any, T: int) -> Any:
-    """Add a leading batch axis and slice to the first ``T`` steps.
-
-    ``obs`` from the processor has ``T+1`` entries; we drop the last to
-    align with the buffer's training-time convention (obs[t] paired with
-    action[t]).
-    """
-    if isinstance(obs, dict):
-      return {k: np.asarray(v[:T])[None] for k, v in obs.items()}
-    return np.asarray(obs[:T])[None]
-
-  @staticmethod
-  def _slice_obs(obs: Any, lo: int, hi: int) -> Any:
-    if isinstance(obs, dict):
-      return {k: np.asarray(v[lo:hi]) for k, v in obs.items()}
-    return np.asarray(obs[lo:hi])
 
   @staticmethod
   def _unbatch(x: Any) -> Any:

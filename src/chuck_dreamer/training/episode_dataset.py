@@ -86,6 +86,11 @@ def _load_hdf5_episode(path: str | Path) -> RawEpisode:
     else:
       raise KeyError(f"{path}: missing action dataset (joint_action or ee_action)")
 
+    if "segmentation" in f:
+      seg_grp = f["segmentation"]
+      for name in seg_grp.keys():
+        raw[f"segmentation_{name}"] = np.asarray(seg_grp[name][()], dtype=bool)
+
     if "metadata" in f:
       meta = f["metadata"]
       if "act_mode" in meta:
@@ -167,7 +172,52 @@ def _load_rerun_episode(path: str | Path) -> RawEpisode:
   raw["image"] = np.stack([img for _, img in image_rows], axis=0)
   raw["timestamp"] = np.asarray([t for _, t in time_rows], dtype=np.float32)
 
+  _load_rerun_segmentation(by_entity, raw)
+
   return raw
+
+
+def _ordered_seg_masks(chunk_dicts: list[dict]) -> np.ndarray:
+  """Flatten ``SegmentationImage`` chunks into a (T, H, W) bool array sorted by step."""
+  rows: list[tuple[int, np.ndarray]] = []
+  for d in chunk_dicts:
+    for s, buf, fmt in zip(
+      d["step"], d["SegmentationImage:buffer"], d["SegmentationImage:format"],
+    ):
+      f0 = fmt[0] if isinstance(fmt, list) else fmt
+      w, h = int(f0["width"]), int(f0["height"])
+      rows.append((int(s), np.asarray(buf, dtype=np.uint8).reshape(h, w).astype(bool)))
+  rows.sort(key=lambda x: x[0])
+  return np.stack([m for _, m in rows], axis=0)
+
+
+# Single-entity masks the writer emits alongside the per-piece clutter masks.
+# The ``/camera/seg/clutter`` union is intentionally excluded — it's reconstructable
+# from the per-piece masks and would be redundant in the round-tripped dict.
+_RERUN_SEG_SINGLE = ("target", "goal", "arm", "background")
+
+
+def _load_rerun_segmentation(by_entity: dict[str, list[dict]], raw: RawEpisode) -> None:
+  """Pull segmentation masks (if present) out of a rerun recording's entities.
+
+  Mirrors :class:`RerunEpisodeWriter`'s log layout: ``/camera/seg/{name}`` for
+  each named mask plus ``/camera/seg/clutter_{k}`` per clutter piece. Restacks
+  the per-piece clutter masks into ``segmentation_clutter`` with shape
+  ``(T, K, H, W)`` to match ``_stack_image_obs``.
+  """
+  for name in _RERUN_SEG_SINGLE:
+    entity = f"/camera/seg/{name}"
+    if entity in by_entity:
+      raw[f"segmentation_{name}"] = _ordered_seg_masks(by_entity[entity])
+
+  clutter_pieces: list[tuple[int, np.ndarray]] = []
+  for entity, chunks in by_entity.items():
+    if entity.startswith("/camera/seg/clutter_"):
+      k = int(entity.rsplit("_", 1)[1])
+      clutter_pieces.append((k, _ordered_seg_masks(chunks)))
+  if clutter_pieces:
+    clutter_pieces.sort(key=lambda kv: kv[0])
+    raw["segmentation_clutter"] = np.stack([m for _, m in clutter_pieces], axis=1)
 
 
 _FORMAT_SUFFIX = {"hdf5": ".hdf5", "rerun": ".rrd"}
