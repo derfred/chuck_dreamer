@@ -57,18 +57,13 @@ def _alias_overrides(aliases: dict) -> tuple[str, ...]:
   return tuple(f"{k}={v}" for k, v in aliases.items() if v is not None)
 
 
-@cli.command("generate-scenes")
-@click.option("--episodes", default=10, type=int, help="Number of episodes to collect")
-@click.option("--output", required=True, type=str, help="Output directory")
-@click.option("--seed", default=None, type=int, help="Random seed")
-@click.option("--format", "fmt", default="rerun", type=click.Choice(["hdf5", "rerun"]),
-              help="Episode output format (hdf5 or rerun)")
-@override_option
-@click.pass_context
-def generate_scenes(ctx, episodes, output, seed, fmt, overrides):
-  """Generate pushing scenes using the scripted heuristic policy."""
+def _collect_one_episode(cfg, output, fmt, ep_idx, episode_seed):
+  """Worker entry point: build env + writer, roll one episode, write it.
+
+  Returns ``(ep_idx, outcome, crashed_on_reset)``. Runs in a child process,
+  so it imports the heavy deps lazily and owns its own MuJoCo handles.
+  """
   from dataclasses import asdict
-  from tqdm import tqdm
 
   from chuck_dreamer.sim import (
     EpisodeCollector,
@@ -77,39 +72,88 @@ def generate_scenes(ctx, episodes, output, seed, fmt, overrides):
     ScriptedPolicy,
   )
 
-  cfg = _resolve_cfg(ctx, _alias_overrides({"seed": seed}) + overrides)
+  worker_cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist([f"seed={episode_seed}"]))
 
-  click.echo(f"Collecting {episodes} episodes → {output}  (difficulty={cfg.env.difficulty}, format={fmt}, seed={cfg.seed})")
-  outcome_counts = {}
-
-  env    = PushingEnv(cfg)
+  env    = PushingEnv(worker_cfg)
   policy = ScriptedPolicy(auto_advance_from_ready=True)
   collector = EpisodeCollector(env, policy)
   writer = EpisodeWriter(output, format=fmt)
-  for ep_idx in tqdm(range(episodes), desc="Collecting"):
+  try:
     scene = collector.reset()
-    if cfg.env.max_steps is not None:
-      scene.max_steps = int(cfg.env.max_steps)
+    if worker_cfg.env.max_steps is not None:
+      scene.max_steps = int(worker_cfg.env.max_steps)
     episode_data, outcome = collector.run()
-    outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
 
     if episode_data is None:
-      click.echo(f"[ep {ep_idx}] crashed on reset, skipping")
-      continue
+      return ep_idx, outcome, True
 
     writer.write_episode(
       episode_data,
       metadata={
         "config":  asdict(scene),
-        "seed":    cfg.seed + ep_idx,
+        "seed":    episode_seed,
         "source":  "sim",
         "outcome": outcome,
         "goal_xy": scene.goal_pos,
       },
       name_suffix=f"{ep_idx:05d}",
     )
+    return ep_idx, outcome, False
+  finally:
+    env.close()
 
-  env.close()
+
+@cli.command("generate-scenes")
+@click.option("--episodes", default=10, type=int, help="Number of episodes to collect")
+@click.option("--output", required=True, type=str, help="Output directory")
+@click.option("--seed", default=None, type=int, help="Random seed")
+@click.option("--format", "fmt", default="rerun", type=click.Choice(["hdf5", "rerun"]),
+              help="Episode output format (hdf5 or rerun)")
+@click.option("--workers", default=None, type=int,
+              help="Number of parallel worker processes. Default: one per CPU. "
+                   "Pass 1 to force the original single-process path; >1 fans episodes "
+                   "out over a ProcessPoolExecutor, each worker building its own "
+                   "PushingEnv. Each episode's seed is cfg.seed + ep_idx, so output is "
+                   "deterministic across worker counts.")
+@override_option
+@click.pass_context
+def generate_scenes(ctx, episodes, output, seed, fmt, workers, overrides):
+  """Generate pushing scenes using the scripted heuristic policy."""
+  import os
+
+  cfg = _resolve_cfg(ctx, _alias_overrides({"seed": seed}) + overrides)
+
+  if workers is None:
+    workers = os.cpu_count() or 1
+
+  click.echo(f"Collecting {episodes} episodes → {output}  (difficulty={cfg.env.difficulty}, "
+             f"format={fmt}, seed={cfg.seed}, workers={workers})")
+  outcome_counts: dict[str, int] = {}
+
+  from tqdm import tqdm
+
+  if workers <= 1:
+    for ep_idx in tqdm(range(episodes), desc="Collecting"):
+      _, outcome, crashed_on_reset = _collect_one_episode(
+        cfg, output, fmt, ep_idx, cfg.seed + ep_idx,
+      )
+      outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+      if crashed_on_reset:
+        click.echo(f"[ep {ep_idx}] crashed on reset, skipping")
+  else:
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+      futures = [
+        pool.submit(_collect_one_episode, cfg, output, fmt, ep_idx, cfg.seed + ep_idx)
+        for ep_idx in range(episodes)
+      ]
+      for fut in tqdm(as_completed(futures), total=episodes, desc="Collecting"):
+        ep_idx, outcome, crashed_on_reset = fut.result()
+        outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+        if crashed_on_reset:
+          click.echo(f"[ep {ep_idx}] crashed on reset, skipping")
+
   click.echo(f"Done. Outcomes: {outcome_counts}")
 
 
