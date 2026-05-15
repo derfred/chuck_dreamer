@@ -1,4 +1,4 @@
-"""Tests for loading sim-writer episodes into the replay buffer."""
+"""Tests for loading sim-writer episodes via the EpisodeDataset abstraction."""
 
 from __future__ import annotations
 
@@ -12,11 +12,7 @@ from chuck_dreamer.config import (
   derive_image_size,
   load_config,
 )
-from chuck_dreamer.training.episode_loader import (
-  iter_episodes,
-  load_hdf5_episode,
-  load_rerun_episode,
-)
+from chuck_dreamer.training.episode_dataset import Episode, EpisodeDataset
 from chuck_dreamer.training.episode_processor import (
   ImageProcessor,
   ImageProprioProcessor,
@@ -149,19 +145,63 @@ def test_image_processor_returns_normalized_float32():
 
 
 # ---------------------------------------------------------------------------
-# HDF5 round-trip
+# Episode.from_file — HDF5 / Rerun round-trip
 # ---------------------------------------------------------------------------
 
 
-def test_load_hdf5_episode_round_trip(tmp_path):
+def test_episode_from_file_hdf5_round_trip(tmp_path):
   _write_sim_episode(tmp_path, "hdf5", T=20)
-  raw = load_hdf5_episode(tmp_path / "episode-00000.hdf5")
+  ep = Episode.from_file(tmp_path / "episode-00000.hdf5")
 
-  assert raw["image"].shape == (20, 16, 16, 3)
-  assert raw["joint_action"].shape == (20, 3)
-  assert raw["reward"].shape == (20,)
-  assert raw["act_mode"] == "joint"
-  np.testing.assert_allclose(raw["joint_qpos"][7], [0.7] * 6, rtol=0, atol=1e-6)
+  assert ep.format == "hdf5"
+  assert ep.stem == "episode-00000"
+  assert ep.num_steps == 20
+  assert ep.data["image"].shape == (20, 16, 16, 3)
+  assert ep.data["joint_action"].shape == (20, 3)
+  assert ep.data["reward"].shape == (20,)
+  # act_mode is surfaced on metadata AND remains in data (non-destructive).
+  assert ep.metadata["act_mode"] == "joint"
+  assert ep.data["act_mode"] == "joint"
+  np.testing.assert_allclose(ep.data["joint_qpos"][7], [0.7] * 6, rtol=0, atol=1e-6)
+
+
+def test_episode_from_file_rerun_round_trip(tmp_path):
+  _write_sim_episode(tmp_path, "rerun", T=20)
+  ep = Episode.from_file(tmp_path / "episode-00000.rrd")
+
+  assert ep.format == "rerun"
+  assert ep.num_steps == 20
+  assert ep.data["image"].shape == (20, 16, 16, 3)
+  assert ep.data["joint_action"].shape == (20, 3)
+  assert ep.data["reward"].shape == (20,)
+  np.testing.assert_allclose(ep.data["joint_qpos"][7], [0.7] * 6, rtol=0, atol=1e-5)
+  assert float(ep.data["image"][3].mean()) == 3.0
+
+
+def test_episode_from_file_infers_format_from_suffix(tmp_path):
+  _write_sim_episode(tmp_path, "hdf5", T=10)
+  ep = Episode.from_file(tmp_path / "episode-00000.hdf5")
+  assert ep.format == "hdf5"
+
+
+def test_episode_from_file_explicit_format_overrides_suffix(tmp_path):
+  _write_sim_episode(tmp_path, "hdf5", T=10)
+  # Explicit format wins even if it disagrees with the suffix — the
+  # extension check is just a sniff for convenience.
+  ep = Episode.from_file(tmp_path / "episode-00000.hdf5", format="hdf5")
+  assert ep.format == "hdf5"
+
+
+def test_episode_from_file_rejects_unknown_suffix(tmp_path):
+  bogus = tmp_path / "episode-00000.parquet"
+  bogus.write_text("")
+  with pytest.raises(ValueError):
+    Episode.from_file(bogus)
+
+
+# ---------------------------------------------------------------------------
+# Replay-buffer ingestion — HDF5
+# ---------------------------------------------------------------------------
 
 
 def test_replay_buffer_loads_hdf5_directory(tmp_path):
@@ -185,19 +225,8 @@ def test_replay_buffer_loads_hdf5_directory(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Rerun round-trip
+# Replay-buffer ingestion — Rerun
 # ---------------------------------------------------------------------------
-
-
-def test_load_rerun_episode_round_trip(tmp_path):
-  _write_sim_episode(tmp_path, "rerun", T=20)
-  raw = load_rerun_episode(tmp_path / "episode-00000.rrd")
-
-  assert raw["image"].shape == (20, 16, 16, 3)
-  assert raw["joint_action"].shape == (20, 3)
-  assert raw["reward"].shape == (20,)
-  np.testing.assert_allclose(raw["joint_qpos"][7], [0.7] * 6, rtol=0, atol=1e-5)
-  assert float(raw["image"][3].mean()) == 3.0
 
 
 def test_replay_buffer_loads_rerun_directory(tmp_path):
@@ -219,22 +248,83 @@ def test_replay_buffer_loads_rerun_directory(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Directory iteration / error paths
+# EpisodeDataset — discovery, load, stream, error paths
 # ---------------------------------------------------------------------------
 
 
-def test_iter_episodes_rejects_unknown_format(tmp_path):
+def test_dataset_rejects_unknown_format(tmp_path):
   with pytest.raises(ValueError):
-    list(iter_episodes(tmp_path, format="parquet"))
+    EpisodeDataset(tmp_path, format="parquet")
 
 
-def test_iter_episodes_yields_nothing_for_empty_dir(tmp_path):
-  assert list(iter_episodes(tmp_path, format="hdf5")) == []
-  assert list(iter_episodes(tmp_path, format="rerun")) == []
+def test_dataset_empty_dir_has_zero_length(tmp_path):
+  for fmt in ("hdf5", "rerun"):
+    ds = EpisodeDataset(tmp_path, format=fmt)
+    assert len(ds) == 0
+    assert ds.paths == []
+    assert not ds.loaded
+    # load() on an empty dir is a no-crash no-op.
+    ds.load()
+    assert len(ds) == 0
+    assert ds.loaded
 
 
-def test_load_sim_episodes_skips_too_short_episodes(tmp_path):
-  # T=3 raw steps → 2 actions after drop-last. min_episode_len=5 filters it.
+def test_dataset_missing_dir_has_zero_length(tmp_path):
+  ds = EpisodeDataset(tmp_path / "does-not-exist", format="hdf5")
+  assert len(ds) == 0
+  assert list(ds.stream()) == []
+
+
+def test_dataset_discovery_does_not_load(tmp_path):
+  for idx in range(3):
+    _write_sim_episode(tmp_path, "hdf5", T=10, idx=idx)
+  ds = EpisodeDataset(tmp_path, format="hdf5")
+  assert len(ds) == 3
+  assert not ds.loaded
+  assert [p.name for p in ds.paths] == [f"episode-{i:05d}.hdf5" for i in range(3)]
+
+
+def test_dataset_load_caches_after_first_call(tmp_path):
+  _write_sim_episode(tmp_path, "hdf5", T=10)
+  ds = EpisodeDataset(tmp_path, format="hdf5")
+  ds.load()
+  loaded_once = list(ds)
+  ds.load()  # idempotent: must not reload
+  loaded_twice = list(ds)
+  assert loaded_once[0] is loaded_twice[0]
+
+
+def test_dataset_getitem_by_index_and_stem(tmp_path):
+  for idx in range(3):
+    _write_sim_episode(tmp_path, "hdf5", T=10, idx=idx)
+  ds = EpisodeDataset(tmp_path, format="hdf5").load()
+
+  assert ds[0].stem == "episode-00000"
+  assert ds["episode-00002"].stem == "episode-00002"
+  with pytest.raises(KeyError):
+    ds["episode-99999"]
+
+
+def test_dataset_iter_requires_load(tmp_path):
+  _write_sim_episode(tmp_path, "hdf5", T=10)
+  ds = EpisodeDataset(tmp_path, format="hdf5")
+  with pytest.raises(RuntimeError):
+    iter(ds)
+  with pytest.raises(RuntimeError):
+    ds[0]
+
+
+def test_dataset_stream_does_not_populate_loaded(tmp_path):
+  _write_sim_episode(tmp_path, "hdf5", T=10)
+  ds = EpisodeDataset(tmp_path, format="hdf5")
+  eps = list(ds.stream())
+  assert len(eps) == 1
+  assert not ds.loaded   # streaming is non-retentive
+
+
+def test_dataset_load_skips_too_short_episodes_via_buffer(tmp_path):
+  # T=3 raw steps → 2 actions after drop-last. min_episode_len=5 filters
+  # it out at the buffer side; the dataset still yields the episode.
   writer = EpisodeWriter(str(tmp_path), format="hdf5")
   writer.write_episode(
     _make_raw_episode(3),
@@ -252,7 +342,7 @@ def test_load_sim_episodes_skips_too_short_episodes(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_iter_episodes_progress_callback_sees_every_file(tmp_path):
+def test_dataset_stream_progress_callback_sees_every_file(tmp_path):
   for idx in range(3):
     _write_sim_episode(tmp_path, "hdf5", T=10, idx=idx)
 
@@ -261,7 +351,7 @@ def test_iter_episodes_progress_callback_sees_every_file(tmp_path):
   def cb(i, total, path):
     calls.append((i, total, path.name))
 
-  list(iter_episodes(tmp_path, format="hdf5", progress=cb))
+  list(EpisodeDataset(tmp_path, format="hdf5").stream(progress=cb))
 
   assert [i for i, _, _ in calls] == [1, 2, 3]
   assert all(total == 3 for _, total, _ in calls)
@@ -272,9 +362,9 @@ def test_iter_episodes_progress_callback_sees_every_file(tmp_path):
   ]
 
 
-def test_iter_episodes_progress_callback_is_not_called_for_empty_dir(tmp_path):
+def test_dataset_stream_progress_callback_is_not_called_for_empty_dir(tmp_path):
   calls: list[tuple[int, int, Path]] = []
-  list(iter_episodes(tmp_path, format="hdf5", progress=lambda *a: calls.append(a)))
+  list(EpisodeDataset(tmp_path, format="hdf5").stream(progress=lambda *a: calls.append(a)))
   assert calls == []
 
 
@@ -292,23 +382,23 @@ def test_load_sim_episodes_forwards_progress(tmp_path):
   assert seen == [1, 2]
 
 
-def test_iter_episodes_progress_true_does_not_crash(tmp_path, capsys):
+def test_dataset_stream_progress_true_does_not_crash(tmp_path, capsys):
   # progress=True should work whether or not tqdm is installed: we only
   # assert that no exception escapes and something gets reported.
   _write_sim_episode(tmp_path, "hdf5", T=10)
-  eps = list(iter_episodes(tmp_path, format="hdf5", progress=True))
+  eps = list(EpisodeDataset(tmp_path, format="hdf5").stream(progress=True))
   assert len(eps) == 1
 
 
-def test_iter_episodes_parallel_preserves_order_and_progress(tmp_path):
+def test_dataset_stream_parallel_preserves_order_and_progress(tmp_path):
   # Parallel loading must yield in submission order and call the
   # progress callback once per file with monotonically increasing i.
   for idx in range(5):
     _write_sim_episode(tmp_path, "hdf5", T=10, idx=idx)
 
   calls: list[tuple[int, int, str]] = []
-  eps = list(iter_episodes(
-    tmp_path, format="hdf5", num_workers=3,
+  eps = list(EpisodeDataset(tmp_path, format="hdf5").stream(
+    num_workers=3,
     progress=lambda i, total, path: calls.append((i, total, path.name)),
   ))
 

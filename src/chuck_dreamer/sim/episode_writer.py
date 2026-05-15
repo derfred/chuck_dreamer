@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 SUPPORTED_FORMATS = ("hdf5", "rerun")
 
 # Filename prefixes — different kinds of episodes live alongside one
-# another in the same dump dir, so ``iter_episodes`` can find sim
+# another in the same dump dir, so :class:`EpisodeDataset` can find sim
 # episodes without picking up eval dumps and vice versa.
 EPISODE_FILENAME_PREFIX      = "episode"
 EVAL_EPISODE_FILENAME_PREFIX = "eval"

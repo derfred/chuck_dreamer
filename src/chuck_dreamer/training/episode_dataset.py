@@ -1,12 +1,12 @@
 """Typed episode handle + in-memory dataset over a directory of episodes.
 
-Built on top of the format-specific readers in :mod:`.episode_loader`.
 Two layers:
 
   * :class:`Episode` — one episode's arrays plus its source path and
     optional sidecar metadata (``act_mode``, ``goal_xy``, …). Replaces
-    the bare ``RawEpisode`` dict at call sites that want to thread the
-    source identity through to logs / dumps.
+    the bare raw-dict episodes that used to flow around the codebase.
+    Use :meth:`Episode.from_file` to round-trip a single file (handy in
+    one-off scripts and importer tests).
   * :class:`EpisodeDataset` — the set of episodes living at a directory.
     Encapsulates two access modes: ``stream()`` for one-pass ingestion
     that never holds the full set in RAM (replay-buffer warmup), and
@@ -16,6 +16,10 @@ Two layers:
 Discovery (``len(ds)`` / ``ds.paths``) is cheap and works without
 loading. ``load()`` is idempotent so callers can call it from a
 warmup hook without checking ``loaded`` first.
+
+This module owns the format-specific readers. The two reader
+implementations (HDF5 / Rerun) are private; round-trip a single file
+through :meth:`Episode.from_file`.
 """
 
 from __future__ import annotations
@@ -24,17 +28,21 @@ from collections import deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, Union
 
+import h5py  # type: ignore[import-untyped]
 import numpy as np
 
-from .episode_loader import (
-  Progress,
-  RawEpisode,
-  _resolve_progress,
-  load_hdf5_episode,
-  load_rerun_episode,
-)
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+
+ProgressCallback = Callable[[int, int, Path], None]
+Progress = Union[bool, ProgressCallback]
+
+RawEpisode = dict[str, Any]
 
 
 SUPPORTED_FORMATS = ("hdf5", "rerun")
@@ -47,8 +55,178 @@ _METADATA_KEYS: tuple[str, ...] = ("act_mode", "goal_xy")
 
 
 # ---------------------------------------------------------------------------
+# Format-specific readers (private — go through Episode / EpisodeDataset)
+# ---------------------------------------------------------------------------
+
+
+# Maps RawEpisode key -> HDF5 dataset name. Action datasets are resolved
+# dynamically since exactly one of joint_action / ee_action is present.
+_HDF5_DATASET = {
+  "image": "images",
+  "reward": "rewards",
+  "timestamp": "timestamps",
+  "joint_qpos": "joint_qpos",
+  "ee_pos": "ee_pos",
+  "ee_quat": "ee_quat",
+  "object_xy": "object_xy",
+}
+
+
+def _load_hdf5_episode(path: str | Path) -> RawEpisode:
+  """Read one HDF5 episode written by ``HDF5EpisodeWriter``."""
+  raw: RawEpisode = {}
+  with h5py.File(path, "r") as f:
+    for key, dataset in _HDF5_DATASET.items():
+      raw[key] = np.asarray(f[dataset][()])
+
+    if "joint_action" in f:
+      raw["joint_action"] = np.asarray(f["joint_action"][()])
+    elif "ee_action" in f:
+      raw["ee_action"] = np.asarray(f["ee_action"][()])
+    else:
+      raise KeyError(f"{path}: missing action dataset (joint_action or ee_action)")
+
+    if "metadata" in f:
+      meta = f["metadata"]
+      if "act_mode" in meta:
+        am = meta["act_mode"][()]
+        raw["act_mode"] = am.decode("utf-8") if isinstance(am, bytes) else str(am)
+      if "goal_xy" in meta:
+        raw["goal_xy"] = np.asarray(meta["goal_xy"][()], dtype=np.float32)
+  return raw
+
+
+def _collect_chunks_by_entity(recording) -> dict[str, list[dict]]:
+  """Group a recording's chunks by entity path, skipping metadata."""
+  by_entity: dict[str, list[dict]] = {}
+  static: dict[str, dict] = {}
+  for chunk in recording.chunks():
+    entity = str(chunk.entity_path)
+    if chunk.is_static:
+      static[entity] = chunk.to_record_batch().to_pydict()
+      continue
+    if entity.startswith("/__"):
+      continue
+    by_entity.setdefault(entity, []).append(chunk.to_record_batch().to_pydict())
+  by_entity["__static__"] = [static]
+  return by_entity
+
+
+def _ordered_scalar_column(chunk_dicts: list[dict], step_key: str = "step") -> np.ndarray:
+  """Flatten per-chunk scalar rows into a single (N, d) array sorted by step."""
+  rows: list[tuple[int, np.ndarray]] = []
+  for d in chunk_dicts:
+    scalars = d["Scalars:scalars"]
+    steps = d[step_key]
+    for s, v in zip(steps, scalars):
+      rows.append((int(s), np.asarray(v, dtype=np.float32)))
+  rows.sort(key=lambda x: x[0])
+  return np.stack([v for _, v in rows], axis=0)
+
+
+def _load_rerun_episode(path: str | Path) -> RawEpisode:
+  """Read one Rerun ``.rrd`` episode written by ``RerunEpisodeWriter``."""
+  from rerun.recording import load_recording
+
+  rec = load_recording(str(path))
+  by_entity = _collect_chunks_by_entity(rec)
+
+  def _scalars(entity: str) -> np.ndarray:
+    if entity not in by_entity:
+      raise KeyError(f"entity {entity!r} not found in {path}")
+    return _ordered_scalar_column(by_entity[entity])
+
+  raw: RawEpisode = {}
+  if "/joint_action" in by_entity:
+    raw["joint_action"] = _scalars("/joint_action")
+  elif "/ee_action" in by_entity:
+    raw["ee_action"] = _scalars("/ee_action")
+  else:
+    raise KeyError(f"{path}: missing action entity (/joint_action or /ee_action)")
+
+  raw["reward"] = _scalars("/reward").reshape(-1)
+  raw["joint_qpos"] = _scalars("/joint_qpos")
+  raw["ee_pos"] = _scalars("/ee_pos")
+  raw["ee_quat"] = _scalars("/ee_quat")
+  raw["object_xy"] = _scalars("/object_xy")
+
+  image_rows: list[tuple[int, np.ndarray]] = []
+  time_rows: list[tuple[int, float]] = []
+  for d in by_entity["/camera/image"]:
+    for s, buf, fmt, t in zip(
+      d["step"], d["Image:buffer"], d["Image:format"], d["time"]
+    ):
+      f0 = fmt[0] if isinstance(fmt, list) else fmt
+      w, h = int(f0["width"]), int(f0["height"])
+      image_rows.append((int(s), np.asarray(buf, dtype=np.uint8).reshape(h, w, 3)))
+      time_rows.append(
+        (int(s), t.total_seconds() if hasattr(t, "total_seconds") else float(t))
+      )
+  image_rows.sort(key=lambda x: x[0])
+  time_rows.sort(key=lambda x: x[0])
+  raw["image"] = np.stack([img for _, img in image_rows], axis=0)
+  raw["timestamp"] = np.asarray([t for _, t in time_rows], dtype=np.float32)
+
+  return raw
+
+
+_FORMAT_SUFFIX = {"hdf5": ".hdf5", "rerun": ".rrd"}
+_FORMAT_LOADER = {"hdf5": _load_hdf5_episode, "rerun": _load_rerun_episode}
+_FORMAT_POOL: dict[str, type[ThreadPoolExecutor] | type[ProcessPoolExecutor]] = {
+  # h5py reads release the GIL → threads suffice. The rerun reader runs
+  # heavy per-step Python parsing → only a process pool actually
+  # parallelizes it.
+  "hdf5":  ThreadPoolExecutor,
+  "rerun": ProcessPoolExecutor,
+}
+
+
+# ---------------------------------------------------------------------------
+# Progress helper (shared by load() and stream())
+# ---------------------------------------------------------------------------
+
+
+def _resolve_progress(progress: Progress) -> ProgressCallback | None:
+  """Turn a ``Progress`` value into a per-file callback (or None)."""
+  if progress is False:
+    return None
+  if callable(progress):
+    return progress
+
+  try:
+    from tqdm import tqdm  # type: ignore[import-not-found]
+  except ImportError:
+    def _print_cb(i: int, total: int, path: Path) -> None:
+      print(f"[{i}/{total}] {path.name}")
+
+    return _print_cb
+
+  bar: dict[str, Any] = {"tqdm": None}
+
+  def _tqdm_cb(i: int, total: int, path: Path) -> None:
+    if bar["tqdm"] is None:
+      bar["tqdm"] = tqdm(total=total, unit="ep", desc="episodes")
+    bar["tqdm"].set_postfix_str(path.name, refresh=False)
+    bar["tqdm"].update(1)
+    if i == total:
+      bar["tqdm"].close()
+
+  return _tqdm_cb
+
+
+# ---------------------------------------------------------------------------
 # Episode
 # ---------------------------------------------------------------------------
+
+
+def _extract_metadata(raw: RawEpisode) -> dict[str, Any]:
+  """Copy whole-episode sidecar fields out of a raw dict into a metadata dict.
+
+  Non-destructive: the values stay in ``raw`` so processors that look
+  them up there keep working. The metadata dict is for callers that
+  want to read episode-level fields without sniffing ``data``.
+  """
+  return {k: raw[k] for k in _METADATA_KEYS if k in raw}
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +245,21 @@ class Episode:
   data: RawEpisode
   metadata: dict[str, Any] = field(default_factory=dict)
 
+  @classmethod
+  def from_file(cls, path: str | Path, *, format: str | None = None) -> "Episode":
+    """Round-trip a single episode file into an :class:`Episode`.
+
+    ``format`` is inferred from the file extension when omitted
+    (``.hdf5`` → ``"hdf5"``, ``.rrd`` → ``"rerun"``); pass it explicitly
+    when the extension doesn't match the format you want to read.
+    """
+    p = Path(path)
+    fmt = format or _format_from_path(p)
+    if fmt not in SUPPORTED_FORMATS:
+      raise ValueError(f"unsupported format {fmt!r}; use one of {SUPPORTED_FORMATS}")
+    raw = _FORMAT_LOADER[fmt](p)
+    return cls(path=p, format=fmt, data=raw, metadata=_extract_metadata(raw))
+
   @property
   def stem(self) -> str:
     return self.path.stem
@@ -76,7 +269,6 @@ class Episode:
     """Number of recorded steps (length of the action / reward axis)."""
     if "reward" in self.data:
       return int(np.asarray(self.data["reward"]).shape[0])
-    # Fall back to action — every episode has one or the other.
     for key in ("joint_action", "ee_action"):
       if key in self.data:
         return int(np.asarray(self.data[key]).shape[0])
@@ -89,36 +281,26 @@ class Episode:
     return self.data.get(key, default)
 
 
+def _format_from_path(path: Path) -> str:
+  suffix = path.suffix.lower()
+  for fmt, ext in _FORMAT_SUFFIX.items():
+    if suffix == ext:
+      return fmt
+  raise ValueError(
+    f"cannot infer episode format from suffix {suffix!r} on {path.name}; "
+    f"pass format= explicitly"
+  )
+
+
 # ---------------------------------------------------------------------------
 # EpisodeDataset
 # ---------------------------------------------------------------------------
 
 
-_FORMAT_SUFFIX = {"hdf5": ".hdf5", "rerun": ".rrd"}
-_FORMAT_LOADER = {"hdf5": load_hdf5_episode, "rerun": load_rerun_episode}
-_FORMAT_POOL: dict[str, type[ThreadPoolExecutor] | type[ProcessPoolExecutor]] = {
-  # h5py reads release the GIL → threads suffice. The rerun reader runs
-  # heavy per-step Python parsing → only a process pool actually
-  # parallelizes it.
-  "hdf5":  ThreadPoolExecutor,
-  "rerun": ProcessPoolExecutor,
-}
-
-
-def _extract_metadata(raw: RawEpisode) -> dict[str, Any]:
-  """Copy whole-episode sidecar fields out of a raw dict into a metadata dict.
-
-  Non-destructive: the values stay in ``raw`` so processors that look
-  them up there keep working. The metadata dict is for callers that
-  want to read episode-level fields without sniffing ``data``.
-  """
-  return {k: raw[k] for k in _METADATA_KEYS if k in raw}
-
-
 class EpisodeDataset:
   """The set of episodes recorded under one directory.
 
-  Cheap to construct — ``__init__`` only globs paths, doesn't read
+  Cheap to construct — ``__init__`` only records the path, doesn't read
   any file. Call :meth:`load` (or :meth:`stream`) to actually decode.
   ``len(ds)`` and :attr:`paths` work without loading.
   """

@@ -1,9 +1,9 @@
 """Convert raw sim-recorded episodes into the replay buffer's schema.
 
-Episode readers (``episode_loader``) produce raw dicts of arrays straight
-from the writer format. Processors here project them onto the modal
-observation chosen by ``config.env.obs_mode`` and align with the buffer's
-``(T+1 obs, T action)`` invariant.
+:class:`~chuck_dreamer.training.episode_dataset.Episode` carries raw
+dicts of arrays straight from the writer format. Processors here
+project them onto the modal observation chosen by ``config.env.obs_mode``
+and align with the buffer's ``(T+1 obs, T action)`` invariant.
 
 The set of processors mirrors the env's ``policy_obs()`` projection on the
 online side: ``StateVectorProcessor`` matches ``obs_mode="state"``,

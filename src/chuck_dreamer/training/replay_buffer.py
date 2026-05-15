@@ -15,8 +15,7 @@ import numpy as np
 
 from ..reward import RewardFn
 from ..sim.step_info import StepInfo
-from .episode_dataset import EpisodeDataset
-from .episode_loader import Progress
+from .episode_dataset import EpisodeDataset, Progress
 from .episode_processor import EpisodeProcessor, StateVectorProcessor
 
 Episode = dict[str, Any]
