@@ -444,6 +444,19 @@ class PushingEnv(gym.Env):
   # Internal helpers
   # ------------------------------------------------------------------
 
+  # Arm geoms are anonymous in the MJCF, so we identify them by the
+  # bodies they belong to. Every geom under one of these bodies is
+  # bundled into a single ``arm`` segmentation mask.
+  _ARM_BODY_NAMES = (
+      "Base",
+      "Rotation_Pitch",
+      "Upper_Arm",
+      "Lower_Arm",
+      "Wrist_Pitch_Roll",
+      "Fixed_Jaw",
+      "Moving_Jaw",
+  )
+
   def _setup_seg_ids(self):
     """Resolve the geoms we care about to their IDs, once."""
     names = ['goal_marker', 'target_object_geom']
@@ -462,6 +475,16 @@ class PushingEnv(gym.Env):
         for name in names
     }
 
+    arm_body_ids = {
+        mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, n)
+        for n in self._ARM_BODY_NAMES
+    }
+    arm_body_ids.discard(-1)
+    self._seg_arm_geom_ids = np.array(
+        [g for g in range(self.model.ngeom) if int(self.model.geom_bodyid[g]) in arm_body_ids],
+        dtype=np.int32,
+    )
+
   def _segmentation_masks(self, seg):
     """seg: (H, W, 2) array from the segmentation renderer.
     Returns dict[str, (H, W) bool array]."""
@@ -475,6 +498,10 @@ class PushingEnv(gym.Env):
       m = is_geom & (ids == gid)
       masks[name] = m
       covered |= m
+
+    arm_mask = is_geom & np.isin(ids, self._seg_arm_geom_ids)
+    masks["arm"] = arm_mask
+    covered |= arm_mask
 
     masks["background"] |= ~covered
     return masks

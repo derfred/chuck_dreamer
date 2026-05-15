@@ -204,6 +204,7 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
         segmentation/                              — optional, present iff env produced masks
             target      (T, H, W)       bool
             goal        (T, H, W)       bool
+            arm         (T, H, W)       bool      — optional, union of robot-arm geoms
             background  (T, H, W)       bool      — optional
             clutter     (T, K, H, W)    bool      — optional, K = scene clutter count
         metadata/
@@ -424,6 +425,7 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
 
         seg_target     = episode.get("segmentation_target")
         seg_goal       = episode.get("segmentation_goal")
+        seg_arm        = episode.get("segmentation_arm")
         seg_background = episode.get("segmentation_background")
         seg_clutter    = episode.get("segmentation_clutter")  # (T, K, H, W) or None
 
@@ -446,6 +448,9 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             if seg_goal is not None:
                 rec.log("camera/seg/goal",
                         rr.SegmentationImage(np.asarray(seg_goal[i], dtype=np.uint8)))
+            if seg_arm is not None:
+                rec.log("camera/seg/arm",
+                        rr.SegmentationImage(np.asarray(seg_arm[i], dtype=np.uint8)))
             if seg_background is not None:
                 rec.log("camera/seg/background",
                         rr.SegmentationImage(np.asarray(seg_background[i], dtype=np.uint8)))

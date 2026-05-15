@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import av  # type: ignore[import-untyped]
 import numpy as np
@@ -29,6 +29,13 @@ from huggingface_hub import hf_hub_download
 from .episode_writer import EpisodeWriter
 
 logger = logging.getLogger(__name__)
+
+
+# A resolver maps a dataset-relative path (e.g. "meta/info.json") to a local
+# file on disk. The HF backend downloads via ``hf_hub_download``; the local
+# backend joins onto the dataset root. Both signatures return a ``str`` so
+# the caller can hand it to ``cv2``/``pyarrow``/``av`` unchanged.
+PathResolver = Callable[[str], str]
 
 
 @dataclass
@@ -54,22 +61,32 @@ def _video_path(video_key: str, chunk: int, file: int) -> str:
   return f"videos/{video_key}/chunk-{chunk:03d}/file-{file:03d}.mp4"
 
 
-def _read_episodes_meta(repo_id: str, video_key: str) -> list[_EpisodeSlice]:
+def _list_local_meta_episodes(root: Path) -> list[str]:
+  """Return relative paths of ``meta/episodes/*.parquet`` under ``root``."""
+  meta_dir = root / "meta" / "episodes"
+  if not meta_dir.exists():
+    return []
+  return sorted(
+    str(p.relative_to(root)).replace("\\", "/")
+    for p in meta_dir.rglob("*.parquet")
+  )
+
+
+def _read_episodes_meta(
+  dataset_id: str,
+  video_key: str,
+  resolver: PathResolver,
+  list_meta_files: Callable[[str], list[str]],
+) -> list[_EpisodeSlice]:
   """Read all episode rows from ``meta/episodes/chunk-*/file-*.parquet``.
 
-  v3 stores episode metadata across one or more parquet files. We scan
-  chunk 0 sequentially (the only chunk format we've seen) and return the
-  flat list sorted by ``episode_index``.
+  v3 stores episode metadata across one or more parquet files. ``dataset_id``
+  is the HF repo id or a local path label (only used for error messages);
+  ``resolver`` and ``list_meta_files`` decide where the data comes from.
   """
-  from huggingface_hub import HfApi
-
-  api = HfApi()
-  files = [
-    f for f in api.list_repo_files(repo_id, repo_type="dataset")
-    if f.startswith("meta/episodes/") and f.endswith(".parquet")
-  ]
+  files = list_meta_files(dataset_id)
   if not files:
-    raise RuntimeError(f"{repo_id}: no meta/episodes/*.parquet files found")
+    raise RuntimeError(f"{dataset_id}: no meta/episodes/*.parquet files found")
 
   vcol_chunk = f"videos/{video_key}/chunk_index"
   vcol_file = f"videos/{video_key}/file_index"
@@ -78,7 +95,7 @@ def _read_episodes_meta(repo_id: str, video_key: str) -> list[_EpisodeSlice]:
 
   slices: list[_EpisodeSlice] = []
   for rel in sorted(files):
-    p = hf_hub_download(repo_id, rel, repo_type="dataset")
+    p = resolver(rel)
     table = pq.read_table(p, columns=[
       "episode_index", "tasks", "length",
       "data/chunk_index", "data/file_index",
@@ -147,13 +164,18 @@ def _decode_video_range(
   return np.stack(frames[:expected], axis=0)
 
 
-def _select_video_key(repo_id: str, preferred: str | None) -> str:
+def _select_video_key(
+  dataset_id: str,
+  preferred: str | None,
+  resolver: PathResolver,
+) -> str:
   """Pick a video stream key from ``meta/info.json`` features."""
   import json
 
-  info_path = hf_hub_download(repo_id, "meta/info.json", repo_type="dataset")
+  info_path = resolver("meta/info.json")
   with open(info_path) as f:
     info = json.load(f)
+  repo_id = dataset_id  # alias for error messages
   video_keys = [k for k, v in info.get("features", {}).items()
                 if isinstance(v, dict) and v.get("dtype") == "video"]
   if not video_keys:
@@ -166,6 +188,28 @@ def _select_video_key(repo_id: str, preferred: str | None) -> str:
   return preferred
 
 
+def _hf_resolver(repo_id: str) -> PathResolver:
+  return lambda rel: hf_hub_download(repo_id, rel, repo_type="dataset")
+
+
+def _hf_list_meta(repo_id: str) -> list[str]:
+  from huggingface_hub import HfApi
+  api = HfApi()
+  return [
+    f for f in api.list_repo_files(repo_id, repo_type="dataset")
+    if f.startswith("meta/episodes/") and f.endswith(".parquet")
+  ]
+
+
+def _local_resolver(root: Path) -> PathResolver:
+  def resolve(rel: str) -> str:
+    p = root / rel
+    if not p.exists():
+      raise FileNotFoundError(f"local dataset missing file: {p}")
+    return str(p)
+  return resolve
+
+
 def import_dataset(
   repo_id: str,
   output_dir: str,
@@ -176,12 +220,26 @@ def import_dataset(
 ) -> Iterator[tuple[int, Path]]:
   """Yield ``(episode_index, output_path)`` per converted episode.
 
+  ``repo_id`` accepts either an HF dataset repo id (``"user/dataset"``) or
+  the path to an on-disk LeRobot v3 dataset directory. The latter is
+  detected by ``Path(repo_id).is_dir()``.
+
   Generator so callers can wrap in ``tqdm`` and show progress. The
   returned path points at the file produced by :class:`HDF5EpisodeWriter`
   or :class:`RerunEpisodeWriter`.
   """
-  resolved_video_key = _select_video_key(repo_id, video_key)
-  slices             = _read_episodes_meta(repo_id, resolved_video_key)
+  local_root: Path | None = None
+  if Path(repo_id).is_dir():
+    local_root = Path(repo_id)
+    resolver = _local_resolver(local_root)
+    list_meta = lambda _id: _list_local_meta_episodes(local_root)  # noqa: E731
+  else:
+    resolver = _hf_resolver(repo_id)
+    list_meta = _hf_list_meta
+
+  resolved_video_key = _select_video_key(repo_id, video_key, resolver)
+  slices             = _read_episodes_meta(
+    repo_id, resolved_video_key, resolver, list_meta)
   if max_episodes is not None:
     slices = slices[:max_episodes]
   if not slices:
@@ -197,8 +255,7 @@ def import_dataset(
   for sl in slices:
     pkey = (sl.data_chunk, sl.data_file)
     if pkey not in parquet_cache:
-      pq_path = hf_hub_download(
-        repo_id, _data_path(*pkey), repo_type="dataset")
+      pq_path = resolver(_data_path(*pkey))
       tbl = pq.read_table(pq_path, columns=[
         "action", "observation.state", "timestamp",
         "frame_index", "episode_index",
@@ -208,8 +265,7 @@ def import_dataset(
 
     vkey = (sl.video_chunk, sl.video_file)
     if vkey not in video_cache:
-      video_cache[vkey] = hf_hub_download(
-        repo_id, _video_path(resolved_video_key, *vkey), repo_type="dataset")
+      video_cache[vkey] = resolver(_video_path(resolved_video_key, *vkey))
     video_local = video_cache[vkey]
 
     s, e = sl.data_from, sl.data_to

@@ -26,6 +26,7 @@ class ObservationImage:
     target_mask:   (H, W) bool — the pushable target object.
     goal_mask:     (H, W) bool — the goal marker.
     clutter_masks: list of (H, W) bool, one per clutter piece, in scene order.
+    arm_mask:      (H, W) bool — union of all robot-arm geoms.
     background_mask: (H, W) bool — pixels not covered by any tracked geom.
   """
 
@@ -33,6 +34,7 @@ class ObservationImage:
   target_mask: np.ndarray
   goal_mask: np.ndarray
   clutter_masks: list[np.ndarray] = field(default_factory=list)
+  arm_mask: np.ndarray | None = None
   background_mask: np.ndarray | None = None
 
   @property
@@ -52,6 +54,8 @@ class ObservationImage:
     }
     for i, m in enumerate(self.clutter_masks):
       out[f"clutter_{i}"] = m
+    if self.arm_mask is not None:
+      out["arm"] = self.arm_mask
     if self.background_mask is not None:
       out["background"] = self.background_mask
     return out
@@ -65,13 +69,14 @@ class ObservationImage:
     """Build from the env's per-geom mask dict.
 
     Expects keys ``target_object_geom``, ``goal_marker``, ``background``
-    (optional), and any number of ``clutter_{i}_geom`` entries. Clutter
-    keys are sorted by ``i`` so ``clutter_masks[i]`` matches the scene's
-    clutter order.
+    (optional), ``arm`` (optional), and any number of ``clutter_{i}_geom``
+    entries. Clutter keys are sorted by ``i`` so ``clutter_masks[i]``
+    matches the scene's clutter order.
     """
     target = mask_by_name["target_object_geom"]
     goal   = mask_by_name["goal_marker"]
     background = mask_by_name.get("background")
+    arm        = mask_by_name.get("arm")
 
     clutter_items = [
       (int(k.split("_")[1]), m)
@@ -86,5 +91,6 @@ class ObservationImage:
       target_mask=target,
       goal_mask=goal,
       clutter_masks=clutter_masks,
+      arm_mask=arm,
       background_mask=background,
     )

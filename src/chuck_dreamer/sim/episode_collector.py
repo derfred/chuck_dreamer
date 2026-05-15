@@ -41,9 +41,9 @@ def _stack_image_obs(image_obs_list: list[ObservationImage]) -> dict[str, np.nda
   """Stack a per-step list of :class:`ObservationImage` into T-stacked arrays.
 
   Returns ``image`` ``(T, H, W, 3)`` and a ``segmentation_*`` field per
-  named mask (``target``, ``goal``, ``background``, plus per-piece
-  ``clutter_{i}`` if any). The per-piece clutter masks are also stacked
-  along a leading clutter axis under ``segmentation_clutter`` as
+  named mask (``target``, ``goal``, ``arm``, ``background``, plus
+  per-piece ``clutter_{i}`` if any). The per-piece clutter masks are also
+  stacked along a leading clutter axis under ``segmentation_clutter`` as
   ``(T, K, H, W)`` for convenience (K is the scene's clutter count, fixed
   across the episode).
   """
@@ -56,6 +56,10 @@ def _stack_image_obs(image_obs_list: list[ObservationImage]) -> dict[str, np.nda
     "segmentation_target": target,
     "segmentation_goal":   goal,
   }
+
+  arm_list = [io.arm_mask for io in image_obs_list]
+  if all(m is not None for m in arm_list):
+    out["segmentation_arm"] = np.stack(arm_list, axis=0).astype(bool)  # type: ignore[arg-type]
 
   bg_list = [io.background_mask for io in image_obs_list]
   if all(m is not None for m in bg_list):
