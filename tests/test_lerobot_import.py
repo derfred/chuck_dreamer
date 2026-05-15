@@ -222,38 +222,34 @@ def test_decode_video_range_raises_on_empty_window(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_select_video_key_picks_first_when_unspecified(tmp_path, monkeypatch):
+def _resolver_to(path: Path):
+  return lambda _rel: str(path)
+
+
+def test_select_video_key_picks_first_when_unspecified(tmp_path):
   info_path = tmp_path / "meta/info.json"
   _write_info(info_path)
-  monkeypatch.setattr(li, "hf_hub_download", lambda *a, **k: str(info_path))
-
-  assert li._select_video_key("repo", None) == VIDEO_KEY
+  assert li._select_video_key("repo", None, _resolver_to(info_path)) == VIDEO_KEY
 
 
-def test_select_video_key_honors_preferred(tmp_path, monkeypatch):
+def test_select_video_key_honors_preferred(tmp_path):
   info_path = tmp_path / "meta/info.json"
   _write_info(info_path)
-  monkeypatch.setattr(li, "hf_hub_download", lambda *a, **k: str(info_path))
-
-  assert li._select_video_key("repo", VIDEO_KEY) == VIDEO_KEY
+  assert li._select_video_key("repo", VIDEO_KEY, _resolver_to(info_path)) == VIDEO_KEY
 
 
-def test_select_video_key_rejects_unknown_key(tmp_path, monkeypatch):
+def test_select_video_key_rejects_unknown_key(tmp_path):
   info_path = tmp_path / "meta/info.json"
   _write_info(info_path)
-  monkeypatch.setattr(li, "hf_hub_download", lambda *a, **k: str(info_path))
-
   with pytest.raises(ValueError, match="not in dataset"):
-    li._select_video_key("repo", "observation.images.nope")
+    li._select_video_key("repo", "observation.images.nope", _resolver_to(info_path))
 
 
-def test_select_video_key_raises_when_no_video_features(tmp_path, monkeypatch):
+def test_select_video_key_raises_when_no_video_features(tmp_path):
   info_path = tmp_path / "meta/info.json"
   _write_info(info_path, with_video=False)
-  monkeypatch.setattr(li, "hf_hub_download", lambda *a, **k: str(info_path))
-
   with pytest.raises(RuntimeError, match="no video features"):
-    li._select_video_key("repo", None)
+    li._select_video_key("repo", None, _resolver_to(info_path))
 
 
 # ---------------------------------------------------------------------------
