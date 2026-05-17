@@ -10,8 +10,7 @@ import click
 import logging
 from pathlib import Path
 
-import numpy as np
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 
 from chuck_dreamer.config import load_config
 
@@ -36,25 +35,7 @@ def cli(ctx, config, verbose):
     logging.getLogger().setLevel(logging.DEBUG)
 
   ctx.ensure_object(dict)
-  ctx.obj['config'] = load_config(config)
-
-
-def _resolve_cfg(ctx, overrides: tuple[str, ...] = ()) -> DictConfig:
-  """Apply dotted-path overrides on top of the loaded config; randomize seed if unset."""
-  cfg = ctx.obj["config"]
-  if overrides:
-    cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(list(overrides)))
-  if cfg.get("seed") is None:
-    cfg.seed = int(np.random.default_rng().integers(0, 2**31))
-  return cfg
-
-
-def _alias_overrides(aliases: dict) -> tuple[str, ...]:
-  """Convert a {dotted_key: value} mapping of CLI-alias inputs into dotlist entries.
-
-  Keys whose value is ``None`` are dropped, so unset CLI flags don't override the config.
-  """
-  return tuple(f"{k}={v}" for k, v in aliases.items() if v is not None)
+  ctx.obj['config_path'] = config
 
 
 def _collect_one_episode(cfg, output, fmt, ep_idx, episode_seed):
@@ -121,7 +102,7 @@ def generate_scenes(ctx, episodes, output, seed, fmt, workers, overrides):
   """Generate pushing scenes using the scripted heuristic policy."""
   import os
 
-  cfg = _resolve_cfg(ctx, _alias_overrides({"seed": seed}) + overrides)
+  cfg = load_config(ctx.obj["config_path"], overrides=overrides, aliases={"seed": seed})
 
   if workers is None:
     workers = os.cpu_count() or 1
@@ -170,8 +151,21 @@ def generate_scenes(ctx, episodes, output, seed, fmt, workers, overrides):
               help="Derive a segmentation_target mask per frame via white-blob detection "
                    "+ Kalman smoothing (default: on). Provides the focus-loss path with "
                    "a target mask for datasets that ship without segmentation.")
+@click.option("--tag", "tags", multiple=True, metavar="TAG",
+              help="Tag to stamp onto each written episode's metadata. Repeatable. "
+                   "The replay buffer reads these for protected_tags (no-evict) and "
+                   "tag_weights (sample upweighting). Typical use: --tag real for "
+                   "physical-robot recordings.")
+@click.option("--process", "processor_paths", multiple=True,
+              type=click.Path(exists=True, dir_okay=False),
+              metavar="PATH",
+              help="Path to a Python file defining `process(episode, metadata) -> episode`. "
+                   "Repeatable; processors run in order as the final step before "
+                   "the episode is written. Use for rescaling joint values, computing "
+                   "ee_pos via forward kinematics, image cropping, etc.")
 @click.pass_context
-def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes, derive_target_mask):
+def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
+                   derive_target_mask, tags, processor_paths):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
 
   Pulls the parquet + MP4 from Hugging Face, slices per episode using
@@ -184,15 +178,22 @@ def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes, derive_ta
   """
   from tqdm import tqdm
 
-  from chuck_dreamer.sim.lerobot_import import import_dataset
+  from chuck_dreamer.sim.lerobot_import import import_dataset, load_processor
 
-  click.echo(f"Importing {repo_id} → {output}  (format={fmt}, derive_target_mask={derive_target_mask})")
+  processors = tuple(load_processor(p) for p in processor_paths)
+
+  click.echo(
+    f"Importing {repo_id} → {output}  (format={fmt}, "
+    f"derive_target_mask={derive_target_mask}, tags={list(tags)}, "
+    f"processors={list(processor_paths)})"
+  )
   count = 0
   for ep_idx, out_path in tqdm(
     import_dataset(
       repo_id, output,
       format=fmt, video_key=video_key, max_episodes=max_episodes,
-      derive_target_mask=derive_target_mask,
+      derive_target_mask=derive_target_mask, tags=tuple(tags),
+      processors=processors,
     ),
     desc="Episodes",
     total=max_episodes,
@@ -220,7 +221,7 @@ def show_scene(ctx, seed, step_delay, overrides):
 
   from chuck_dreamer.sim import PushingEnv, ScriptedPolicy
 
-  cfg = _resolve_cfg(ctx, _alias_overrides({"seed": seed}) + overrides)
+  cfg = load_config(ctx.obj["config_path"], overrides=overrides, aliases={"seed": seed})
 
   click.echo(f"difficulty={cfg.env.difficulty}  seed={cfg.seed}")
   env    = PushingEnv(cfg)
@@ -269,11 +270,14 @@ def train(ctx, experiment_name, seed, resume, overrides):
   """Train a model using the specified configuration."""
   from chuck_dreamer.trainer import Trainer
 
-  aliases = _alias_overrides({
-    "seed":                     seed,
-    "logging.experiment_name":  experiment_name,
-  })
-  cfg = _resolve_cfg(ctx, aliases + overrides)
+  cfg = load_config(
+    ctx.obj["config_path"],
+    overrides=overrides,
+    aliases={
+      "seed":                    seed,
+      "logging.experiment_name": experiment_name,
+    },
+  )
   click.echo("Training with config:")
   click.echo(OmegaConf.to_yaml(cfg))
   trainer = Trainer(cfg)
@@ -300,7 +304,7 @@ def record_cmd(ctx, output, storage, fmt, skip_calibration, skip_markers, seed, 
   """Record a real-hardware session: scene registration + lerobot teleop episodes."""
   from chuck_dreamer.real import run as run_session
 
-  cfg = _resolve_cfg(ctx, _alias_overrides({"seed": seed}) + overrides)
+  cfg = load_config(ctx.obj["config_path"], overrides=overrides, aliases={"seed": seed})
   click.echo(f"Recording session → {output}  (storage={storage}, format={fmt})")
   out = run_session(
     cfg, Path(output),
@@ -352,7 +356,7 @@ def eval_cmd(ctx, name, checkpoint_path, num_episodes,
     raise click.BadParameter(f"unknown eval {name!r}. Available: {sorted(evals)}")
   nb_in = evals[name]
 
-  cfg = _resolve_cfg(ctx, _alias_overrides({"seed": seed}) + overrides)
+  cfg = load_config(ctx.obj["config_path"], overrides=overrides, aliases={"seed": seed})
 
   if checkpoint_path is None:
     experiment = cfg.logging.experiment_name or "default"
@@ -360,8 +364,10 @@ def eval_cmd(ctx, name, checkpoint_path, num_episodes,
   if not Path(checkpoint_path).exists():
     raise click.ClickException(f"checkpoint not found: {checkpoint_path}")
 
-  data_path   = cfg.training.data.warmup_path
-  data_format = cfg.training.data.warmup_format
+  # The eval notebook expects one data path. Pull from the first warmup source.
+  first_source = cfg.training.data.warmup_source[0]
+  data_path    = first_source["path"]
+  data_format  = first_source["format"]
 
   if output_path is None:
     output_path = f"{name}_{Path(checkpoint_path).stem}.ipynb"

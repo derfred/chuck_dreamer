@@ -41,20 +41,20 @@ class Trainer:
     self.tracker.init()
 
   def _warmup(self):
-    data_cfg = self.config.training.data
-    if os.path.exists(data_cfg.warmup_path):
+    for src in self.config.training.data.warmup_source:
+      if not os.path.exists(src["path"]):
+        logger.warning(f"Warmup path {src['path']} does not exist. Skipping.")
+        continue
       logger.info(
-        f"Loading warmup episodes from {data_cfg.warmup_path} "
-        f"(format={data_cfg.warmup_format}, num_episodes={data_cfg.warmup_num_episodes})"
+        f"Loading warmup episodes from {src['path']} "
+        f"(format={src['format']}, num_episodes={src['num_episodes']})"
       )
       self._replay_buffer.load_sim_episodes(
-        data_cfg.warmup_path,
-        data_cfg.warmup_format,
+        src["path"],
+        src["format"],
         progress=True,
-        num_episodes=data_cfg.warmup_num_episodes,
+        num_episodes=src["num_episodes"],
       )
-    else:
-      logger.warning(f"Warmup path {data_cfg.warmup_path} does not exist. Skipping buffer warmup.")
 
     # Eval episodes load is independent of the buffer warmup — preload
     # them here so the first eval phase doesn't pay the cost (and

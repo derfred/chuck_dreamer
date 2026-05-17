@@ -51,7 +51,7 @@ SUPPORTED_FORMATS = ("hdf5", "rerun")
 # format but are properties of the whole episode. We surface them on
 # ``Episode.metadata`` so call sites can read them without sniffing the
 # raw arrays dict.
-_METADATA_KEYS: tuple[str, ...] = ("act_mode", "goal_xy")
+_METADATA_KEYS: tuple[str, ...] = ("act_mode", "goal_xy", "tags")
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +98,11 @@ def _load_hdf5_episode(path: str | Path) -> RawEpisode:
         raw["act_mode"] = am.decode("utf-8") if isinstance(am, bytes) else str(am)
       if "goal_xy" in meta:
         raw["goal_xy"] = np.asarray(meta["goal_xy"][()], dtype=np.float32)
+      if "tags" in meta:
+        raw_tags = meta["tags"][()]
+        raw["tags"] = tuple(
+          t.decode("utf-8") if isinstance(t, bytes) else str(t) for t in raw_tags
+        )
   return raw
 
 
@@ -173,8 +178,38 @@ def _load_rerun_episode(path: str | Path) -> RawEpisode:
   raw["timestamp"] = np.asarray([t for _, t in time_rows], dtype=np.float32)
 
   _load_rerun_segmentation(by_entity, raw)
+  _load_rerun_metadata(by_entity, raw)
 
   return raw
+
+
+def _load_rerun_metadata(by_entity: dict[str, list[dict]], raw: RawEpisode) -> None:
+  """Pull whole-episode sidecar fields out of a recording's ``/metadata/*`` entities.
+
+  Metadata is logged as static :class:`rr.TextDocument` cells on
+  ``/metadata/<key>``. Static chunks land in
+  ``by_entity["__static__"][0]`` keyed by full entity path (see
+  :func:`_collect_chunks_by_entity`).
+  """
+  static = by_entity.get("__static__", [{}])[0]
+
+  def _text(entity: str) -> str | None:
+    chunk = static.get(entity)
+    if chunk is None:
+      return None
+    cells = chunk.get("TextDocument:text")
+    if not cells:
+      return None
+    cell = cells[0]
+    if isinstance(cell, list):
+      cell = cell[0] if cell else None
+    if cell is None:
+      return None
+    return cell.decode("utf-8") if isinstance(cell, bytes) else str(cell)
+
+  tags = _text("/metadata/tags")
+  if tags:
+    raw["tags"] = tuple(t for t in tags.split(",") if t)
 
 
 def _ordered_seg_masks(chunk_dicts: list[dict]) -> np.ndarray:

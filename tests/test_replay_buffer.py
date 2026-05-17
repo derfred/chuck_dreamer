@@ -33,6 +33,7 @@ def _make_episode(
   length: int,
   obs_shape: tuple[int, ...] = (4,),
   action_dim: int = 2,
+  tags: tuple[str, ...] = (),
 ) -> dict[str, np.ndarray]:
   """Build an episode where obs[t, 0] = episode_id * 1000 + t.
 
@@ -47,10 +48,13 @@ def _make_episode(
   reward = np.arange(T, dtype=np.float32)
   done = np.zeros((T,), dtype=bool)
   done[-1] = True
-  return {
+  ep: dict[str, np.ndarray] = {
     "obs": obs, "action": action, "reward": reward, "done": done,
     "step_info": _make_step_info(episode_id, T),
   }
+  if tags:
+    ep["tags"] = tags
+  return ep
 
 
 # ---------------------------------------------------------------------------
@@ -437,3 +441,152 @@ def test_dict_obs_rejects_mismatched_leaf_lengths():
   buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
   with pytest.raises(ValueError):
     buf.add_episode(ep)
+
+
+# ---------------------------------------------------------------------------
+# Tags — propagation, eviction protection, sample weighting
+# ---------------------------------------------------------------------------
+
+
+def test_tags_default_to_empty_tuple_after_validation():
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  buf.add_episode(_make_episode(0, length=20))
+  assert buf._episodes[0]["tags"] == ()
+
+
+def test_tags_propagate_through_add_episode():
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  buf.add_episode(_make_episode(0, length=20, tags=("real", "demo")))
+  assert buf._episodes[0]["tags"] == ("real", "demo")
+
+
+def test_protected_tag_survives_eviction_pressure():
+  # Capacity fits one episode; insert a tagged 'real' first, then a stream
+  # of untagged sim episodes. The protected real one must remain across
+  # all of them; the untagged ones get evicted instead.
+  buf = ReplayBuffer(
+    capacity_steps=120,
+    min_episode_len=10,
+    seed=0,
+    protected_tags=("real",),
+  )
+  buf.add_episode(_make_episode(99, length=100, tags=("real",)))
+  for ep_id in range(20):
+    buf.add_episode(_make_episode(ep_id, length=100))
+
+  tags_present = [ep.get("tags") for ep in buf._episodes]
+  assert ("real",) in tags_present
+
+
+def test_all_protected_buffer_does_not_loop_forever_on_eviction():
+  # Every episode is protected and totals exceed capacity. The for/else
+  # guard must let _evict return instead of spinning.
+  buf = ReplayBuffer(
+    capacity_steps=50,
+    min_episode_len=10,
+    seed=0,
+    protected_tags=("real",),
+  )
+  for ep_id in range(5):
+    buf.add_episode(_make_episode(ep_id, length=100, tags=("real",)))
+
+  assert buf.num_episodes == 5
+  assert len(buf) == 5 * 100
+
+
+def test_protected_tag_unrelated_tags_are_evictable():
+  # Episodes tagged 'sim' are NOT in protected_tags, so they evict normally.
+  buf = ReplayBuffer(
+    capacity_steps=200,
+    min_episode_len=10,
+    seed=0,
+    protected_tags=("real",),
+  )
+  for ep_id in range(10):
+    buf.add_episode(_make_episode(ep_id, length=100, tags=("sim",)))
+  assert buf.num_episodes <= 2
+  assert len(buf) <= 200
+
+
+def test_tag_weights_multiply_sample_weight():
+  # One tagged episode (weight 5) + 4 untagged of the same length. Over many
+  # samples the tagged episode's pick rate should be ~ 5 / (5 + 4) ≈ 0.55.
+  buf = ReplayBuffer(
+    capacity_steps=10_000,
+    min_episode_len=5,
+    seed=42,
+    tag_weights={"real": 5.0},
+  )
+  buf.add_episode(_make_episode(0, length=30, tags=("real",)))
+  for ep_id in range(1, 5):
+    buf.add_episode(_make_episode(ep_id, length=30))
+
+  hits = 0
+  trials = 4000
+  for _ in range(trials):
+    batch = buf.sample(batch_size=1, seq_len=10)
+    obs = np.asarray(batch["obs"])
+    ep_id = int(np.floor(obs[0, 0, 0] / 1000))
+    if ep_id == 0:
+      hits += 1
+  observed = hits / trials
+  # Expected ~0.555, allow a generous band so the test isn't flaky.
+  assert 0.45 < observed < 0.65, f"observed real-episode pick rate {observed!r}"
+
+
+def test_tag_weight_picks_max_when_multiple_match():
+  buf = ReplayBuffer(
+    capacity_steps=10_000,
+    min_episode_len=5,
+    seed=0,
+    tag_weights={"real": 5.0, "demo": 2.0},
+  )
+  buf.add_episode(_make_episode(0, length=20, tags=("real", "demo")))
+  assert buf._tag_weight(buf._episodes[0]) == 5.0
+
+
+def test_tag_weight_defaults_to_one_when_no_match():
+  buf = ReplayBuffer(
+    capacity_steps=10_000,
+    min_episode_len=5,
+    seed=0,
+    tag_weights={"real": 5.0},
+  )
+  buf.add_episode(_make_episode(0, length=20, tags=("sim",)))
+  assert buf._tag_weight(buf._episodes[0]) == 1.0
+
+
+def test_tag_weight_defaults_to_one_for_untagged():
+  buf = ReplayBuffer(
+    capacity_steps=10_000,
+    min_episode_len=5,
+    seed=0,
+    tag_weights={"real": 5.0},
+  )
+  buf.add_episode(_make_episode(0, length=20))
+  assert buf._tag_weight(buf._episodes[0]) == 1.0
+
+
+def test_from_config_reads_tag_settings():
+  from chuck_dreamer.config import load_config
+  cfg = load_config(overrides=(
+    "training.data.protected_tags=[real]",
+    "training.data.tag_weights.real=7.5",
+    "training.data.tag_weights.demo=2.0",
+  ))
+  buf = ReplayBuffer.from_config(cfg)
+  assert buf._protected_tags == frozenset({"real"})
+  assert buf._tag_weights == {"real": 7.5, "demo": 2.0}
+
+
+def test_save_load_round_trip_preserves_tags(tmp_path):
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=10, seed=0)
+  buf.add_episode(_make_episode(0, length=25, tags=("real",)))
+  buf.add_episode(_make_episode(1, length=25))
+  path = tmp_path / "buffer.pkl"
+  buf.save(path)
+
+  restored = ReplayBuffer(capacity_steps=10_000, min_episode_len=10, seed=0)
+  restored.load(path)
+  assert restored._episodes[0]["tags"] == ("real",)
+  assert restored._episodes[1]["tags"] == ()

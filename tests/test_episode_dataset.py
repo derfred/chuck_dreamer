@@ -613,3 +613,55 @@ def test_processor_for_rejects_unknown_obs_mode():
   cfg.env.obs_mode = "depth"
   with pytest.raises(ValueError):
     processor_for(cfg)
+
+# ---------------------------------------------------------------------------
+# Tags — round-trip through writer → episode_dataset → processor → buffer
+# ---------------------------------------------------------------------------
+
+
+def _write_tagged_episode(dir_path: Path, fmt: str, tags: tuple, *, T: int = 20, idx: int = 0) -> None:
+  writer = EpisodeWriter(str(dir_path), format=fmt)
+  writer.write_episode(
+    _make_raw_episode(T),
+    metadata={"seed": 7, "source": "test", "outcome": "done",
+              "goal_xy": [0.1, 0.2], "tags": tags},
+    name_suffix=f"{idx:05d}",
+  )
+
+
+@pytest.mark.parametrize("fmt,suffix", [("hdf5", ".hdf5"), ("rerun", ".rrd")])
+def test_episode_tags_round_trip_through_metadata(tmp_path, fmt, suffix):
+  _write_tagged_episode(tmp_path, fmt, tags=("real", "demo"))
+  ep = Episode.from_file(tmp_path / f"episode-00000{suffix}")
+  assert ep.metadata.get("tags") == ("real", "demo")
+  # Tags are also surfaced on raw data for the processor to lift.
+  assert ep.data.get("tags") == ("real", "demo")
+
+
+@pytest.mark.parametrize("fmt,suffix", [("hdf5", ".hdf5"), ("rerun", ".rrd")])
+def test_episode_without_tags_has_no_tags_key(tmp_path, fmt, suffix):
+  # Default _write_sim_episode does not stamp tags.
+  _write_sim_episode(tmp_path, fmt, T=10)
+  ep = Episode.from_file(tmp_path / f"episode-00000{suffix}")
+  assert "tags" not in ep.metadata
+  assert "tags" not in ep.data
+
+
+@pytest.mark.parametrize("fmt", ["hdf5", "rerun"])
+def test_processor_propagates_tags_to_buffer_episode(tmp_path, fmt):
+  _write_tagged_episode(tmp_path, fmt, tags=("real",), T=12)
+  processor = EpisodeProcessor("image", image_size=16)
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, processor=processor, seed=0)
+  buf.load_sim_episodes(tmp_path, format=fmt)
+  assert buf.num_episodes == 1
+  assert buf._episodes[0]["tags"] == ("real",)
+
+
+@pytest.mark.parametrize("fmt", ["hdf5", "rerun"])
+def test_untagged_episodes_get_empty_tag_tuple_in_buffer(tmp_path, fmt):
+  _write_sim_episode(tmp_path, fmt, T=12)
+  processor = EpisodeProcessor("image", image_size=16)
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, processor=processor, seed=0)
+  buf.load_sim_episodes(tmp_path, format=fmt)
+  assert buf._episodes[0]["tags"] == ()
+

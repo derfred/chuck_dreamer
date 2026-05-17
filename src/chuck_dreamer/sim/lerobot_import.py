@@ -16,10 +16,11 @@ EE / object signals.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 import av  # type: ignore[import-untyped]
 import numpy as np
@@ -36,6 +37,36 @@ logger = logging.getLogger(__name__)
 # backend joins onto the dataset root. Both signatures return a ``str`` so
 # the caller can hand it to ``cv2``/``pyarrow``/``av`` unchanged.
 PathResolver = Callable[[str], str]
+
+
+# Episode processor: a callable that takes the assembled per-episode dict and
+# its metadata dict and returns the (possibly transformed) episode dict.
+# Loaded from user-supplied .py files via :func:`load_processor`.
+EpisodeFn = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
+
+
+def load_processor(path: str | Path) -> EpisodeFn:
+  """Load a ``process(episode, metadata)`` callable from a Python file.
+
+  The file must define a top-level ``process`` function with that
+  signature; the returned dict replaces the in-flight episode. Useful
+  for per-import transformations the importer itself shouldn't know
+  about (joint-value rescaling, forward kinematics, image cropping,
+  …).
+  """
+  p = Path(path)
+  if not p.exists():
+    raise FileNotFoundError(f"processor script not found: {p}")
+  spec = importlib.util.spec_from_file_location(f"_chuck_processor_{p.stem}", p)
+  if spec is None or spec.loader is None:
+    raise ImportError(f"cannot import processor script {p}")
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  fn = getattr(module, "process", None)
+  if fn is None or not callable(fn):
+    raise AttributeError(
+      f"processor script {p} must define a top-level callable named 'process'")
+  return fn
 
 
 @dataclass
@@ -218,6 +249,8 @@ def import_dataset(
   video_key: str | None = None,
   max_episodes: int | None = None,
   derive_target_mask: bool = True,
+  tags: tuple[str, ...] = (),
+  processors: tuple[EpisodeFn, ...] = (),
 ) -> Iterator[tuple[int, Path]]:
   """Yield ``(episode_index, output_path)`` per converted episode.
 
@@ -231,6 +264,18 @@ def import_dataset(
   ``segmentation_target``. This gives the reconstruction-loss focus
   path a usable target mask even though LeRobot teleop data ships
   without segmentation.
+
+  ``tags`` are stamped onto each written episode's metadata. The
+  importer is the canonical way to mark recordings as e.g. ``"real"``
+  so the replay buffer's tag-protection and tag-weighting can pick
+  them up later (see :class:`ReplayBuffer`).
+
+  ``processors`` is an ordered tuple of ``(episode, metadata) -> episode``
+  callables (usually loaded from .py files via :func:`load_processor`).
+  They run in order as the final step before :meth:`write_episode`, so
+  ``derive_target_mask`` and ``tags`` are already attached when each
+  processor sees the dict. Each processor's return value replaces the
+  in-flight episode.
 
   Generator so callers can wrap in ``tqdm`` and show progress. The
   returned path points at the file produced by :class:`HDF5EpisodeWriter`
@@ -323,6 +368,10 @@ def import_dataset(
       "source":  f"lerobot:{repo_id}",
       "outcome": "imported",
     }
+    if tags:
+      metadata["tags"] = tuple(tags)
+    for fn in processors:
+      episode = fn(episode, metadata)
     out_path = writer.write_episode(
       episode, metadata=metadata, name_suffix=f"{sl.episode_index:05d}")
     yield sl.episode_index, out_path

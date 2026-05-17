@@ -67,6 +67,8 @@ class ReplayBuffer:
     reward_fn: RewardFn | None = None,
     seed: int | None = None,
     default_num_workers: int = 0,
+    protected_tags: frozenset[str] | set[str] | list[str] | tuple[str, ...] = (),
+    tag_weights: dict[str, float] | None = None,
   ) -> None:
     """Construct an episodic replay buffer.
 
@@ -79,6 +81,12 @@ class ReplayBuffer:
     ``default_num_workers`` is the default pool size used by
     :meth:`load_sim_episodes` when its ``num_workers`` arg is omitted.
     ``from_config`` resolves this from ``training.data.warmup_num_workers``.
+
+    ``protected_tags`` — episodes whose tags intersect this set are
+    never evicted. ``tag_weights`` — per-tag sample-weight multiplier;
+    an episode's effective weight is ``max(tag_weights[t] for t in tags)``
+    (default 1.0 when no tags or no matches). Tags themselves come from
+    the episode files via :class:`EpisodeProcessor`.
     """
     if min_episode_len < 1:
       raise ValueError("min_episode_len must be >= 1")
@@ -92,6 +100,8 @@ class ReplayBuffer:
 
     self._sim_processor       = processor if processor is not None else EpisodeProcessor("state")
     self._default_num_workers = default_num_workers
+    self._protected_tags      = frozenset(protected_tags)
+    self._tag_weights: dict[str, float] = dict(tag_weights or {})
 
   @classmethod
   def from_config(
@@ -117,6 +127,10 @@ class ReplayBuffer:
       num_workers = os.cpu_count() or 1
     else:
       num_workers = int(cfg_workers)
+    protected_tags = tuple(str(t) for t in (data_cfg.get("protected_tags") or ()))
+    tag_weights = {
+      str(k): float(v) for k, v in (data_cfg.get("tag_weights") or {}).items()
+    }
     return cls(
       capacity_steps=data_cfg.buffer_size,
       min_episode_len=config.training.min_episode_len,
@@ -124,6 +138,8 @@ class ReplayBuffer:
       reward_fn=reward_fn,
       seed=config.seed,
       default_num_workers=num_workers,
+      protected_tags=protected_tags,
+      tag_weights=tag_weights,
     )
 
   # ---------------------------------------------------------------------
@@ -174,6 +190,9 @@ class ReplayBuffer:
     }
     if "goal_xy" in episode:
       out["goal_xy"] = episode["goal_xy"]
+    # Tags carry through unchanged; missing → empty tuple so all callers
+    # can treat ep["tags"] as iterable without a None check.
+    out["tags"] = tuple(str(t) for t in episode.get("tags", ()))
     return out
 
   def _append_episode(self, episode: Episode) -> None:
@@ -182,10 +201,31 @@ class ReplayBuffer:
     self._evict()
 
   def _evict(self) -> None:
-    # Keep at least one episode even if oversized.
+    # Walk left-to-right and drop the oldest unprotected episode each
+    # pass. Keep at least one episode even if oversized. The for/else
+    # bails out once every remaining episode is protected — without it
+    # we'd spin forever when protected tags pin >capacity_steps in place.
     while self._total_steps > self.capacity_steps and len(self._episodes) > 1:
-      dropped = self._episodes.popleft()
-      self._total_steps -= dropped["action"].shape[0]
+      for i, ep in enumerate(self._episodes):
+        if not self._is_protected(ep):
+          del self._episodes[i]
+          self._total_steps -= ep["action"].shape[0]
+          break
+      else:
+        break
+
+  def _is_protected(self, ep: Episode) -> bool:
+    if not self._protected_tags:
+      return False
+    tags = ep.get("tags") or ()
+    return bool(self._protected_tags.intersection(tags))
+
+  def _tag_weight(self, ep: Episode) -> float:
+    if not self._tag_weights:
+      return 1.0
+    tags = ep.get("tags") or ()
+    matched = [self._tag_weights[t] for t in tags if t in self._tag_weights]
+    return max(matched) if matched else 1.0
 
   # ---------------------------------------------------------------------
   # Read side
@@ -217,13 +257,16 @@ class ReplayBuffer:
       raise ValueError("batch_size and seq_len must be >= 1")
 
     eligible: list[tuple[Episode, int]] = []
-    weights: list[int] = []
+    weights: list[float] = []
     for ep in self._episodes:
       T = ep["action"].shape[0]
       valid_starts = T - seq_len + 1
       if valid_starts > 0:
         eligible.append((ep, valid_starts))
-        weights.append(valid_starts)
+        # Per-tag multiplier on top of the valid-starts weight, so tagged
+        # episodes are oversampled relative to their length. Untagged
+        # episodes get the default 1.0 (i.e. plain length-proportional).
+        weights.append(valid_starts * self._tag_weight(ep))
 
     if not eligible:
       raise RuntimeError(

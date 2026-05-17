@@ -90,6 +90,8 @@ def _pack(obs: Observation, raw: RawEpisode) -> Episode:
     ep["focus_mask"] = obs.focus_mask
   if "goal_xy" in raw:
     ep["goal_xy"] = np.asarray(raw["goal_xy"], dtype=np.float32)
+  if "tags" in raw:
+    ep["tags"] = tuple(str(t) for t in raw["tags"])
   return ep
 
 

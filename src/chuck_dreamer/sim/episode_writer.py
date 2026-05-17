@@ -309,6 +309,11 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
                     meta_grp.create_dataset(
                         "goal_xy",
                         data=np.asarray(goal_xy, dtype=np.float32))
+                tags = metadata.get("tags")
+                if tags:
+                    meta_grp.create_dataset(
+                        "tags",
+                        data=np.asarray([str(t) for t in tags], dtype=h5py.string_dtype()))
 
         return ep_path
 
@@ -413,6 +418,10 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         if metadata is not None and metadata.get("goal_xy") is not None:
             goal = np.asarray(metadata["goal_xy"], dtype=np.float32)
             props["goal_xy"] = f"[{float(goal[0])}, {float(goal[1])}]"
+        if metadata is not None and metadata.get("tags"):
+            # Tags ride as a comma-joined string since Rerun metadata props are
+            # dict[str, str]. The reader splits on commas to recover the tuple.
+            props["tags"] = ",".join(str(t) for t in metadata["tags"])
         self._log_metadata(rec, props)
 
         images     = np.asarray(episode["image"],      dtype=np.uint8)
