@@ -53,7 +53,7 @@ training:
     warmup_path: "data/warmup/"
     warmup_format: "rerun"  # "hdf5" or "rerun"
     warmup_num_episodes: 100  # null = load all; otherwise sample this many at random
-    warmup_num_workers: null   # null = os.cpu_count() // 2; 0 = sequential load
+    warmup_num_workers: null   # null = os.cpu_count(); 0 = sequential load
     shuffle: true
     buffer_size: 10000
 

@@ -114,7 +114,7 @@ class ReplayBuffer:
     data_cfg = config.training.data
     cfg_workers = data_cfg.get("warmup_num_workers")
     if cfg_workers is None:
-      num_workers = max(1, (os.cpu_count() or 2) // 2)
+      num_workers = os.cpu_count() or 1
     else:
       num_workers = int(cfg_workers)
     return cls(
