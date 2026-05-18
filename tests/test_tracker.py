@@ -234,3 +234,53 @@ def test_init_resets_data():
   tracker.init({"fresh": 1})
 
   assert tracker.data == {"fresh": 1}
+
+
+# ---------------------------------------------------------------------------
+# log_batch_tags — per-batch episode counts by tag
+# ---------------------------------------------------------------------------
+
+
+def test_log_batch_tags_buckets_untagged_separately(calls):
+  root = _make_root()
+  root.log_batch_tags([(), (), ()])
+  assert calls == [{"batch_tag/untagged": 3}]
+
+
+def test_log_batch_tags_counts_per_tag(calls):
+  root = _make_root()
+  root.log_batch_tags([("real",), ("real",), ("sim",), (), ("real",)])
+  assert calls == [{
+    "batch_tag/real":     3,
+    "batch_tag/sim":      1,
+    "batch_tag/untagged": 1,
+  }]
+
+
+def test_log_batch_tags_double_counts_multi_tag_sequences(calls):
+  # A sequence tagged ("real", "demo") increments BOTH buckets — by design.
+  root = _make_root()
+  root.log_batch_tags([("real", "demo"), ("real",), ("demo",)])
+  assert calls == [{"batch_tag/real": 2, "batch_tag/demo": 2}]
+
+
+def test_log_batch_tags_empty_batch_does_not_log(calls):
+  # Nothing to count → no payload sent. Prevents stray empty log entries
+  # if the buffer ever returns an empty tags list.
+  root = _make_root()
+  root.log_batch_tags([])
+  assert calls == []
+
+
+def test_log_batch_tags_through_scope_inherits_scope_data(calls):
+  # The trainer logs counts from within a scope({"phase": "train", ...})
+  # context; make sure the scope's data rides along on the forwarded payload.
+  root = _make_root()
+  with root.scope({"phase": "train", "iteration": 3}) as scoped:
+    scoped.log_batch_tags([("real",), ()])
+  assert calls == [{
+    "phase":              "train",
+    "iteration":          3,
+    "batch_tag/real":     1,
+    "batch_tag/untagged": 1,
+  }]

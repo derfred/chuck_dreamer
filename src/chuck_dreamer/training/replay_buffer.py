@@ -278,11 +278,12 @@ class ReplayBuffer:
     probs       = weights_arr / weights_arr.sum()
     ep_indices  = self._rng.choice(len(eligible), size=batch_size, p=probs)
 
-    obs_slices: list[Observation] = []
-    action_batch                  = []
-    reward_batch                  = []
-    done_batch                    = []
-    aux_batch: list[np.ndarray]   = []
+    obs_slices: list[Observation]     = []
+    action_batch                      = []
+    reward_batch                      = []
+    done_batch                        = []
+    aux_batch: list[np.ndarray]       = []
+    tags_batch: list[tuple[str, ...]] = []
 
     for idx in ep_indices:
       ep, valid_starts = eligible[idx]
@@ -296,6 +297,7 @@ class ReplayBuffer:
       aux_batch.append(np.concatenate(
         [si["object_xy"][start:end], si["ee_pos"][start:end]], axis=-1,
       ))
+      tags_batch.append(tuple(ep.get("tags") or ()))
 
     # The buffer's wire format keeps obs as a plain ndarray or dict so
     # backends lift them via their ``coerce`` method (see WorldModel.encode
@@ -310,6 +312,7 @@ class ReplayBuffer:
       "reward": np.stack(reward_batch, axis=0),
       "done": np.stack(done_batch, axis=0),
       "aux_target": np.stack(aux_batch, axis=0).astype(np.float32),
+      "tags": tags_batch,
     }
     if obs_batched.focus_mask is not None:
       batch["focus_mask"] = obs_batched.focus_mask

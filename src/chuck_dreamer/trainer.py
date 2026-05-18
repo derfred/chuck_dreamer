@@ -99,6 +99,7 @@ class Trainer:
 
       for _ in tqdm.tqdm(range(self.config.training.num_gradient_steps), desc=f"Training - iteration {iteration}", total=self.config.training.num_gradient_steps):
         batch = self._replay_buffer.sample(self.config.training.batch_size, self.config.training.seq_len)
+        tracker.log_batch_tags(batch.pop("tags", []))
         self.model.wm_update(batch, tracker=tracker)
 
   def _eval_phase(self, iteration: int):

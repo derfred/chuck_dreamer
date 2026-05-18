@@ -132,6 +132,24 @@ class Tracker:
       import trackio
       trackio.log({**data, **kwargs})
 
+  def log_batch_tags(self, batch_tags):
+    """Log per-batch episode counts grouped by tag.
+
+    ``batch_tags`` is the list of tag tuples returned in
+    :meth:`ReplayBuffer.sample`'s ``"tags"`` entry — one tuple per
+    sampled sequence. Untagged sequences land in the ``"untagged"``
+    bucket. Multi-tag sequences increment every matching bucket, so the
+    sum across buckets can exceed batch_size; that's deliberate so each
+    bucket answers "how many sequences carried this tag?" independently.
+    """
+    counts: dict[str, int] = {}
+    for tags in batch_tags:
+      keys = tags if tags else ("",)
+      for t in keys:
+        counts[t] = counts.get(t, 0) + 1
+    if counts:
+      self.log({f"batch_tag/{t or 'untagged'}": n for t, n in counts.items()})
+
   def derive(self, data: dict):
     return Tracker(self.config, data=data, parent=self)
 

@@ -590,3 +590,30 @@ def test_save_load_round_trip_preserves_tags(tmp_path):
   restored.load(path)
   assert restored._episodes[0]["tags"] == ("real",)
   assert restored._episodes[1]["tags"] == ()
+
+
+# ---------------------------------------------------------------------------
+# Per-batch tag exposure (consumed by Trainer for logging)
+# ---------------------------------------------------------------------------
+
+
+def test_sample_returns_tags_per_sequence():
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  buf.add_episode(_make_episode(0, length=20, tags=("real",)))
+  buf.add_episode(_make_episode(1, length=20, tags=("real", "demo")))
+  buf.add_episode(_make_episode(2, length=20))  # untagged
+
+  batch = buf.sample(batch_size=8, seq_len=5)
+  assert "tags" in batch
+  assert len(batch["tags"]) == 8
+  for tags in batch["tags"]:
+    assert isinstance(tags, tuple)
+    # Each entry comes from one of the three episodes we added.
+    assert tags in {("real",), ("real", "demo"), ()}
+
+
+def test_sample_tags_default_to_empty_tuple_when_no_tags():
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  buf.add_episode(_make_episode(0, length=20))
+  batch = buf.sample(batch_size=4, seq_len=5)
+  assert batch["tags"] == [()] * 4
