@@ -167,15 +167,20 @@ class CheckerboardSpec:
 
 
 def _find_checkerboard(gray: np.ndarray, spec: CheckerboardSpec) -> np.ndarray | None:
-  """Return refined ``(N, 2)`` corner coords, or None if not detected."""
+  """Return ``(N, 2)`` corner coords, or None if not detected.
+
+  Detection runs on a half-resolution image — fast enough for a live
+  preview indicator. Coords are scaled back to full-res but not
+  subpixel-refined.
+  """
+  small = cv2.resize(gray, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
   found, corners = cv2.findChessboardCornersSB(
-    gray, spec.pattern_size,
-    flags=cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_EXHAUSTIVE,
+    small, spec.pattern_size,
+    flags=cv2.CALIB_CB_NORMALIZE_IMAGE,
   )
   if not found:
     return None
-  # findChessboardCornersSB already returns sub-pixel-accurate corners.
-  return corners.reshape(-1, 2).astype(np.float32)
+  return (corners.reshape(-1, 2) * 2.0).astype(np.float32)
 
 
 def _render_calibration_overlay(
@@ -217,63 +222,33 @@ def _calibrate_one_camera(
   last_corners: np.ndarray | None = None
 
   while True:
-    frame_rgb = source.read()
-    gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
+    start = time.monotonic()
+    frame_rgb    = source.read()
+    gray         = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
     last_corners = _find_checkerboard(gray, spec)
-    now = time.monotonic()
-    display = _render_calibration_overlay(
+    now          = time.monotonic()
+    display      = _render_calibration_overlay(
       frame_rgb, spec, last_corners, len(captures), source.name,
       banner=banner if now < banner_until else None,
     )
     ui.show(window, display)
+    elapsed = time.monotonic() - start
+    logger.info("camera %s: frame read + process took %.1fms - fps=%.2f", source.name, elapsed * 1000, 1/elapsed if elapsed > 0 else float("inf"))
 
     key = ui.poll_key(timeout_ms=1)
     if key == "esc":
       break
     if key == "space":
-      if last_corners is None:
-        banner = "checkerboard not detected"
-        banner_until = now + 0.6
-        print("\a", end="", flush=True)
-        continue
-      desc = ui.prompt(f"description for capture {len(captures)} (blank = none): ").strip()
       img_path = captures_dir / f"capture-{len(captures):03d}.png"
       cv2.imwrite(str(img_path), cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
-      captures.append(CalibrationCapture(
-        image_path=img_path, description=desc, corners_px=last_corners.copy()))
+      corner_px = last_corners if last_corners is not None else np.empty((0, 2), dtype=np.float32)
+      captures.append(CalibrationCapture(image_path=img_path, description="", corners_px=corner_px.copy()))
       banner = f"captured #{len(captures) - 1}"
       banner_until = now + 0.6
 
   ui.close(window)
 
-  if len(captures) < min_captures:
-    logger.warning(
-      "camera %s: only %d/%d captures — skipping intrinsics solve",
-      source.name, len(captures), min_captures)
-    return None
-
-  return solve_intrinsics(captures, spec, source.image_size)
-
-
-def solve_intrinsics(
-  captures: list[CalibrationCapture],
-  spec: CheckerboardSpec,
-  image_size: tuple[int, int],
-) -> CameraIntrinsics:
-  """Run ``cv2.calibrateCamera`` over a set of captures."""
-  objp = spec.object_points()
-  object_points = [objp.copy() for _ in captures]
-  image_points = [c.corners_px.astype(np.float32) for c in captures]
-  rms, K, dist, _rvecs, _tvecs = cv2.calibrateCamera(
-    object_points, image_points, image_size, None, None)
-  return CameraIntrinsics(
-    K=np.asarray(K, dtype=np.float64),
-    dist=np.asarray(dist, dtype=np.float64).reshape(-1),
-    reproj_error=float(rms),
-    image_size=image_size,
-    captures=list(captures),
-  )
-
+  return None
 
 def calibrate_cameras(
   sources: dict[str, FrameSource],

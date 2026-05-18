@@ -80,12 +80,12 @@ def run(
 
   resolved = resolve_camera_specs(cfg)
   cam_cfgs = build_camera_configs(resolved)
-  sources = _open_phase_a_cameras(resolved, cam_cfgs)
+  sources  = _open_phase_a_cameras(resolved, cam_cfgs)
 
   try:
     primary_name = str(scene_cfg.primary_camera)
-    checker_cfg = scene_cfg.checkerboard
-    checker = CheckerboardSpec(
+    checker_cfg  = scene_cfg.checkerboard
+    checker      = CheckerboardSpec(
       cols=int(checker_cfg.cols),
       rows=int(checker_cfg.rows),
       square_size_m=float(checker_cfg.square_size_m),
