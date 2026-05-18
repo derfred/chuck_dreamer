@@ -74,7 +74,7 @@ def test_pack_enforces_buffer_invariants():
     "reward": np.arange(N, dtype=np.float32),
     **_step_info_columns(N),
   }
-  ep = _pack(obs, raw)
+  ep = _pack(obs, raw, "joint")
 
   assert ep["obs"].shape == (N, 4)
   assert ep["action"].shape == (N - 1, 2)
@@ -94,6 +94,7 @@ def test_pack_rejects_single_step_episode():
       {"joint_action": np.zeros((1, 2), dtype=np.float32),
        "reward": np.zeros((1,)),
        **_step_info_columns(1)},
+      "joint",
     )
 
 
@@ -114,7 +115,7 @@ def test_state_vector_processor_concatenates_state_fields():
     "ee_quat": np.full((N, 4), 3.0, dtype=np.float32),
     "object_xy": np.full((N, 2), 4.0, dtype=np.float32),
   }
-  ep = EpisodeProcessor("state")(raw)
+  ep = EpisodeProcessor("state", act_mode="joint")(raw)
 
   assert ep["obs"].shape == (N, 15)
   np.testing.assert_array_equal(ep["obs"][0, 0:3], [2.0, 2.0, 2.0])
@@ -135,7 +136,7 @@ def test_image_processor_returns_normalized_float32():
     "ee_quat": np.zeros((N, 4), dtype=np.float32),
     "object_xy": np.zeros((N, 2), dtype=np.float32),
   }
-  ep = EpisodeProcessor("image", image_size=8)(raw)
+  ep = EpisodeProcessor("image", image_size=8, act_mode="joint")(raw)
   assert ep["obs"].shape == (N, 8, 8, 3)
   assert ep["obs"].dtype == np.float32
   # Each timestep's uint8 fill ``t`` maps to ``t/255 - 0.5``.
@@ -164,6 +165,7 @@ def test_image_processor_attaches_focus_mask_when_sources_present():
   proc = EpisodeProcessor(
     "image", image_size=H,
     focus_mask_sources=("segmentation_target", "segmentation_arm"),
+    act_mode="joint",
   )
   ep = proc(raw)
   assert "focus_mask" in ep
@@ -190,7 +192,7 @@ def test_image_processor_omits_focus_mask_when_no_sources_match():
     "ee_quat":      np.zeros((N, 4), dtype=np.float32),
     "object_xy":    np.zeros((N, 2), dtype=np.float32),
   }
-  ep = EpisodeProcessor("image", image_size=4, focus_mask_sources=("segmentation_target",))(raw)
+  ep = EpisodeProcessor("image", image_size=4, focus_mask_sources=("segmentation_target",), act_mode="joint")(raw)
   assert "focus_mask" not in ep
 
 
@@ -214,6 +216,7 @@ def test_focus_mask_resizes_alongside_image():
 
   ep = EpisodeProcessor(
     "image", image_size=8, focus_mask_sources=("segmentation_target",),
+    act_mode="joint",
   )(raw)
   fm = ep["focus_mask"]
   assert fm.shape == (N, 8, 8)
@@ -239,9 +242,6 @@ def test_episode_from_file_hdf5_round_trip(tmp_path):
   assert ep.data["image"].shape == (20, 16, 16, 3)
   assert ep.data["joint_action"].shape == (20, 3)
   assert ep.data["reward"].shape == (20,)
-  # act_mode is surfaced on metadata AND remains in data (non-destructive).
-  assert ep.metadata["act_mode"] == "joint"
-  assert ep.data["act_mode"] == "joint"
   np.testing.assert_allclose(ep.data["joint_qpos"][7], [0.7] * 6, rtol=0, atol=1e-6)
 
 
@@ -288,7 +288,10 @@ def test_replay_buffer_loads_hdf5_directory(tmp_path):
   _write_sim_episode(tmp_path, "hdf5", T=20, idx=0)
   _write_sim_episode(tmp_path, "hdf5", T=20, idx=1)
 
-  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  buf = ReplayBuffer(
+    capacity_steps=10_000, min_episode_len=5, seed=0,
+    processor=EpisodeProcessor("state", act_mode="joint"),
+  )
   n = buf.load_sim_episodes(tmp_path, format="hdf5")
 
   assert n == 2
@@ -313,7 +316,11 @@ def test_replay_buffer_loads_rerun_directory(tmp_path):
   _write_sim_episode(tmp_path, "rerun", T=20, idx=0)
   _write_sim_episode(tmp_path, "rerun", T=20, idx=1)
 
-  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, processor=EpisodeProcessor("image", image_size=16), seed=0)
+  buf = ReplayBuffer(
+    capacity_steps=10_000, min_episode_len=5,
+    processor=EpisodeProcessor("image", image_size=16, act_mode="joint"),
+    seed=0,
+  )
   n = buf.load_sim_episodes(tmp_path, format="rerun")
 
   assert n == 2
@@ -411,7 +418,10 @@ def test_dataset_load_skips_too_short_episodes_via_buffer(tmp_path):
     metadata={"seed": 0, "source": "test"},
     name_suffix="00000",
   )
-  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  buf = ReplayBuffer(
+    capacity_steps=10_000, min_episode_len=5, seed=0,
+    processor=EpisodeProcessor("state", act_mode="joint"),
+  )
   inserted = buf.load_sim_episodes(tmp_path, format="hdf5")
   assert inserted == 0
   assert buf.num_episodes == 0
@@ -453,7 +463,10 @@ def test_load_sim_episodes_forwards_progress(tmp_path):
     _write_sim_episode(tmp_path, "hdf5", T=10, idx=idx)
 
   seen: list[int] = []
-  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  buf = ReplayBuffer(
+    capacity_steps=10_000, min_episode_len=5, seed=0,
+    processor=EpisodeProcessor("state", act_mode="joint"),
+  )
   buf.load_sim_episodes(
     tmp_path,
     format="hdf5",
@@ -539,14 +552,14 @@ def _state_only_raw(N: int, img_hw: tuple[int, int]) -> dict:
 
 def test_image_processor_resizes_to_target_size():
   raw = _state_only_raw(N=4, img_hw=(32, 32))
-  ep = EpisodeProcessor("image", image_size=8)(raw)
+  ep = EpisodeProcessor("image", image_size=8, act_mode="joint")(raw)
   assert ep["obs"].shape == (4, 8, 8, 3)
   assert ep["obs"].dtype == np.float32
 
 
 def test_image_processor_passthrough_when_already_target_size():
   raw = _state_only_raw(N=3, img_hw=(8, 8))
-  ep = EpisodeProcessor("image", image_size=8)(raw)
+  ep = EpisodeProcessor("image", image_size=8, act_mode="joint")(raw)
   assert ep["obs"].shape == (3, 8, 8, 3)
   # When sizes match the resize is a no-op; values are then normalized.
   for t in range(3):
@@ -555,7 +568,7 @@ def test_image_processor_passthrough_when_already_target_size():
 
 def test_image_proprio_processor_returns_dict_obs():
   raw = _state_only_raw(N=5, img_hw=(16, 16))
-  ep = EpisodeProcessor("image_proprio", image_size=8)(raw)
+  ep = EpisodeProcessor("image_proprio", image_size=8, act_mode="joint")(raw)
 
   assert isinstance(ep["obs"], dict)
   assert set(ep["obs"].keys()) == {"image", "proprio"}
@@ -569,7 +582,7 @@ def test_image_proprio_processor_returns_dict_obs():
 def test_image_proprio_processor_excludes_object_xy_from_proprio():
   raw = _state_only_raw(N=3, img_hw=(8, 8))
   raw["object_xy"] = np.full((3, 2), 999.0, dtype=np.float32)
-  ep = EpisodeProcessor("image_proprio", image_size=8)(raw)
+  ep = EpisodeProcessor("image_proprio", image_size=8, act_mode="joint")(raw)
   # proprio is body-internal, so object_xy must not bleed in.
   assert not np.any(np.isclose(ep["obs"]["proprio"], 999.0))
 
@@ -650,7 +663,7 @@ def test_episode_without_tags_has_no_tags_key(tmp_path, fmt, suffix):
 @pytest.mark.parametrize("fmt", ["hdf5", "rerun"])
 def test_processor_propagates_tags_to_buffer_episode(tmp_path, fmt):
   _write_tagged_episode(tmp_path, fmt, tags=("real",), T=12)
-  processor = EpisodeProcessor("image", image_size=16)
+  processor = EpisodeProcessor("image", image_size=16, act_mode="joint")
   buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, processor=processor, seed=0)
   buf.load_sim_episodes(tmp_path, format=fmt)
   assert buf.num_episodes == 1
@@ -660,8 +673,94 @@ def test_processor_propagates_tags_to_buffer_episode(tmp_path, fmt):
 @pytest.mark.parametrize("fmt", ["hdf5", "rerun"])
 def test_untagged_episodes_get_empty_tag_tuple_in_buffer(tmp_path, fmt):
   _write_sim_episode(tmp_path, fmt, T=12)
-  processor = EpisodeProcessor("image", image_size=16)
+  processor = EpisodeProcessor("image", image_size=16, act_mode="joint")
   buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, processor=processor, seed=0)
   buf.load_sim_episodes(tmp_path, format=fmt)
   assert buf._episodes[0]["tags"] == ()
 
+
+
+# ---------------------------------------------------------------------------
+# Action streams — both can be written, processor picks based on act_mode
+# ---------------------------------------------------------------------------
+
+
+def _make_dual_action_raw(T: int) -> dict:
+  """Raw episode carrying BOTH joint_action and ee_action — the real-recording shape."""
+  raw = _make_raw_episode(T)
+  raw["ee_action"] = np.stack([
+    np.array([1.0 + 0.01 * t, 2.0 + 0.01 * t, 3.0 + 0.01 * t,
+              1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    for t in range(T)
+  ])
+  return raw
+
+
+@pytest.mark.parametrize("fmt,suffix", [("hdf5", ".hdf5"), ("rerun", ".rrd")])
+def test_writer_round_trips_both_action_streams(tmp_path, fmt, suffix):
+  writer = EpisodeWriter(str(tmp_path), format=fmt)
+  writer.write_episode(_make_dual_action_raw(T=8), metadata={}, name_suffix="00000")
+  ep = Episode.from_file(tmp_path / f"episode-00000{suffix}")
+  assert ep.data["joint_action"].shape == (8, 3)
+  assert ep.data["ee_action"].shape    == (8, 7)
+
+
+@pytest.mark.parametrize("fmt,suffix", [("hdf5", ".hdf5"), ("rerun", ".rrd")])
+def test_processor_picks_joint_action_when_act_mode_joint(tmp_path, fmt, suffix):
+  writer = EpisodeWriter(str(tmp_path), format=fmt)
+  writer.write_episode(_make_dual_action_raw(T=8), metadata={}, name_suffix="00000")
+  raw = Episode.from_file(tmp_path / f"episode-00000{suffix}").data
+
+  ep = EpisodeProcessor("state", act_mode="joint")(raw)
+  # joint_action[t] = [0.1t, 0.2t, 0.3t] from _make_raw_episode.
+  assert ep["action"].shape == (7, 3)
+  np.testing.assert_allclose(ep["action"][0], [0.0, 0.0, 0.0], atol=1e-6)
+  np.testing.assert_allclose(ep["action"][1], [0.1, 0.2, 0.3], atol=1e-6)
+
+
+@pytest.mark.parametrize("fmt,suffix", [("hdf5", ".hdf5"), ("rerun", ".rrd")])
+def test_processor_picks_ee_action_when_act_mode_ee(tmp_path, fmt, suffix):
+  writer = EpisodeWriter(str(tmp_path), format=fmt)
+  writer.write_episode(_make_dual_action_raw(T=8), metadata={}, name_suffix="00000")
+  raw = Episode.from_file(tmp_path / f"episode-00000{suffix}").data
+
+  ep = EpisodeProcessor("state", act_mode="ee")(raw)
+  # ee_action[t] starts with [1.0+0.01t, 2.0+0.01t, 3.0+0.01t, 1, 0, 0, 0].
+  assert ep["action"].shape == (7, 7)
+  np.testing.assert_allclose(ep["action"][0][:3], [1.0, 2.0, 3.0], atol=1e-5)
+
+
+def test_processor_raises_when_requested_action_stream_missing():
+  # Episode carries joint_action only; asking for ee_action must hard-error.
+  raw = _make_raw_episode(T=5)
+  with pytest.raises(KeyError, match="ee_action"):
+    EpisodeProcessor("state", act_mode="ee")(raw)
+
+
+def test_processor_for_reads_act_mode_from_config():
+  cfg = load_config()
+  cfg.env.act_mode = "joint"
+  proc = processor_for(cfg)
+  assert proc.act_mode == "joint"
+
+  cfg.env.act_mode = "ee"
+  proc = processor_for(cfg)
+  assert proc.act_mode == "ee"
+
+
+def test_act_mode_metadata_is_no_longer_written(tmp_path):
+  # Sim writer should not stamp act_mode anywhere; consumers pick based on
+  # training config.
+  writer = EpisodeWriter(str(tmp_path), format="hdf5")
+  writer.write_episode(_make_raw_episode(T=4), metadata={}, name_suffix="00000")
+  ep = Episode.from_file(tmp_path / "episode-00000.hdf5")
+  assert "act_mode" not in ep.metadata
+  assert "act_mode" not in ep.data
+
+
+def test_writer_rejects_episode_with_no_action_stream(tmp_path):
+  writer = EpisodeWriter(str(tmp_path), format="hdf5")
+  raw = _make_raw_episode(T=4)
+  del raw["joint_action"]  # leave neither joint_action nor ee_action
+  with pytest.raises(KeyError, match="action"):
+    writer.write_episode(raw, metadata={}, name_suffix="00000")

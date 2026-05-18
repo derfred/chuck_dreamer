@@ -49,15 +49,27 @@ def _slice_step_info(raw: RawEpisode, n: int) -> dict[str, np.ndarray]:
   return out
 
 
-def _resolve_action(raw: RawEpisode) -> np.ndarray:
-  if "joint_action" in raw:
-    return np.asarray(raw["joint_action"], dtype=np.float32)
-  if "ee_action" in raw:
-    return np.asarray(raw["ee_action"], dtype=np.float32)
-  raise KeyError("raw episode missing an action field (joint_action / ee_action)")
+def _resolve_action(raw: RawEpisode, act_mode: str) -> np.ndarray:
+  """Pick the action stream matching ``act_mode`` (``"joint"`` or ``"ee"``).
+
+  Recordings can carry both ``joint_action`` and ``ee_action``; the choice
+  is made by the training-time config, not the recording. Hard-errors
+  when the requested stream is absent so a dim mismatch never reaches
+  the world model.
+  """
+  key = "joint_action" if act_mode == "joint" else "ee_action" if act_mode == "ee" else None
+  if key is None:
+    raise ValueError(f"unknown act_mode={act_mode!r}; expected 'joint' or 'ee'")
+  if key not in raw:
+    raise KeyError(
+      f"episode missing {key!r} (required by act_mode={act_mode!r}); "
+      f"present action keys: "
+      f"{sorted(k for k in raw if k in ('joint_action', 'ee_action')) or 'none'}"
+    )
+  return np.asarray(raw[key], dtype=np.float32)
 
 
-def _pack(obs: Observation, raw: RawEpisode) -> Episode:
+def _pack(obs: Observation, raw: RawEpisode, act_mode: str) -> Episode:
   """Align a per-step :class:`Observation` with the buffer's layout.
 
   Sim episodes record N aligned steps of (obs_t, action_t, reward_t).
@@ -74,7 +86,7 @@ def _pack(obs: Observation, raw: RawEpisode) -> Episode:
   if N < 2:
     raise ValueError(f"episode too short: {N} steps (need >= 2)")
 
-  action   = _resolve_action(raw)[: N - 1]
+  action   = _resolve_action(raw, act_mode)[: N - 1]
   reward   = np.asarray(raw["reward"], dtype=np.float32)[: N - 1]
   done     = np.zeros((N - 1,), dtype=bool)
   done[-1] = True
@@ -164,6 +176,10 @@ class EpisodeProcessor:
   ignored for ``state``. ``focus_mask_sources`` names raw segmentation
   keys (e.g. ``"segmentation_target"``) whose union becomes the per-step
   focus mask attached to the observation; empty disables it.
+
+  ``act_mode`` (``"joint"`` or ``"ee"``) picks which action stream to
+  read off the recording. Recordings may carry both; the training config
+  decides which view the world model sees.
   """
 
   def __init__(
@@ -171,14 +187,16 @@ class EpisodeProcessor:
     obs_mode: ObsMode,
     image_size: int | None = None,
     focus_mask_sources: tuple[str, ...] = (),
+    act_mode: str = "ee",
   ):
     self.obs_mode = obs_mode
     self.image_size = None if image_size is None else int(image_size)
     self.focus_mask_sources = tuple(focus_mask_sources)
+    self.act_mode = str(act_mode)
 
   def __call__(self, raw: RawEpisode) -> Episode:
     obs = _build_observation(raw, self.obs_mode, self.image_size, self.focus_mask_sources)
-    return _pack(obs, raw)
+    return _pack(obs, raw, self.act_mode)
 
 
 def processor_for(config) -> EpisodeProcessor:
@@ -188,16 +206,19 @@ def processor_for(config) -> EpisodeProcessor:
   ``derive_image_size`` OmegaConf resolver from the encoder strides) is
   the side length captured frames are resized to. ``focus_mask_sources``
   is pulled from ``training.losses.focus_masks`` and only applied to
-  image-having modes.
+  image-having modes. ``act_mode`` is read from ``config.env.act_mode``
+  and selects which action stream the processor reads from each recording.
   """
   obs_mode = str(config.env.obs_mode)
+  act_mode = str(config.env.act_mode)
   if obs_mode == "state":
-    return EpisodeProcessor("state")
+    return EpisodeProcessor("state", act_mode=act_mode)
   if obs_mode in ("image", "image_proprio"):
     focus_sources = tuple(config.training.losses.get("focus_masks", []) or [])
     return EpisodeProcessor(
       obs_mode,
       image_size=int(config.model.encoder.image_size),
       focus_mask_sources=focus_sources,
+      act_mode=act_mode,
     )
   raise ValueError(f"Unknown obs_mode: {obs_mode!r}")

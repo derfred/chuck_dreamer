@@ -278,7 +278,8 @@ def test_import_dataset_per_episode_shapes_and_metadata(tmp_path, fake_repo):
   assert ep0["image"].shape == (6, H, W, 3)
   assert ep0["joint_qpos"].shape == (6, 6)
   assert ep0["joint_action"].shape == (6, 6)
-  assert ep0["act_mode"] == "joint"
+  assert "act_mode" not in ep0
+  assert "ee_action" not in ep0
   assert ep1["image"].shape == (4, H, W, 3)
   assert ep1["joint_action"].shape == (4, 6)
 

@@ -56,8 +56,8 @@ def EpisodeWriter(output_dir: str, format: str = "hdf5"):
 
 
 # Per-step columns shared by all action modes for sim writes.
-# ``joint_action`` xor ``ee_action`` is selected at write time based on
-# which key the episode dict contains.
+# ``joint_action`` and ``ee_action`` may both ride along — the file is
+# action-space-agnostic and the training pipeline picks which to read.
 _REQUIRED_KEYS = (
     "image", "reward", "timestamp",
     "joint_qpos", "ee_pos", "ee_quat", "object_xy",
@@ -76,17 +76,21 @@ def _serialize_metadata_config(metadata: dict[str, Any] | None) -> str | None:
     return json.dumps(cfg if isinstance(cfg, dict) else asdict(cfg))  # type: ignore[arg-type]
 
 
-def _resolve_action(episode: dict[str, np.ndarray]) -> tuple[str, np.ndarray]:
-    """Return (kind, array) where kind is 'joint_action' or 'ee_action'.
+def _collect_actions(episode: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Return ``{kind: array}`` for whichever of joint_action / ee_action are present.
 
-    Episodes recorded under ``act_mode='joint'`` carry ``joint_action``;
-    EE-mode episodes carry ``ee_action``. Exactly one must be present.
+    Recordings may carry both: the file is action-space-agnostic and the
+    training pipeline picks which view to use at load time based on
+    ``config.env.act_mode``. At least one must be present.
     """
-    if "joint_action" in episode:
-        return "joint_action", np.asarray(episode["joint_action"], dtype=np.float32)
-    if "ee_action" in episode:
-        return "ee_action", np.asarray(episode["ee_action"], dtype=np.float32)
-    raise KeyError("episode is missing an action field (expected joint_action or ee_action)")
+    out: dict[str, np.ndarray] = {}
+    for key in ("joint_action", "ee_action"):
+        if key in episode:
+            out[key] = np.asarray(episode[key], dtype=np.float32)
+    if not out:
+        raise KeyError(
+            "episode is missing an action field (expected joint_action and/or ee_action)")
+    return out
 
 
 def _denormalize_recon_image(recon: np.ndarray) -> np.ndarray:
@@ -193,8 +197,8 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
     structure::
 
         images          (T, H, W, 3)    uint8
-        joint_action    (T, n_joints)   float32   — present iff act_mode == "joint"
-        ee_action       (T, 7)          float32   — present iff act_mode == "ee"
+        joint_action    (T, n_joints)   float32   — optional, present when the caller supplies it
+        ee_action       (T, 7)          float32   — optional, present when the caller supplies it
         rewards         (T,)            float32
         timestamps      (T,)            float32
         joint_qpos      (T, n_joints)   float32
@@ -213,7 +217,10 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
             source      scalar string
             outcome     scalar string
             goal_xy     (2,) float32
-            act_mode    scalar string ("joint" | "ee")
+
+    Files may carry one or both action streams. The on-disk recording is
+    action-space-agnostic; :class:`EpisodeProcessor` picks which view to
+    use at load time based on ``config.env.act_mode``.
 
     Eval episodes go to ``output_dir/eval-{suffix}.hdf5`` with::
 
@@ -265,8 +272,9 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
         *,
         name_suffix: str,
     ) -> Path:
-        action_kind, action = _resolve_action(episode)
-        if action.shape[0] == 0:
+        actions = _collect_actions(episode)
+        T = next(iter(actions.values())).shape[0]
+        if T == 0:
             raise ValueError("episode must not be empty")
 
         rewards    = np.asarray(episode["reward"],     dtype=np.float32)
@@ -280,7 +288,8 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
         ep_path = self._path_for(EPISODE_FILENAME_PREFIX, name_suffix)
         with h5py.File(ep_path, "w") as f:
             f.create_dataset("images",     data=images,  compression="gzip", compression_opts=4)
-            f.create_dataset(action_kind,  data=action)
+            for kind, arr in actions.items():
+                f.create_dataset(kind, data=arr)
             f.create_dataset("rewards",    data=rewards)
             f.create_dataset("timestamps", data=timestamps)
             f.create_dataset("joint_qpos", data=joint_qpos)
@@ -291,8 +300,6 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
             self._write_segmentation_hdf5(f, episode)
 
             meta_grp = f.create_group("metadata")
-            act_mode = "joint" if action_kind == "joint_action" else "ee"
-            meta_grp.create_dataset("act_mode", data=act_mode)
             if metadata is not None:
                 cfg = _serialize_metadata_config(metadata)
                 if cfg is not None:
@@ -403,8 +410,9 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         *,
         name_suffix: str,
     ) -> Path:
-        action_kind, action = _resolve_action(episode)
-        if action.shape[0] == 0:
+        actions = _collect_actions(episode)
+        T = next(iter(actions.values())).shape[0]
+        if T == 0:
             raise ValueError("episode must not be empty")
 
         import rerun as rr
@@ -412,9 +420,7 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         ep_path = self._path_for(EPISODE_FILENAME_PREFIX, name_suffix)
         rec = self._new_recording(f"{EPISODE_FILENAME_PREFIX}-{name_suffix}")
 
-        act_mode = "joint" if action_kind == "joint_action" else "ee"
         props = _rerun_metadata_props(metadata)
-        props["act_mode"] = act_mode
         if metadata is not None and metadata.get("goal_xy") is not None:
             goal = np.asarray(metadata["goal_xy"], dtype=np.float32)
             props["goal_xy"] = f"[{float(goal[0])}, {float(goal[1])}]"
@@ -438,13 +444,13 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         seg_background = episode.get("segmentation_background")
         seg_clutter    = episode.get("segmentation_clutter")  # (T, K, H, W) or None
 
-        T = action.shape[0]
         for i in range(T):
             rec.set_time("step", sequence=i)
             rec.set_time("time", duration=float(timestamps[i]))
 
             rec.log("camera/image", rr.Image(images[i]))
-            rec.log(action_kind,    rr.Scalars(action[i].tolist()))
+            for kind, arr in actions.items():
+                rec.log(kind, rr.Scalars(arr[i].tolist()))
             rec.log("reward",       rr.Scalars(float(rewards[i])))
             rec.log("joint_qpos",   rr.Scalars(joint_qpos[i].tolist()))
             rec.log("ee_pos",       rr.Scalars(ee_pos[i].tolist()))

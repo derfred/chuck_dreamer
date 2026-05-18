@@ -557,7 +557,7 @@ class TestEpisodeWriter:
       assert f["ee_quat"].shape        == (5, 4)
       assert f["object_xy"].shape      == (5, 2)
       meta = f["metadata"]
-      assert "joint" in str(meta["act_mode"][()])
+      assert "act_mode" not in meta
       assert int(meta["seed"][()])     == 42
       assert "sim" in str(meta["source"][()])
       assert "done" in str(meta["outcome"][()])
@@ -570,7 +570,7 @@ class TestEpisodeWriter:
     with h5py.File(path, "r") as f:
       assert f["ee_action"].shape == (5, 7)
       assert "joint_action" not in f
-      assert "ee" in str(f["metadata/act_mode"][()])
+      assert "act_mode" not in f["metadata"]
 
   def test_config_is_valid_json(self, tmp_path):
     writer = EpisodeWriter(str(tmp_path))

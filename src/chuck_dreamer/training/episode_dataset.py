@@ -51,7 +51,7 @@ SUPPORTED_FORMATS = ("hdf5", "rerun")
 # format but are properties of the whole episode. We surface them on
 # ``Episode.metadata`` so call sites can read them without sniffing the
 # raw arrays dict.
-_METADATA_KEYS: tuple[str, ...] = ("act_mode", "goal_xy", "tags")
+_METADATA_KEYS: tuple[str, ...] = ("goal_xy", "tags")
 
 
 # ---------------------------------------------------------------------------
@@ -79,12 +79,14 @@ def _load_hdf5_episode(path: str | Path) -> RawEpisode:
     for key, dataset in _HDF5_DATASET.items():
       raw[key] = np.asarray(f[dataset][()])
 
-    if "joint_action" in f:
+    has_joint = "joint_action" in f
+    has_ee    = "ee_action"    in f
+    if has_joint:
       raw["joint_action"] = np.asarray(f["joint_action"][()])
-    elif "ee_action" in f:
+    if has_ee:
       raw["ee_action"] = np.asarray(f["ee_action"][()])
-    else:
-      raise KeyError(f"{path}: missing action dataset (joint_action or ee_action)")
+    if not (has_joint or has_ee):
+      raise KeyError(f"{path}: missing action dataset (joint_action and/or ee_action)")
 
     if "segmentation" in f:
       seg_grp = f["segmentation"]
@@ -93,9 +95,6 @@ def _load_hdf5_episode(path: str | Path) -> RawEpisode:
 
     if "metadata" in f:
       meta = f["metadata"]
-      if "act_mode" in meta:
-        am = meta["act_mode"][()]
-        raw["act_mode"] = am.decode("utf-8") if isinstance(am, bytes) else str(am)
       if "goal_xy" in meta:
         raw["goal_xy"] = np.asarray(meta["goal_xy"][()], dtype=np.float32)
       if "tags" in meta:
@@ -147,12 +146,14 @@ def _load_rerun_episode(path: str | Path) -> RawEpisode:
     return _ordered_scalar_column(by_entity[entity])
 
   raw: RawEpisode = {}
-  if "/joint_action" in by_entity:
+  has_joint = "/joint_action" in by_entity
+  has_ee    = "/ee_action"    in by_entity
+  if has_joint:
     raw["joint_action"] = _scalars("/joint_action")
-  elif "/ee_action" in by_entity:
+  if has_ee:
     raw["ee_action"] = _scalars("/ee_action")
-  else:
-    raise KeyError(f"{path}: missing action entity (/joint_action or /ee_action)")
+  if not (has_joint or has_ee):
+    raise KeyError(f"{path}: missing action entity (/joint_action and/or /ee_action)")
 
   raw["reward"] = _scalars("/reward").reshape(-1)
   raw["joint_qpos"] = _scalars("/joint_qpos")
