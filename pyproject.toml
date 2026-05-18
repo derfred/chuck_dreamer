@@ -60,6 +60,7 @@ dependencies = [
     "trimesh>=4.12.2",
     "rerun-sdk[all]>=0.30.0",
     "lerobot[dataset,feetech]",
+    "pynput>=1.8.2",
 ]
 
 [build-system]
