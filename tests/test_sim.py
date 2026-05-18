@@ -227,6 +227,7 @@ class TestSceneBuilder:
 # PushingEnv tests — joint action mode (default for these fixtures)
 # ---------------------------------------------------------------------------
 
+
 def _zero_joint_action(n_joints: int) -> np.ndarray:
   return np.zeros(n_joints, dtype=np.float32)
 

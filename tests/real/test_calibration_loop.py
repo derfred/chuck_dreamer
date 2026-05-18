@@ -8,8 +8,6 @@ tolerance.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import cv2
 import numpy as np
 
@@ -55,9 +53,9 @@ def test_calibrate_cameras_recovers_K(tmp_path):
   spec = CheckerboardSpec(cols=9, rows=6, square_size_m=0.02)
   W, H = 640, 480
   K_true = np.array([
-    [550.0,   0.0, 320.0],
-    [  0.0, 550.0, 240.0],
-    [  0.0,   0.0,   1.0],
+    [550.0, 0.0, 320.0],
+    [0.0, 550.0, 240.0],
+    [0.0, 0.0, 1.0],
   ])
 
   # Choose 8 plausible poses (board ~0.4 m away, modest tilts).

@@ -153,9 +153,9 @@ class Evaluator:
 
         eval_tracker.maybe_log_eval_episode(
           self._episode_artifacts(episode, result, burn_in),
-          iteration       = iteration,
-          source_filename = stem,
-          data            = {
+          iteration=iteration,
+          source_filename=stem,
+          data={
             "episode_index": ep_idx,
             "burn_in":       burn_in,
           },

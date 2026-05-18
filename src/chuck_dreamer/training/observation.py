@@ -254,10 +254,10 @@ class Observation:
       return None if arr is None else arr[idx]
     return replace(
       self,
-      state      = take(self.state),
-      image      = take(self.image),
-      proprio    = take(self.proprio),
-      focus_mask = take(self.focus_mask),
+      state=take(self.state),
+      image=take(self.image),
+      proprio=take(self.proprio),
+      focus_mask=take(self.focus_mask),
     )
 
   def map_arrays(self, fn: Callable[[Any], Any]) -> "Observation":
@@ -269,10 +269,10 @@ class Observation:
     """
     return replace(
       self,
-      state      = None if self.state      is None else fn(self.state),
-      image      = None if self.image      is None else fn(self.image),
-      proprio    = None if self.proprio    is None else fn(self.proprio),
-      focus_mask = None if self.focus_mask is None else fn(self.focus_mask),
+      state=None if self.state is None else fn(self.state),
+      image=None if self.image is None else fn(self.image),
+      proprio=None if self.proprio is None else fn(self.proprio),
+      focus_mask=None if self.focus_mask is None else fn(self.focus_mask),
     )
 
   def add_batch_axis(self) -> "Observation":

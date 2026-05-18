@@ -53,7 +53,7 @@ class CEMPolicy:
     init_std:       float = 1.0,
     min_std:        float = 0.1,
     action_low:     float | np.ndarray = -1.0,
-    action_high:    float | np.ndarray =  1.0,
+    action_high:    float | np.ndarray = 1.0,
     warm_start:     bool = True,
   ) -> None:
     self.model          = model
@@ -137,13 +137,14 @@ class CEMPolicy:
     model's native tensor type (mlx.array or torch.Tensor).
     """
     from .world_model import Distribution
+
     def rep(x):
       return self.model.broadcast_to(x, (n,) + tuple(x.shape[1:]))
     return State(
-      h         = rep(state.h),
-      s         = rep(state.s),
-      prior     = Distribution(mean=rep(state.prior.mean), std=rep(state.prior.std)),
-      posterior = None if state.posterior is None else Distribution(
+      h=rep(state.h),
+      s=rep(state.s),
+      prior=Distribution(mean=rep(state.prior.mean), std=rep(state.prior.std)),
+      posterior=None if state.posterior is None else Distribution(
         mean=rep(state.posterior.mean), std=rep(state.posterior.std),
       ),
     )
@@ -171,12 +172,12 @@ class CEMPolicy:
     """
     traj = rollout(
       self.model,
-      init_state     = plan_state,
-      horizon        = self.horizon,
-      mode           = "prior",
-      actions        = samples,  # (N, H, A) numpy — rollout() coerces it
-      sample         = False,
-      predict_reward = True,
+      init_state=plan_state,
+      horizon=self.horizon,
+      mode="prior",
+      actions=samples,  # (N, H, A) numpy — rollout() coerces it
+      sample=False,
+      predict_reward=True,
     )
     # ``as_numpy`` handles both mlx.array (numpy-compatible) and
     # torch.Tensor (needs ``detach().cpu()`` since the model params have

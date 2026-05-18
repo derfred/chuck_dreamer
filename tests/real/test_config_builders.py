@@ -116,6 +116,7 @@ def test_resolve_camera_specs_honours_explicit_overrides(monkeypatch, base_cfg):
 def test_resolve_camera_specs_skip_probe_when_all_concrete(monkeypatch, base_cfg):
   # Hard-fail if cv2.VideoCapture is touched.
   import cv2
+
   def _bomb(_):
     raise AssertionError("VideoCapture must not be called when no 'auto' fields")
   monkeypatch.setattr(cv2, "VideoCapture", _bomb)

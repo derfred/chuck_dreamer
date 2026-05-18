@@ -52,9 +52,9 @@ def test_solve_intrinsics_recovers_known_K():
   spec = CheckerboardSpec(cols=9, rows=6, square_size_m=0.025)
   W, H = 640, 480
   K_true = np.array([
-    [600.0,   0.0, 320.0],
-    [  0.0, 600.0, 240.0],
-    [  0.0,   0.0,   1.0],
+    [600.0, 0.0, 320.0],
+    [0.0, 600.0, 240.0],
+    [0.0, 0.0, 1.0],
   ])
   captures = _synthetic_captures(spec, K_true, (W, H), n_views=15)
   intr = solve_intrinsics(captures, spec, (W, H))

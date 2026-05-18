@@ -69,7 +69,7 @@ class Tracker:
     number = root._collect_episode_count // every
     root._episode_writer.write_episode(
       episode_data,
-      metadata = {
+      metadata={
         "config":  asdict(scene),
         "seed":    self.config.seed,
         "source":  "collect",
@@ -77,7 +77,7 @@ class Tracker:
         "goal_xy": scene.goal_pos,
         **data,
       },
-      name_suffix = f"{name}{number:03d}",
+      name_suffix=f"{name}{number:03d}",
     )
 
   def maybe_log_eval_episode(self, episode_data, *, iteration, source_filename, data={}):
@@ -113,13 +113,13 @@ class Tracker:
 
     root._episode_writer.write_eval_episode(
       episode_data,
-      metadata = {
+      metadata={
         "seed":      self.config.seed,
         "source":    "eval",
         "iteration": iteration,
         **data,
       },
-      name_suffix = f"iteration{iteration:04d}-{source_filename}",
+      name_suffix=f"iteration{iteration:04d}-{source_filename}",
     )
 
   def log(self, data: dict, **kwargs):

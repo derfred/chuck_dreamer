@@ -492,7 +492,7 @@ class PushingEnv(gym.Env):
     types   = seg[..., 1]
     is_geom = types == mujoco.mjtObj.mjOBJ_GEOM
 
-    masks   = { "background": ids == -1 }
+    masks   = {"background": ids == -1}
     covered = np.zeros(ids.shape, dtype=bool)
     for name, gid in self._seg_geom_ids.items():
       m = is_geom & (ids == gid)

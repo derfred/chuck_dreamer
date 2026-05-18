@@ -17,7 +17,6 @@ import pytest
 from omegaconf import OmegaConf
 
 from chuck_dreamer.real import recorder
-from chuck_dreamer.real.scene_registration import OpenCVFrameSource
 
 from ._stubs import StubFrameSource, StubUi
 

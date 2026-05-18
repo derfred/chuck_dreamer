@@ -17,7 +17,7 @@ import pytest
 
 av = pytest.importorskip("av")
 
-from chuck_dreamer.sim import lerobot_import as li
+from chuck_dreamer.sim import lerobot_import as li  # noqa: E402
 
 
 VIDEO_KEY = "observation.images.wrist"

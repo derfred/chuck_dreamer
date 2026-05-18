@@ -448,9 +448,9 @@ class EpisodeDataset:
     if self._loaded is not None:
       return self
     self._loaded = list(self._stream(
-      paths        = self._pick_paths(num_episodes, rng),
-      num_workers  = self._resolve_workers(num_workers),
-      progress     = progress,
+      paths=self._pick_paths(num_episodes, rng),
+      num_workers=self._resolve_workers(num_workers),
+      progress=progress,
     ))
     return self
 
@@ -469,9 +469,9 @@ class EpisodeDataset:
     to revisit. Does not populate :attr:`loaded`.
     """
     yield from self._stream(
-      paths        = self._pick_paths(num_episodes, rng),
-      num_workers  = self._resolve_workers(num_workers),
-      progress     = progress,
+      paths=self._pick_paths(num_episodes, rng),
+      num_workers=self._resolve_workers(num_workers),
+      progress=progress,
     )
 
   # ---------- access after load() ----------

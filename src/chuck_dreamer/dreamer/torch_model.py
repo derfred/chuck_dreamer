@@ -35,9 +35,8 @@ cross-backend portability becomes required:
 
 from __future__ import annotations
 
-import math
 import os
-from typing import Any, Iterable, cast
+from typing import cast
 
 import numpy as np
 import torch
@@ -794,8 +793,8 @@ class DreamerTorchModel:
                                                        device=self.device))
 
     loss = (self.config.training.losses.recon_scale * recon_loss
-         +  self.config.training.losses.reward_scale * rew_loss
-         +  self.config.training.losses.kl_scale     * kl)
+         + self.config.training.losses.reward_scale * rew_loss
+         + self.config.training.losses.kl_scale     * kl)
 
     aux_out: dict = {"recon": recon_loss, "rew": rew_loss, "kl": kl,
                      "kl_per_dim": kl_per_dim_btmean,

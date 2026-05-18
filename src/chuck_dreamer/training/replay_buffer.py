@@ -394,10 +394,10 @@ class ReplayBuffer:
     dataset = EpisodeDataset(directory, format=format)
     count   = 0
     for episode in dataset.stream(
-      progress     = progress,
-      num_episodes = num_episodes,
-      rng          = self._rng,
-      num_workers  = self._default_num_workers,
+      progress=progress,
+      num_episodes=num_episodes,
+      rng=self._rng,
+      num_workers=self._default_num_workers,
     ):
       before = self.num_episodes
       self.add_sim_episode(episode.data)

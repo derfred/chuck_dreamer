@@ -377,13 +377,13 @@ def rollout(
       rewards = model.predict_reward(feats_cached)
 
   traj = Trajectory(
-    states   = states,
-    actions  = actions_out,
-    mode     = modes,
-    embeds   = embeds,
-    obs_pred = obs_pred,
-    rewards  = rewards,
-    stacker  = stacker,
+    states=states,
+    actions=actions_out,
+    mode=modes,
+    embeds=embeds,
+    obs_pred=obs_pred,
+    rewards=rewards,
+    stacker=stacker,
   )
   # If we already computed the stacked feature for decoding, cache it on
   # the trajectory so post-processing doesn't pay for it again.
@@ -456,7 +456,6 @@ def eval_split_rollout(
   if actions is None or embeds is None:
     raise ValueError("eval_split_rollout requires both `embeds` and `actions`")
 
-  total = burn_in + horizon
   # Defer detailed shape checks to the backend — different array libs
   # report shape mismatches differently and we don't want to dictate one.
 
@@ -470,41 +469,41 @@ def eval_split_rollout(
   if burn_in > 0:
     burn = rollout(
       model,
-      init_state = init_state,
-      horizon    = burn_in,
-      mode       = "posterior",
-      actions    = actions[:, :burn_in],
-      embeds     = embeds[:, :burn_in],
-      sample     = sample,
-      decode     = False,
-      predict_reward = False,
+      init_state=init_state,
+      horizon=burn_in,
+      mode="posterior",
+      actions=actions[:, :burn_in],
+      embeds=embeds[:, :burn_in],
+      sample=sample,
+      decode=False,
+      predict_reward=False,
     )
     anchor = burn.states[-1]
   else:
     anchor = init_state
 
   tail_actions = actions[:, burn_in:burn_in + horizon]
-  tail_embeds  = embeds [:, burn_in:burn_in + horizon]
+  tail_embeds  = embeds[:, burn_in:burn_in + horizon]
 
   posterior = rollout(
     model,
-    init_state = anchor,
-    horizon    = horizon,
-    mode       = "posterior",
-    actions    = tail_actions,
-    embeds     = tail_embeds,
-    sample     = sample,
-    decode     = decode,
-    predict_reward = predict_reward,
+    init_state=anchor,
+    horizon=horizon,
+    mode="posterior",
+    actions=tail_actions,
+    embeds=tail_embeds,
+    sample=sample,
+    decode=decode,
+    predict_reward=predict_reward,
   )
   prior = rollout(
     model,
-    init_state = anchor,
-    horizon    = horizon,
-    mode       = "prior",
-    actions    = tail_actions,
-    sample     = sample,
-    decode     = decode,
-    predict_reward = predict_reward,
+    init_state=anchor,
+    horizon=horizon,
+    mode="prior",
+    actions=tail_actions,
+    sample=sample,
+    decode=decode,
+    predict_reward=predict_reward,
   )
   return EvalRollout(anchor=anchor, posterior=posterior, prior=prior)

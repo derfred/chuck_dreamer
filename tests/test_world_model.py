@@ -52,11 +52,11 @@ def _mlx_backend() -> Backend | None:
   except ImportError:
     return None
   return Backend(
-    name     = "mlx",
-    zeros    = lambda shape: mx.zeros(shape),
-    ones     = lambda shape: mx.ones(shape),
-    equal    = lambda a, b: bool(mx.array_equal(a, b)),
-    allclose = lambda a, b: bool(mx.allclose(a, b)),
+    name="mlx",
+    zeros=lambda shape: mx.zeros(shape),
+    ones=lambda shape: mx.ones(shape),
+    equal=lambda a, b: bool(mx.array_equal(a, b)),
+    allclose=lambda a, b: bool(mx.allclose(a, b)),
   )
 
 
@@ -66,11 +66,11 @@ def _torch_backend() -> Backend | None:
   except ImportError:
     return None
   return Backend(
-    name     = "cpu",  # routes to DreamerTorchModel
-    zeros    = lambda shape: torch.zeros(*shape),
-    ones     = lambda shape: torch.ones(*shape),
-    equal    = lambda a, b: bool(torch.equal(a, b)),
-    allclose = lambda a, b: bool(torch.allclose(a, b)),
+    name="cpu",  # routes to DreamerTorchModel
+    zeros=lambda shape: torch.zeros(*shape),
+    ones=lambda shape: torch.ones(*shape),
+    equal=lambda a, b: bool(torch.equal(a, b)),
+    allclose=lambda a, b: bool(torch.allclose(a, b)),
   )
 
 
@@ -163,11 +163,11 @@ def test_rollout_posterior_only_with_explicit_actions_and_embeds(backend: Backen
 
   traj = rollout(
     model,
-    init_state = model.initial_state(B),
-    horizon    = T,
-    mode       = "posterior",
-    actions    = actions,
-    embeds     = embeds,
+    init_state=model.initial_state(B),
+    horizon=T,
+    mode="posterior",
+    actions=actions,
+    embeds=embeds,
   )
   assert isinstance(traj, Trajectory)
   assert len(traj.states) == T
@@ -210,12 +210,12 @@ def test_rollout_burn_in_splits_modes_correctly(backend: Backend):
   embeds  = model.encode(obs)
   traj = rollout(
     model,
-    init_state = model.initial_state(B),
-    horizon    = T,
-    mode       = "prior",
-    burn_in    = 2,
-    actions    = actions,
-    embeds     = embeds,
+    init_state=model.initial_state(B),
+    horizon=T,
+    mode="prior",
+    burn_in=2,
+    actions=actions,
+    embeds=embeds,
   )
   assert traj.mode == ["posterior", "posterior", "prior", "prior", "prior"]
 

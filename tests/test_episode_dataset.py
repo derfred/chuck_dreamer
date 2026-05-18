@@ -679,7 +679,6 @@ def test_untagged_episodes_get_empty_tag_tuple_in_buffer(tmp_path, fmt):
   assert buf._episodes[0]["tags"] == ()
 
 
-
 # ---------------------------------------------------------------------------
 # Action streams — both can be written, processor picks based on act_mode
 # ---------------------------------------------------------------------------

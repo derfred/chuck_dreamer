@@ -250,6 +250,7 @@ def _calibrate_one_camera(
 
   return None
 
+
 def calibrate_cameras(
   sources: dict[str, FrameSource],
   spec: CheckerboardSpec,
@@ -463,7 +464,6 @@ __all__ = [
   "calibrate_cameras",
   "register_markers",
   "register_scene",
-  "solve_intrinsics",
   "default_ui",
 ]
 

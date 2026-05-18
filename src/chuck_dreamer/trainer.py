@@ -1,13 +1,11 @@
 import logging
 import os
 from collections import defaultdict
-from dataclasses import asdict
 import tqdm
 
 from .reward import build_reward_fn
 from .sim.pushing_env import PushingEnv
 from .sim.episode_collector import EpisodeCollector
-from .sim.episode_writer import EpisodeWriter
 
 from .training.episode_processor import processor_for
 from .training.evaluator import Evaluator
@@ -71,7 +69,8 @@ class Trainer:
 
   def _collect_phase(self, iteration: int):
     collect_data = defaultdict(int)
-    for _ in tqdm.tqdm(range(self.config.training.num_collect_episodes), desc=f"Collecting episodes - iteration {iteration}", total=self.config.training.num_collect_episodes):
+    num_collect  = self.config.training.num_collect_episodes
+    for _ in tqdm.tqdm(range(num_collect), desc=f"Collecting episodes - iteration {iteration}", total=num_collect):
       scene = self.collector.reset()
       if self.config.env.max_steps is not None:
         scene.max_steps = int(self.config.env.max_steps)
@@ -81,7 +80,7 @@ class Trainer:
 
       if episode_data is not None:
         self._replay_buffer.add_sim_episode(episode_data)
-        self.tracker.maybe_log_collect_episode(episode_data, scene, outcome, { "iteration": iteration })
+        self.tracker.maybe_log_collect_episode(episode_data, scene, outcome, {"iteration": iteration})
 
     self.tracker.log({
       "phase": "collect",
@@ -97,7 +96,8 @@ class Trainer:
         logger.warning("Buffer too small to sample (have %d steps); skipping train phase.", len(self._replay_buffer))
         return
 
-      for _ in tqdm.tqdm(range(self.config.training.num_gradient_steps), desc=f"Training - iteration {iteration}", total=self.config.training.num_gradient_steps):
+      num_steps = self.config.training.num_gradient_steps
+      for _ in tqdm.tqdm(range(num_steps), desc=f"Training - iteration {iteration}", total=num_steps):
         batch = self._replay_buffer.sample(self.config.training.batch_size, self.config.training.seq_len)
         tracker.log_batch_tags(batch.pop("tags", []))
         self.model.wm_update(batch, tracker=tracker)

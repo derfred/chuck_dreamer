@@ -22,6 +22,7 @@ av = pytest.importorskip("av")
 from chuck_dreamer.sim import lerobot_import as li  # noqa: E402
 from chuck_dreamer.training.episode_dataset import Episode  # noqa: E402
 
+
 # Tests in this file pre-date the Episode wrapper and read raw arrays
 # directly. ``load_hdf5_episode`` is a thin shim around
 # ``Episode.from_file(...).data`` to keep call sites short.

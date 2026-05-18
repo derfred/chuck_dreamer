@@ -171,6 +171,7 @@ def test_rssm_imagine_returns_horizon_plus_one_states():
   rssm = _make_rssm()
   init = rssm.initial_state(2)
   calls: list[tuple[int, ...]] = []
+
   def policy_fn(f):
     calls.append(tuple(f.shape))
     return torch.zeros(f.shape[0], rssm.action_dim)
