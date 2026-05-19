@@ -203,6 +203,98 @@ def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
   click.echo(f"Done. Wrote {count} episodes.")
 
 
+@cli.command("analyze-cameras")
+@click.option("--dataset", "dataset_ids", multiple=True, required=True, metavar="REPO_ID",
+              help="LeRobot dataset id (HuggingFace repo) for one camera position. "
+                   "Pass --dataset repeatedly to calibrate several cameras in one run.")
+@click.option("--cache-dir", default=None, type=click.Path(),
+              help="Directory under which calibrations + verify overlays are stored. "
+                   "Defaults to cfg.object_localization.calibration_cache.")
+@click.option("--doctor-interactive/--doctor-no-interactive",
+              "doctor_interactive", default=True,
+              help="Open matplotlib review windows for every detection step "
+                   "(per-frame checkerboard accept/reject/click-fallback, "
+                   "mat detection auto-then-edit, final verify-overlay sign-off). "
+                   "Default: on. Pass --doctor-no-interactive for headless / batch runs.")
+@click.option("--force", is_flag=True,
+              help="Recompute calibrations even if a cached entry exists.")
+@click.option("--intrinsic-samples", default=60, type=int,
+              help="How many frames to sample from the checkerboard episode for intrinsics.")
+@click.option("--doctor", is_flag=True,
+              help="Diagnostic mode: inspect the datasets without fitting anything. "
+                   "Reports image dims, which expected episodes are present, "
+                   "whether checkerboards are detectable, and whether the mat "
+                   "auto-detector finds the fiducials. Diagnostic PNGs are "
+                   "written under <cache-dir>/doctor/<dataset>/ unless "
+                   "--doctor-no-images is set.")
+@click.option("--doctor-dir", default=None, type=click.Path(),
+              help="Where to write doctor diagnostic PNGs. Defaults to "
+                   "<cache-dir>/doctor/. Only used when --doctor is set.")
+@click.option("--doctor-no-images", is_flag=True,
+              help="Skip writing diagnostic PNGs in --doctor mode.")
+@override_option
+@click.pass_context
+def analyze_cameras(ctx, dataset_ids, cache_dir, doctor_interactive, force,
+                    intrinsic_samples, doctor, doctor_dir, doctor_no_images,
+                    overrides):
+  """Calibrate cameras from LeRobot calibration datasets (one per camera position).
+
+  Each dataset must follow the layout described in cfg.object_localization.episodes:
+    episode 0 — empty mat (extrinsics fit)
+    episode 1 — checkerboard (intrinsics fit)
+    episodes 2-4 — object placements (used for verify overlays)
+
+  Writes ``calibration.json`` per dataset under ``--cache-dir`` along with
+  verify overlays under ``<cache-dir>/<dataset>/verify/*.png``.
+
+  Use ``--doctor`` to dry-run the inspection. Diagnostic PNGs land under
+  ``<cache-dir>/doctor/<dataset>/`` so a user can eyeball the inputs.
+  """
+  from pathlib import Path as _Path
+
+  from chuck_dreamer.real.object_localization import init_from_config
+  from chuck_dreamer.real.object_localization.calibration import (
+    analyze_datasets, diagnose_datasets,
+  )
+
+  cfg = load_config(ctx.obj["config_path"], overrides=overrides)
+  ol_cfg = init_from_config(cfg)
+  resolved_cache = _Path(cache_dir) if cache_dir else _Path(ol_cfg.calibration_cache)
+
+  if doctor:
+    resolved_image_dir: _Path | None
+    if doctor_no_images:
+      resolved_image_dir = None
+    elif doctor_dir:
+      resolved_image_dir = _Path(doctor_dir)
+    else:
+      resolved_image_dir = resolved_cache / "doctor"
+    where = "no PNGs (--doctor-no-images)" if resolved_image_dir is None else str(resolved_image_dir)
+    click.echo(f"Doctor: inspecting {len(dataset_ids)} dataset(s) — diagnostic images: {where}")
+    reports = diagnose_datasets(list(dataset_ids), image_dir=resolved_image_dir)
+    for r in reports:
+      click.echo(r.format())
+    failed = [r for r in reports if not r.loaded]
+    if failed:
+      raise click.ClickException(
+        f"{len(failed)} dataset(s) failed to load — see report above")
+    return
+
+  click.echo(f"Calibrating {len(dataset_ids)} dataset(s) → {resolved_cache} "
+             f"(doctor_interactive={doctor_interactive}, force={force})")
+  results = analyze_datasets(
+    list(dataset_ids),
+    cache_dir=resolved_cache,
+    interactive=doctor_interactive,
+    force=force,
+  )
+  for did, cal in results.items():
+    click.echo(f"  {did}: intrinsic RMS={cal.intrinsic_rms_px:.3f}px  "
+               f"extrinsic RMS={cal.extrinsic_rms_px:.2f}px  "
+               f"image={cal.image_size}")
+  click.echo("Done.")
+
+
 @cli.command("show-scene")
 @click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
 @click.option("--step-delay", default=0.05, type=float, help="Seconds to sleep between steps (default 0.05)")
@@ -297,6 +389,8 @@ def train(ctx, experiment_name, seed, resume, overrides):
 @click.option("--checkpoint", "checkpoint_path", default=None, type=str,
               help="Path to a trained checkpoint .safetensors file. "
                    "Defaults to {save_dir}/{experiment}/latest.safetensors.")
+@click.option("--cleanup/--no-cleanup", default=None,
+              help="Whether to clean up intermediate files after evaluation. Defaults to cfg.eval.deep.cleanup.")
 @click.option("--num-episodes", default=None, type=int,
               help="Episodes to evaluate on. Defaults to cfg.eval.deep.num_episodes.")
 @click.option("--burn-in", default=None, type=int,
@@ -312,7 +406,7 @@ def train(ctx, experiment_name, seed, resume, overrides):
 @override_option
 @click.pass_context
 def eval_cmd(ctx, name, run_all, recordings, checkpoint_path, num_episodes,
-             burn_in, horizon, seed, output_dir, extra_params, overrides):
+             burn_in, horizon, seed, output_dir, extra_params, cleanup, overrides):
   """Run deep eval on a trained checkpoint.
 
   Three modes:
@@ -400,6 +494,10 @@ def eval_cmd(ctx, name, run_all, recordings, checkpoint_path, num_episodes,
   if summary["recordings_path"]:
     click.echo(f"  recordings → {summary['recordings_path']}")
 
+  if cleanup:
+    click.echo("Cleaning up checkpoint...")
+    os.unlink(checkpoint_path)
+    click.echo("Cleanup done.")
 
 if __name__ == "__main__":
     cli()

@@ -28,6 +28,7 @@ def load_config_from_checkpoint(path: str):
   this does not depend on any custom OmegaConf resolvers being registered.
   """
   _, metadata = mx.load(path, return_metadata=True)
+  assert isinstance(metadata, dict)
   yaml_str = metadata.get(CONFIG_METADATA_KEY)
   if not yaml_str:
     return None
@@ -910,6 +911,8 @@ class DreamerMLXModel:
     Empty dict if the checkpoint has no extra metadata.
     """
     flat_weights, metadata = mx.load(path, return_metadata=True)
+    assert isinstance(flat_weights, dict)
+    assert isinstance(metadata, dict)
 
     def take(prefix):
       plen = len(prefix) + 1

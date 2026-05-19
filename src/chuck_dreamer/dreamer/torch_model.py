@@ -116,7 +116,7 @@ class _ChannelLayerNorm(nn.Module):
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     # (N, C, H, W) -> (N, H, W, C) -> LN over last dim -> back
-    return self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
+    return cast(torch.Tensor, self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous())
 
 
 def feat(state: State) -> torch.Tensor:
@@ -241,7 +241,7 @@ class CNNEncoder(nn.Module):
     x = self.convs(x)
     x = x.reshape(x.shape[0], -1)
     x = self.proj_norm(self.proj(x))
-    return x.reshape(*lead, -1)
+    return cast(torch.Tensor, x.reshape(*lead, -1))
 
 
 class CNNDecoder(nn.Module):
@@ -301,7 +301,7 @@ class CNNDecoder(nn.Module):
     # NCHW -> NHWC for the public boundary.
     x = x.permute(0, 2, 3, 1).contiguous()
     H, W, C = x.shape[-3], x.shape[-2], x.shape[-1]
-    return x.reshape(*lead, H, W, C)
+    return cast(torch.Tensor, x.reshape(*lead, H, W, C))
 
 
 # ---------------------------------------------------------------------------
@@ -413,11 +413,11 @@ class RSSM(nn.Module):
 
   def _sample(self, dist: Distribution) -> torch.Tensor:
     eps = torch.randn_like(dist.mean)
-    return dist.mean + dist.std * eps
+    return cast(torch.Tensor, dist.mean + dist.std * eps)
 
   def _compute_h(self, prev_s: torch.Tensor, prev_a: torch.Tensor, prev_h: torch.Tensor) -> torch.Tensor:
     x = self.pre_gru(torch.cat([prev_s, prev_a], dim=-1))   # (B, hidden)
-    return self.gru(x, prev_h)                              # (B, deter_dim)
+    return cast(torch.Tensor, self.gru(x, prev_h))           # (B, deter_dim)
 
   def img_step(self, prev_state: State, prev_action: torch.Tensor, *, sample: bool = True) -> State:
     h     = self._compute_h(prev_state.s, prev_action, prev_state.h)
@@ -475,7 +475,7 @@ class RewardHead(nn.Module):
     self.net = _mlp(feat_dim, hidden, out_dim=1)
 
   def forward(self, feat_in: torch.Tensor) -> torch.Tensor:
-    return self.net(feat_in).squeeze(-1)
+    return cast(torch.Tensor, self.net(feat_in).squeeze(-1))
 
 
 class AuxHead(nn.Module):
@@ -535,7 +535,7 @@ class Critic(nn.Module):
     self.net = _mlp(feat_dim, hidden, out_dim=1)
 
   def forward(self, feat_in: torch.Tensor) -> torch.Tensor:
-    return self.net(feat_in).squeeze(-1)
+    return cast(torch.Tensor, self.net(feat_in).squeeze(-1))
 
 
 class _WMBundle(nn.Module):
@@ -772,16 +772,16 @@ class DreamerTorchModel:
     # output and target share a scale. ``target.focus_mask`` (B, T, H, W)
     # multiplies image-pixel errors by ``1 + focus_scale * mask``.
     if target.mode == "state":
-      return ((recon.state - target.state) ** 2).sum(-1).mean()
+      return cast(torch.Tensor, ((recon.state - target.state) ** 2).sum(-1).mean())
     diff = (recon.image - target.image) ** 2
     if target.focus_mask is not None:
       diff = diff * (1 + self.config.training.losses.focus_scale * target.focus_mask[..., None])
     img_loss = diff.sum(dim=(-3, -2, -1)).mean()
     if target.mode == "image":
-      return img_loss
+      return cast(torch.Tensor, img_loss)
     if target.mode == "image_proprio":
       pro_loss = ((recon.proprio - target.proprio) ** 2).sum(-1).mean()
-      return img_loss + pro_loss
+      return cast(torch.Tensor, img_loss + pro_loss)
     raise ValueError(f"unknown obs mode: {target.mode!r}")
 
   def _move_batch(self, batch: dict) -> dict:

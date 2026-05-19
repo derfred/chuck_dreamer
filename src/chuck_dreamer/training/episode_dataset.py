@@ -162,7 +162,7 @@ def _ordered_scalar_column(record_batches: list[Any], step_key: str = "step") ->
   steps = np.concatenate(step_parts) if len(step_parts) > 1 else step_parts[0]
   combined = pa.concat_arrays(scalar_cols) if len(scalar_cols) > 1 else scalar_cols[0]
   flat = np.asarray(combined.values, dtype=np.float32)
-  values = flat.reshape(steps.size, -1)
+  values: np.ndarray = flat.reshape(steps.size, -1)
   if steps.size > 1 and not np.all(steps[1:] >= steps[:-1]):
     order = np.argsort(steps, kind="stable")
     values = values[order]

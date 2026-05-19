@@ -66,7 +66,7 @@ def load_processor(path: str | Path) -> EpisodeFn:
   if fn is None or not callable(fn):
     raise AttributeError(
       f"processor script {p} must define a top-level callable named 'process'")
-  return fn
+  return fn  # type: ignore[no-any-return]
 
 
 @dataclass
@@ -167,6 +167,7 @@ def _decode_video_range(
   try:
     stream = container.streams.video[0]
     tb = stream.time_base
+    assert tb is not None
 
     seek_pts = int(from_ts / float(tb))
     container.seek(seek_pts, any_frame=False, backward=True, stream=stream)
@@ -174,6 +175,7 @@ def _decode_video_range(
     frames: list[np.ndarray] = []
     eps = 1e-4  # 0.1 ms tolerance for float vs rational pts
     for frame in container.decode(stream):
+      assert frame.pts is not None
       t = float(frame.pts * tb)
       if t + eps < from_ts:
         continue
@@ -212,7 +214,7 @@ def _select_video_key(
   if not video_keys:
     raise RuntimeError(f"{repo_id}: no video features in meta/info.json")
   if preferred is None:
-    return video_keys[0]
+    return str(video_keys[0])
   if preferred not in video_keys:
     raise ValueError(
       f"{repo_id}: video key {preferred!r} not in dataset (available: {video_keys})")
@@ -281,10 +283,9 @@ def import_dataset(
   returned path points at the file produced by :class:`HDF5EpisodeWriter`
   or :class:`RerunEpisodeWriter`.
   """
+  _derive_target_mask: Any = None
   if derive_target_mask:
-    from .blob_mask import derive_target_mask as _derive_target_mask
-  else:
-    _derive_target_mask = None
+    from .blob_mask import derive_target_mask as _derive_target_mask  # type: ignore[no-redef]
   local_root: Path | None = None
   if Path(repo_id).is_dir():
     local_root = Path(repo_id)

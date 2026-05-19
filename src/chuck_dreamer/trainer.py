@@ -80,7 +80,7 @@ class Trainer:
       raise ValueError(f"Unknown policy type {config.training.policy!r}")
 
   def _collect_phase(self, iteration: int):
-    collect_data = defaultdict(int)
+    collect_data: defaultdict[str, int] = defaultdict(int)
     num_collect  = self.config.training.num_collect_episodes
     for _ in tqdm.tqdm(range(num_collect), desc=f"Collecting episodes - iteration {iteration}", total=num_collect):
       scene = self.collector.reset()
@@ -169,10 +169,12 @@ class Trainer:
 
   def _checkpoint(self, step: int, temporary: bool = False) -> str:
     extra = {"iteration": str(int(step))}
+    path  = ""
     for path in self._checkpoint_paths(step, temporary):
       self.model.save(path, extra_metadata=extra)
     if not temporary:
       logger.info(f"Saved checkpoint to {path}")
+    return path
 
   def train(self, resume: bool | str = False):
     start = self._resume(resume)

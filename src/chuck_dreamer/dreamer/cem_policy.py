@@ -109,7 +109,7 @@ class CEMPolicy:
       std     = np.maximum(elites.std(axis=0), self.min_std)
 
     # 3. Play the first step of the refitted mean. Cache for warm-start.
-    action = np.clip(mean[0], self.action_low, self.action_high).astype(np.float32)
+    action: np.ndarray = np.clip(mean[0], self.action_low, self.action_high).astype(np.float32)
     self._mean        = mean
     self._prev_action = action
     return action
@@ -162,7 +162,7 @@ class CEMPolicy:
     """Sample ``(N, H, A)`` from a diagonal Gaussian, clipped to bounds."""
     noise = np.random.randn(self.num_samples, *mean.shape).astype(np.float32)
     samples = mean[None] + std[None] * noise
-    return np.clip(samples, self.action_low, self.action_high)
+    return np.asarray(np.clip(samples, self.action_low, self.action_high))
 
   def _score(self, plan_state: State, samples: np.ndarray) -> np.ndarray:
     """Return ``(N,)`` sums of predicted reward over the horizon.
@@ -183,4 +183,4 @@ class CEMPolicy:
     # torch.Tensor (needs ``detach().cpu()`` since the model params have
     # ``requires_grad=True``).
     rewards = as_numpy(traj.rewards)  # (N, H)
-    return rewards.sum(axis=-1)
+    return np.asarray(rewards.sum(axis=-1))

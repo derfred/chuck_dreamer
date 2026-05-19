@@ -268,7 +268,7 @@ class SceneGenerator:
       elif color_mode == "shared":
         shared           = _sample_color(rng)
         target_color     = shared
-        distractor_color = (lambda _rng, c=shared: list(c))
+        distractor_color = (lambda _rng, c=shared: list(c))  # type: ignore[misc]
       else:
         raise ValueError(f"Unknown color_mode '{color_mode}' in preset")
 

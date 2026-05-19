@@ -243,7 +243,7 @@ class DeepEvalRunner:
     extra_params:    dict[str, Any],
     summary:         dict[str, Any],
   ) -> None:
-    import papermill as pm
+    import papermill as pm  # type: ignore[import-untyped]
 
     notebooks_dir = _evals_dir()
     available     = available_notebooks()

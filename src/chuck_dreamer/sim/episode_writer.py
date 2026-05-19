@@ -99,9 +99,9 @@ def _denormalize_recon_image(recon: np.ndarray) -> np.ndarray:
     Out-of-range values are clipped so we get a viewable image even when
     the model has not converged yet.
     """
-    arr = np.asarray(recon, dtype=np.float32)
+    arr: np.ndarray = np.asarray(recon, dtype=np.float32)
     arr = np.clip(arr + 0.5, 0.0, 1.0) * 255.0
-    return arr.astype(np.uint8)
+    return np.asarray(arr.astype(np.uint8))
 
 
 def _coerce_image_for_log(img: np.ndarray) -> np.ndarray:
@@ -134,7 +134,7 @@ def _to_unit_float(img: np.ndarray) -> np.ndarray:
 
 def _pixel_diff(obs: np.ndarray, recon: np.ndarray) -> np.ndarray:
     """Return signed per-pixel difference ``obs - recon`` in ``[-1, 1]``."""
-    return _to_unit_float(obs) - _to_unit_float(recon)
+    return np.asarray(_to_unit_float(obs) - _to_unit_float(recon))
 
 
 def _diff_to_uint8(diff: np.ndarray) -> np.ndarray:

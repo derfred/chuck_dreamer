@@ -320,6 +320,8 @@ class PushingEnv(gym.Env):
 
   @property
   def action_space(self) -> spaces.Box:  # type: ignore[override]
+    low:  np.ndarray
+    high: np.ndarray
     if self.act_mode == "joint":
       if self.scene is None:
         n_joints = 6
@@ -349,11 +351,11 @@ class PushingEnv(gym.Env):
     if self.obs_mode == "image_proprio":
       return (np.asarray(image_obs.image, dtype=np.uint8), proprio)
 
-    return np.concatenate([
+    return np.asarray(np.concatenate([
       proprio[:7],  # ee_pos + ee_quat
       np.asarray(full_obs["object_xy"], dtype=np.float32),
       proprio[7:],  # arm_qpos
-    ])
+    ]))
 
   def generate_scene(self) -> SceneConfig:
     """Generate a new random scene config."""

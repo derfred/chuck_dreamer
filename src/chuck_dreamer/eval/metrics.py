@@ -46,14 +46,14 @@ def recon_l2(pred: Any, target: Any) -> np.ndarray:
   p = _as_float32(pred)
   t = _as_float32(target)
   diff = (p - t).reshape(p.shape[0], -1)
-  return np.linalg.norm(diff, axis=-1).astype(np.float32)
+  return np.asarray(np.linalg.norm(diff, axis=-1).astype(np.float32))
 
 
 def reward_abs_error(pred: Any, target: Any) -> np.ndarray:
   """``|pred - target|`` per step. Returns shape ``(T,)``."""
   p = _as_float32(pred).reshape(-1)
   t = _as_float32(target).reshape(-1)
-  return np.abs(p - t).astype(np.float32)
+  return np.asarray(np.abs(p - t).astype(np.float32))
 
 
 def zero_dynamics_prediction(target: Any, anchor_idx: int) -> Any:

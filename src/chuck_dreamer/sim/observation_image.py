@@ -42,7 +42,7 @@ class ObservationImage:
     """Union of all clutter masks. Zeros (H, W) if there is no clutter."""
     if not self.clutter_masks:
       return np.zeros(self.image.shape[:2], dtype=bool)
-    return np.logical_or.reduce(self.clutter_masks)
+    return np.asarray(np.logical_or.reduce(self.clutter_masks))
 
   @property
   def masks(self) -> dict[str, np.ndarray]:

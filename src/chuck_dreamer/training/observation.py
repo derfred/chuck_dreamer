@@ -245,7 +245,7 @@ class Observation:
   def _any_array(self) -> np.ndarray:
     for v in (self.state, self.image, self.proprio):
       if v is not None:
-        return v
+        return v  # type: ignore[no-any-return]
     raise RuntimeError(f"Observation(mode={self.mode!r}) has no populated array")
 
   def __getitem__(self, idx) -> "Observation":

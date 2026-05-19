@@ -327,7 +327,7 @@ class SceneBuilder:
                 )
             spec = _MESH_ASSETS[tag]
             requested_half = cfg.size[0] if cfg.size else 0.03
-            scale = float(requested_half) / float(spec["native_half_extent"])
+            scale = float(requested_half) / float(spec["native_half_extent"])  # type: ignore[arg-type]
             asset_name = f"{name}_{tag}_mesh"
             _register_stl_mesh(root, asset_name, spec["path"], scale)  # type: ignore[arg-type]
             return asset_name

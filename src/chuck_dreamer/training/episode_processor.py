@@ -216,7 +216,7 @@ def processor_for(config) -> EpisodeProcessor:
   if obs_mode in ("image", "image_proprio"):
     focus_sources = tuple(config.training.losses.get("focus_masks", []) or [])
     return EpisodeProcessor(
-      obs_mode,
+      "image" if obs_mode == "image" else "image_proprio",
       image_size=int(config.model.encoder.image_size),
       focus_mask_sources=focus_sources,
       act_mode=act_mode,

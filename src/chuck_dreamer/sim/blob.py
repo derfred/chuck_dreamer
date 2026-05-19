@@ -36,7 +36,7 @@ def find_white_blob(bgr: np.ndarray) -> np.ndarray | None:
   Internal holes (specular highlights) are filled.
   """
   hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-  mask = cv2.inRange(hsv, (0, 0, 140), (180, 90, 255))
+  mask = cv2.inRange(hsv, np.array([0, 0, 140], dtype=np.uint8), np.array([180, 90, 255], dtype=np.uint8))
 
   kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
   mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
@@ -77,7 +77,7 @@ def find_white_blob(bgr: np.ndarray) -> np.ndarray | None:
   contours, _ = cv2.findContours(blob, cv2.RETR_EXTERNAL,
                                   cv2.CHAIN_APPROX_NONE)
   cv2.drawContours(blob_filled, contours, -1, 255, thickness=cv2.FILLED)
-  return blob_filled
+  return np.asarray(blob_filled)
 
 
 def fit_circle_to_blob(blob_mask: np.ndarray) -> tuple[float, float, float] | None:
