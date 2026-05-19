@@ -68,29 +68,28 @@ def load_config(
   if cfg.get("seed") is None:
     cfg.seed = int(np.random.default_rng().integers(0, 2**31))
   _normalize_warmup_source(cfg)
+  _normalize_eval_source(cfg)
   return cfg
 
 
-def _normalize_warmup_source(cfg: DictConfig) -> None:
-  """Expand ``training.data.warmup_source`` into a uniform list of dicts.
+def _normalize_episode_source(
+  raw: Any,
+  default_fmt: Any,
+  default_n: Any,
+) -> list[dict]:
+  """Expand a path / dict / list-of-either spec into a uniform ``list[dict]``.
 
-  Accepts three forms in the raw config:
-    * ``str``                  — single path, inherits the top-level
-                                 ``warmup_format`` / ``warmup_num_episodes``.
+  Accepts three forms:
+    * ``str``                  — single path, inherits the supplied
+                                 ``default_fmt`` / ``default_n``.
     * ``list`` of str | dict   — mixed entries; dict entries may override
                                  ``format`` / ``num_episodes`` per source.
     * ``dict``                 — single entry, same override rules as a
                                  list-of-one dict.
 
-  After normalization the top-level ``warmup_format`` /
-  ``warmup_num_episodes`` keys are deleted so consumers can't accidentally
-  read stale defaults.
+  Each output entry carries fully-resolved ``path``, ``format``,
+  ``num_episodes`` keys.
   """
-  data_cfg    = cfg.training.data
-  raw         = data_cfg.warmup_source
-  default_fmt = data_cfg.warmup_format
-  default_n   = data_cfg.warmup_num_episodes
-
   if isinstance(raw, str):
     items: list[Any] = [raw]
   elif isinstance(raw, ListConfig):
@@ -112,10 +111,41 @@ def _normalize_warmup_source(cfg: DictConfig) -> None:
         "format":       item.get("format",       default_fmt),
         "num_episodes": item.get("num_episodes", default_n),
       })
+  return normalized
 
-  data_cfg.warmup_source = normalized
+
+def _normalize_warmup_source(cfg: DictConfig) -> None:
+  """Normalize ``training.data.warmup_source`` into a ``list[dict]``.
+
+  After normalization the top-level ``warmup_format`` /
+  ``warmup_num_episodes`` keys are deleted so consumers can't accidentally
+  read stale defaults.
+  """
+  data_cfg = cfg.training.data
+  data_cfg.warmup_source = _normalize_episode_source(
+    data_cfg.warmup_source,
+    data_cfg.warmup_format,
+    data_cfg.warmup_num_episodes,
+  )
   del data_cfg.warmup_format
   del data_cfg.warmup_num_episodes
+
+
+def _normalize_eval_source(cfg: DictConfig) -> None:
+  """Normalize ``eval.source`` into a ``list[dict]``.
+
+  After normalization the top-level ``eval.data_format`` /
+  ``eval.num_episodes`` keys are deleted so consumers can't accidentally
+  read stale defaults.
+  """
+  eval_cfg = cfg.eval
+  eval_cfg.source = _normalize_episode_source(
+    eval_cfg.source,
+    eval_cfg.data_format,
+    eval_cfg.num_episodes,
+  )
+  del eval_cfg.data_format
+  del eval_cfg.num_episodes
 
 
 if __name__ == "__main__":

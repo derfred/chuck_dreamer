@@ -108,9 +108,17 @@ logging:
     every_n_evals: 1        # int or null to disable, regularly dump the episodes processed during eval phase.
 
 eval:
-  data_path: "data/eval/"
-  data_format: "rerun"  # "hdf5" or "rerun
-  num_episodes: null # null = load all; otherwise sample this many at random
+  data_format: "rerun"  # "hdf5" or "rerun"
+  num_episodes: null    # null = load all; otherwise sample this many at random
+
+  source: "data/eval/"
+  # Example list form:
+  # source:
+  #   - "data/eval_sim/"
+  #   - path: "data/eval_real/"
+  #     format: "rerun"
+  #     num_episodes: null  # load all real eval recordings
+
   burn_in: 5  # Posterior steps before switching to prior in the open-loop rollout.
 
 hardware:

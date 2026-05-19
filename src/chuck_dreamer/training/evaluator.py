@@ -1,6 +1,7 @@
 """Evaluator — burn-in posterior + open-loop prior comparison on held-out episodes.
 
-The :class:`Evaluator` reads episodes from ``eval.data_path``, runs each
+The :class:`Evaluator` reads episodes from one or more directories listed
+under ``eval.source`` (mirrors ``training.data.warmup_source``), runs each
 through the world model under two regimes that share a burn-in:
 
   * **Posterior tail** — the latent is refined with the encoder embedding at
@@ -19,6 +20,8 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 import tqdm
 
@@ -61,12 +64,20 @@ def _recon_error(recon: Any, target: Any) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-class Evaluator:
-  """Runs burn-in / open-loop eval rollouts on a held-out episode set.
+@dataclass
+class _EvalSource:
+  """One ``eval.source`` entry paired with its lazy ``EpisodeDataset``."""
+  path:         str
+  num_episodes: int | None
+  dataset:      EpisodeDataset
 
-  One evaluator instance is reusable across iterations: the episodes are
-  re-loaded on every :meth:`evaluate` call so freshly-recorded eval data
-  is picked up automatically when the path changes contents.
+
+class Evaluator:
+  """Runs burn-in / open-loop eval rollouts on one or more held-out sets.
+
+  Reads its sources from ``eval.source`` (string, dict, or list of
+  either — see ``configs/default.yaml``). One evaluator instance is
+  reusable across iterations.
   """
 
   def __init__(self, config, model):
@@ -74,41 +85,46 @@ class Evaluator:
     self.model      = model
     self._obs_mode  = str(config.env.obs_mode)
     self._processor = processor_for(config)
-    eval_cfg        = config.eval
-    self._dataset   = EpisodeDataset(eval_cfg.data_path, format=eval_cfg.data_format)
+    self._sources: list[_EvalSource] = [
+      _EvalSource(
+        path=src["path"],
+        num_episodes=src["num_episodes"],
+        dataset=EpisodeDataset(src["path"], format=src["format"]),
+      )
+      for src in config.eval.source
+    ]
 
   # ---------- public API ----------
 
   def warmup(self):
-    """Eagerly load the eval episode set into memory.
+    """Eagerly load every eval source into memory.
 
-    Idempotent. On a missing or empty eval directory the dataset stays
-    empty and :meth:`evaluate` is a silent no-op.
+    Idempotent. Sources whose directory is missing or empty are logged
+    and skipped; :meth:`evaluate` is a silent no-op only if *every*
+    source ends up empty.
     """
-    if self._dataset.loaded:
-      return
-    eval_cfg = self.config.eval
-    if not eval_cfg.data_path or not os.path.exists(eval_cfg.data_path):
-      logger.warning(f"Eval data path {eval_cfg.data_path!r} does not exist. Eval phase will be skipped.")
-      return
-    logger.info(
-      f"Evaluator will read eval episodes from {eval_cfg.data_path!r} "
-      f"with format {eval_cfg.data_format!r}"
-    )
-    self._dataset.load()
-    if len(self._dataset) == 0:
-      logger.warning(
-        f"Eval data path {eval_cfg.data_path!r} contains no episodes. Eval phase will be skipped."
+    for src in self._sources:
+      if src.dataset.loaded:
+        continue
+      if not src.path or not os.path.exists(src.path):
+        logger.warning(f"Eval source {src.path!r} does not exist. Skipping.")
+        continue
+      logger.info(
+        f"Loading eval episodes from {src.path!r} "
+        f"(format={src.dataset.format}, num_episodes={src.num_episodes})"
       )
+      src.dataset.load(num_episodes=src.num_episodes)
+      if len(src.dataset) == 0:
+        logger.warning(f"Eval source {src.path!r} contains no episodes.")
 
   def evaluate(self, iteration: int, tracker) -> None:
-    """Run one eval pass and log to ``tracker``.
+    """Run one eval pass across all sources and log to ``tracker``.
 
-    No-op if the eval directory is missing or no episode is long enough
-    for one burn-in + one prediction step.
+    No-op if every eval source is missing or empty.
     """
     eval_cfg = self.config.eval
-    if not self._dataset.loaded or len(self._dataset) == 0:
+    active = [s for s in self._sources if s.dataset.loaded and len(s.dataset) > 0]
+    if not active:
       return
 
     burn_in = int(eval_cfg.burn_in)
@@ -118,50 +134,77 @@ class Evaluator:
     with tracker.scope({"phase": "eval", "iteration": iteration}) as eval_tracker:
       per_episode_posterior: list[np.ndarray] = []
       per_episode_prior:     list[np.ndarray] = []
-      ep_count = 0
+      per_source_counts: dict[str, int] = {}
+      ep_count   = 0
+      global_idx = 0
 
-      for ep_idx, raw_episode in enumerate(tqdm.tqdm(
-        self._dataset, desc=f"Evaluating episodes - iteration {iteration}",
-      )):
-        stem = raw_episode.stem
-        try:
-          episode = self._processor(raw_episode.data)
-        except ValueError as exc:
-          logger.warning(f"Skipping eval episode {stem!r}: {exc}")
-          continue
+      for src in active:
+        src_label = Path(src.path).name or src.path
+        src_posterior: list[np.ndarray] = []
+        src_prior:     list[np.ndarray] = []
 
-        result = self._run_episode(episode, burn_in)
-        if result is None:
-          logger.debug(f"Eval episode {stem!r} too short for burn_in={burn_in}; skipping")
-          continue
+        for ep_idx, raw_episode in enumerate(tqdm.tqdm(
+          src.dataset,
+          desc=f"Evaluating {src_label} - iteration {iteration}",
+        )):
+          stem = raw_episode.stem
+          try:
+            episode = self._processor(raw_episode.data)
+          except ValueError as exc:
+            logger.warning(f"Skipping eval episode {src_label}/{stem!r}: {exc}")
+            continue
 
-        # Log per-episode aggregates and persist artifacts.
-        posterior_err = result["error_posterior"]
-        prior_err     = result["error_prior"]
-        per_episode_posterior.append(posterior_err)
-        per_episode_prior.append(prior_err)
+          result = self._run_episode(episode, burn_in)
+          if result is None:
+            logger.debug(
+              f"Eval episode {src_label}/{stem!r} too short for burn_in={burn_in}; skipping"
+            )
+            continue
 
-        eval_tracker.log({
-          "episode_index":         ep_idx,
-          "source":                stem,
-          "recon/posterior_mean":  float(posterior_err.mean()),
-          "recon/prior_mean":      float(prior_err.mean()),
-          "recon/posterior_final": float(posterior_err[-1]),
-          "recon/prior_final":     float(prior_err[-1]),
-          "horizon":               int(prior_err.shape[0]),
-        })
+          posterior_err = result["error_posterior"]
+          prior_err     = result["error_prior"]
+          per_episode_posterior.append(posterior_err)
+          per_episode_prior.append(prior_err)
+          src_posterior.append(posterior_err)
+          src_prior.append(prior_err)
 
-        eval_tracker.maybe_log_eval_episode(
-          self._episode_artifacts(episode, result, burn_in),
-          iteration=iteration,
-          source_filename=stem,
-          data={
-            "episode_index": ep_idx,
-            "burn_in":       burn_in,
-          },
-        )
+          eval_tracker.log({
+            "episode_index":         global_idx,
+            "source_dir":            src_label,
+            "source":                stem,
+            "recon/posterior_mean":  float(posterior_err.mean()),
+            "recon/prior_mean":      float(prior_err.mean()),
+            "recon/posterior_final": float(posterior_err[-1]),
+            "recon/prior_final":     float(prior_err[-1]),
+            "horizon":               int(prior_err.shape[0]),
+          })
 
-        ep_count += 1
+          eval_tracker.maybe_log_eval_episode(
+            self._episode_artifacts(episode, result, burn_in),
+            iteration=iteration,
+            source_filename=f"{src_label}__{stem}" if len(active) > 1 else stem,
+            data={
+              "episode_index": ep_idx,
+              "source_dir":    src_label,
+              "burn_in":       burn_in,
+            },
+          )
+
+          ep_count   += 1
+          global_idx += 1
+
+        per_source_counts[src_label] = len(src_posterior)
+        if src_posterior and len(active) > 1:
+          src_post_curve  = self._stack_curve(src_posterior)
+          src_prior_curve = self._stack_curve(src_prior)
+          eval_tracker.log({
+            "source_dir":            src_label,
+            "num_episodes":          len(src_posterior),
+            "recon/posterior_mean":  float(np.nanmean(src_post_curve)),
+            "recon/prior_mean":      float(np.nanmean(src_prior_curve)),
+            "recon/posterior_final": float(np.nanmean(src_post_curve[:, -1])),
+            "recon/prior_final":     float(np.nanmean(src_prior_curve[:, -1])),
+          })
 
       if ep_count == 0:
         logger.warning(
@@ -173,6 +216,7 @@ class Evaluator:
       prior_curve     = self._stack_curve(per_episode_prior)
       eval_tracker.log({
         "num_episodes":          ep_count,
+        "num_sources":           len(active),
         "recon/posterior_mean":  float(np.nanmean(posterior_curve)),
         "recon/prior_mean":      float(np.nanmean(prior_curve)),
         "recon/posterior_final": float(np.nanmean(posterior_curve[:, -1])),
