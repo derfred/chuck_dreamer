@@ -36,11 +36,16 @@ def load_config_from_checkpoint(path: str):
 
 # Helpers
 def _mlp(in_dim: int, hidden: tuple[int, ...], out_dim: int, act=nn.ELU) -> nn.Sequential:
-  """Standard MLP: Linear -> act -> ... -> Linear (no act on output)."""
+  """Standard MLP: Linear -> LayerNorm -> act -> ... -> Linear (no LN/act on output).
+
+  LayerNorm after each hidden Linear keeps intermediate magnitudes bounded
+  so the encoder/heads can't run away during early training.
+  """
   layers: list[nn.Module] = []
   prev = in_dim
   for h in hidden:
     layers.append(nn.Linear(prev, h))
+    layers.append(nn.LayerNorm(h))
     layers.append(act())
     prev = h
   layers.append(nn.Linear(prev, out_dim))
@@ -152,6 +157,7 @@ class CNNEncoder(nn.Module):
     prev = in_channels
     for c, k, s in zip(channels, kernels, strides):
       convs.append(nn.Conv2d(prev, c, kernel_size=k, stride=s, padding=_same_pad(k, s)))
+      convs.append(nn.LayerNorm(c))
       convs.append(nn.ELU())
       prev = c
     self.convs = nn.Sequential(*convs)
@@ -162,7 +168,8 @@ class CNNEncoder(nn.Module):
     for s in strides:
       spatial //= int(s)
     self._flat_dim = prev * spatial * spatial
-    self.proj = nn.Linear(self._flat_dim, embed_dim)
+    self.proj      = nn.Linear(self._flat_dim, embed_dim)
+    self.proj_norm = nn.LayerNorm(embed_dim)
 
   def __call__(self, obs: mx.array) -> mx.array:
     """obs: (..., H, W, 3) — uint8 or float. Returns (..., embed_dim)."""
@@ -172,7 +179,7 @@ class CNNEncoder(nn.Module):
     x = x.reshape((-1, H, W, C))
     x = self.convs(x)
     x = x.reshape((x.shape[0], -1))
-    x = self.proj(x)
+    x = self.proj_norm(self.proj(x))
     return cast(mx.array, x.reshape((*lead, -1)))
 
 
@@ -216,12 +223,15 @@ class CNNDecoder(nn.Module):
     prev = rev_channels[0]
     # Build N-1 transposed-conv stages that step back through the encoder
     # widths; the last stage outputs `out_channels` directly.
+    # LayerNorm + ELU follow every intermediate deconv; the final deconv
+    # produces the image and stays bare so the output range isn't squashed.
     next_channels = list(rev_channels[1:]) + [out_channels]
     for i, (c_out, k, s) in enumerate(zip(next_channels, rev_kernels, rev_strides)):
       deconvs.append(
         nn.ConvTranspose2d(prev, c_out, kernel_size=k, stride=s, padding=_same_pad(k, s))
       )
       if i < len(next_channels) - 1:
+        deconvs.append(nn.LayerNorm(c_out))
         deconvs.append(nn.ELU())
       prev = c_out
     self.deconvs = nn.Sequential(*deconvs)
@@ -251,14 +261,16 @@ class ImageProprioEncoder(nn.Module):
     embed_dim: int,
   ):
     super().__init__()
-    self.cnn = cnn
+    self.cnn         = cnn
     self.proprio_mlp = _mlp(proprio_dim, proprio_hidden, embed_dim)
-    self.fuse = nn.Linear(2 * embed_dim, embed_dim)
+    self.fuse        = nn.Linear(2 * embed_dim, embed_dim)
+    self.fuse_norm   = nn.LayerNorm(embed_dim)
 
   def __call__(self, obs: dict) -> mx.array:
     img_feat = self.cnn(obs["image"])
     pro_feat = self.proprio_mlp(obs["proprio"])
-    return cast(mx.array, self.fuse(mx.concatenate([img_feat, pro_feat], axis=-1)))
+    fused    = self.fuse(mx.concatenate([img_feat, pro_feat], axis=-1))
+    return cast(mx.array, self.fuse_norm(fused))
 
 
 class ImageProprioDecoder(nn.Module):
@@ -316,9 +328,12 @@ class RSSM(nn.Module):
     self.deter_dim  = deter_dim
     self.min_std    = min_std
 
-    # pre-GRU MLP combining (s_{t-1}, a_{t-1})
+    # pre-GRU MLP combining (s_{t-1}, a_{t-1}). LayerNorm bounds the GRU
+    # input so the recurrent hidden state stays in a healthy range across
+    # the unrolled BPTT chain.
     self.pre_gru = nn.Sequential(
       nn.Linear(stoch_dim + action_dim, hidden),
+      nn.LayerNorm(hidden),
       nn.ELU(),
     )
     # GRU cell. Single-step interface; we drive it manually.
@@ -326,13 +341,13 @@ class RSSM(nn.Module):
 
     # Prior: h -> (mean, std) of s
     self.prior_net = nn.Sequential(
-      nn.Linear(deter_dim, hidden), nn.ELU(),
+      nn.Linear(deter_dim, hidden), nn.LayerNorm(hidden), nn.ELU(),
       nn.Linear(hidden, 2 * stoch_dim),
     )
 
     # Posterior: (h, embed) -> (mean, std) of s
     self.post_net = nn.Sequential(
-      nn.Linear(deter_dim + embed_dim, hidden), nn.ELU(),
+      nn.Linear(deter_dim + embed_dim, hidden), nn.LayerNorm(hidden), nn.ELU(),
       nn.Linear(hidden, 2 * stoch_dim),
     )
 
@@ -805,16 +820,30 @@ class DreamerMLXModel:
     if self.config.training.optimizer.gradient_clipping > 0:
       max_norm         = self.config.training.optimizer.gradient_clipping
       grads, grad_norm = optim.clip_grad_norm(grads, max_norm)
-    self._opt_wm.update(self._wm_bundle, grads)
 
-    mx.eval(self._wm_bundle.parameters(), loss, aux["kl_per_dim"])
+    mx.eval(loss, grads, aux["kl_per_dim"])
+    loss_val      = loss.item()
+    grad_norm_val = grad_norm.item() if grad_norm is not None else None
+
+    bad = (not np.isfinite(loss_val)
+           or (grad_norm_val is not None and not np.isfinite(grad_norm_val))
+           or any(not np.isfinite(np.asarray(g)).all() for _, g in tree_flatten(grads)))
+    if bad:
+      if tracker is not None:
+        tracker.log({"wm/skipped": 1.0})
+      return None
+
+    self._opt_wm.update(self._wm_bundle, grads)
+    mx.eval(self._wm_bundle.parameters())
+
 
     if tracker is not None:
       logs = {
-        "wm/loss":  loss.item(),
-        "wm/recon": aux["recon"].item(),
-        "wm/rew":   aux["rew"].item(),
-        "wm/kl":    aux["kl"].item(),
+        "wm/loss":    loss_val,
+        "wm/recon":   aux["recon"].item(),
+        "wm/rew":     aux["rew"].item(),
+        "wm/kl":      aux["kl"].item(),
+        "wm/skipped": 0.0,
       }
       kl_per_dim                   = np.asarray(aux["kl_per_dim"])
       active_threshold             = 0.1

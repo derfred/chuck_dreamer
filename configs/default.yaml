@@ -82,7 +82,7 @@ training:
     actor_lr: 8e-5
     critic_lr: 8e-5
     adam_eps: 1e-5
-    gradient_clipping: 1000.0
+    gradient_clipping: 100.0
     weight_decay: 0
 
   losses:

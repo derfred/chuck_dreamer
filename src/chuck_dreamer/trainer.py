@@ -103,7 +103,7 @@ class Trainer:
 
   def _train_phase(self, iteration: int):
     with self.tracker.scope({"phase": "train", "iteration": iteration}) as tracker:
-      tracker.log({"replay_buffer_size": len(self._replay_buffer)})
+      tracker.log_replay_buffer_size(self._replay_buffer)
       if not self._replay_buffer.can_sample(self.config.training.batch_size, self.config.training.seq_len):
         logger.warning("Buffer too small to sample (have %d steps); skipping train phase.", len(self._replay_buffer))
         return

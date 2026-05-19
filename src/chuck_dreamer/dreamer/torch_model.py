@@ -84,15 +84,39 @@ def resolve_device(name: str) -> torch.device:
 
 
 def _mlp(in_dim: int, hidden: tuple[int, ...], out_dim: int, act=nn.ELU) -> nn.Sequential:
-  """Standard MLP: Linear -> act -> ... -> Linear (no act on output)."""
+  """Standard MLP: Linear -> LayerNorm -> act -> ... -> Linear (no LN/act on output).
+
+  Mirrors :func:`mlx_model._mlp`. LayerNorm after each hidden Linear keeps
+  intermediate magnitudes bounded so the encoder/heads can't run away
+  during early training.
+  """
   layers: list[nn.Module] = []
   prev = in_dim
   for h in hidden:
     layers.append(nn.Linear(prev, h))
+    layers.append(nn.LayerNorm(h))
     layers.append(act())
     prev = h
   layers.append(nn.Linear(prev, out_dim))
   return nn.Sequential(*layers)
+
+
+class _ChannelLayerNorm(nn.Module):
+  """LayerNorm over the channel axis of an NCHW tensor.
+
+  Matches the MLX backend's ``nn.LayerNorm(C)`` applied on NHWC: per-pixel
+  per-sample normalization across the channel dimension. Torch's
+  ``nn.LayerNorm`` normalizes the trailing dim, which in NCHW is the
+  spatial-W axis — wrong. We permute to NHWC, normalize, permute back.
+  """
+
+  def __init__(self, num_channels: int):
+    super().__init__()
+    self.norm = nn.LayerNorm(num_channels)
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    # (N, C, H, W) -> (N, H, W, C) -> LN over last dim -> back
+    return self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
 
 
 def feat(state: State) -> torch.Tensor:
@@ -182,10 +206,14 @@ class CNNEncoder(nn.Module):
       )
     self.image_size = image_size
 
+    # LayerNorm over the channel axis after each conv. _ChannelLayerNorm
+    # permutes NCHW -> NHWC to apply LN(C) and back; this matches the MLX
+    # backend's ``nn.LayerNorm(C)`` on NHWC exactly.
     convs: list[nn.Module] = []
     prev = in_channels
     for c, k, s in zip(channels, kernels, strides):
       convs.append(nn.Conv2d(prev, c, kernel_size=k, stride=s, padding=_same_pad(k, s)))
+      convs.append(_ChannelLayerNorm(c))
       convs.append(nn.ELU())
       prev = c
     self.convs = nn.Sequential(*convs)
@@ -195,7 +223,8 @@ class CNNEncoder(nn.Module):
     for s in strides:
       spatial //= int(s)
     self._flat_dim = prev * spatial * spatial
-    self.proj = nn.Linear(self._flat_dim, embed_dim)
+    self.proj      = nn.Linear(self._flat_dim, embed_dim)
+    self.proj_norm = nn.LayerNorm(embed_dim)
 
   def forward(self, obs: torch.Tensor) -> torch.Tensor:
     """obs: (..., H, W, 3). Returns (..., embed_dim)."""
@@ -211,7 +240,7 @@ class CNNEncoder(nn.Module):
     x = x.permute(0, 3, 1, 2).contiguous()           # NHWC -> NCHW
     x = self.convs(x)
     x = x.reshape(x.shape[0], -1)
-    x = self.proj(x)
+    x = self.proj_norm(self.proj(x))
     return x.reshape(*lead, -1)
 
 
@@ -252,11 +281,14 @@ class CNNDecoder(nn.Module):
     deconvs: list[nn.Module] = []
     prev = rev_channels[0]
     next_channels = list(rev_channels[1:]) + [out_channels]
+    # LayerNorm + ELU follow every intermediate deconv; the final deconv
+    # produces the image and stays bare so the output range isn't squashed.
     for i, (c_out, k, s) in enumerate(zip(next_channels, rev_kernels, rev_strides)):
       deconvs.append(
         nn.ConvTranspose2d(prev, c_out, kernel_size=k, stride=s, padding=_same_pad(k, s))
       )
       if i < len(next_channels) - 1:
+        deconvs.append(_ChannelLayerNorm(c_out))
         deconvs.append(nn.ELU())
       prev = c_out
     self.deconvs = nn.Sequential(*deconvs)
@@ -288,14 +320,16 @@ class ImageProprioEncoder(nn.Module):
     embed_dim: int,
   ):
     super().__init__()
-    self.cnn = cnn
+    self.cnn         = cnn
     self.proprio_mlp = _mlp(proprio_dim, proprio_hidden, embed_dim)
-    self.fuse = nn.Linear(2 * embed_dim, embed_dim)
+    self.fuse        = nn.Linear(2 * embed_dim, embed_dim)
+    self.fuse_norm   = nn.LayerNorm(embed_dim)
 
   def forward(self, obs: dict) -> torch.Tensor:
     img_feat = self.cnn(obs["image"])
     pro_feat = self.proprio_mlp(obs["proprio"])
-    return cast(torch.Tensor, self.fuse(torch.cat([img_feat, pro_feat], dim=-1)))
+    fused    = self.fuse(torch.cat([img_feat, pro_feat], dim=-1))
+    return cast(torch.Tensor, self.fuse_norm(fused))
 
 
 class ImageProprioDecoder(nn.Module):
@@ -346,18 +380,22 @@ class RSSM(nn.Module):
     self.deter_dim  = deter_dim
     self.min_std    = min_std
 
+    # See note on _mlp: LayerNorm after each hidden Linear bounds the
+    # recurrent path and the posterior/prior heads so the GRU input and
+    # the (mean, raw_std) outputs stay in a healthy range across BPTT.
     self.pre_gru = nn.Sequential(
       nn.Linear(stoch_dim + action_dim, hidden),
+      nn.LayerNorm(hidden),
       nn.ELU(),
     )
     self.gru = nn.GRUCell(input_size=hidden, hidden_size=deter_dim)
 
     self.prior_net = nn.Sequential(
-      nn.Linear(deter_dim, hidden), nn.ELU(),
+      nn.Linear(deter_dim, hidden), nn.LayerNorm(hidden), nn.ELU(),
       nn.Linear(hidden, 2 * stoch_dim),
     )
     self.post_net = nn.Sequential(
-      nn.Linear(deter_dim + embed_dim, hidden), nn.ELU(),
+      nn.Linear(deter_dim + embed_dim, hidden), nn.LayerNorm(hidden), nn.ELU(),
       nn.Linear(hidden, 2 * stoch_dim),
     )
 

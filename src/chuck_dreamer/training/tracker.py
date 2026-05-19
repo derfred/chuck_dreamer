@@ -132,6 +132,14 @@ class Tracker:
       import trackio
       trackio.log({**data, **kwargs})
 
+  def log_replay_buffer_size(self, replay_buffer):
+    """Log total replay-buffer size plus a per-tag breakdown of episodes/steps."""
+    data = {"replay_buffer_size": len(replay_buffer)}
+    for tag, (n_eps, n_steps) in replay_buffer.size_by_tag().items():
+      data[f"replay_buffer_size/{tag}/episodes"] = n_eps
+      data[f"replay_buffer_size/{tag}/steps"] = n_steps
+    self.log(data)
+
   def log_batch_tags(self, batch_tags):
     """Log per-batch episode counts grouped by tag.
 
