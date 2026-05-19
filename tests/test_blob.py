@@ -1,11 +1,11 @@
-"""Unit tests for :mod:`chuck_dreamer.real.blob`."""
+"""Unit tests for :mod:`chuck_dreamer.sim.blob`."""
 
 from __future__ import annotations
 
 import cv2
 import numpy as np
 
-from chuck_dreamer.real.blob import (
+from chuck_dreamer.sim.blob import (
   detect_blob,
   find_white_blob,
   fit_circle_to_blob,

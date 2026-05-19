@@ -285,37 +285,6 @@ def train(ctx, experiment_name, seed, resume, overrides):
   trainer.train(resume=resume_arg)
 
 
-@cli.command("record")
-@click.option("--output", required=True, type=str, help="Session output directory")
-@click.option("--storage", type=click.Choice(["lerobot", "episodes"]), default="lerobot",
-              help="How phase B's data is preserved. 'lerobot' keeps the LeRobotDataset "
-                   "under {output}/dataset/. 'episodes' re-imports it into "
-                   "{output}/episodes/ via the project's EpisodeWriter.")
-@click.option("--format", "fmt", default="rerun", type=click.Choice(["hdf5", "rerun"]),
-              help="Episode output format when --storage=episodes (ignored otherwise).")
-@click.option("--skip-calibration", is_flag=True,
-              help="Skip phase A.1 (camera intrinsics).")
-@click.option("--skip-markers", is_flag=True,
-              help="Skip phase A.2 (marker clip capture).")
-@click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
-@override_option
-@click.pass_context
-def record_cmd(ctx, output, storage, fmt, skip_calibration, skip_markers, seed, overrides):
-  """Record a real-hardware session: scene registration + lerobot teleop episodes."""
-  from chuck_dreamer.real import run as run_session
-
-  cfg = load_config(ctx.obj["config_path"], overrides=overrides, aliases={"seed": seed})
-  click.echo(f"Recording session → {output}  (storage={storage}, format={fmt})")
-  out = run_session(
-    cfg, Path(output),
-    storage=storage,
-    episodes_format=fmt,
-    skip_calibration=skip_calibration,
-    skip_markers=skip_markers,
-  )
-  click.echo(f"Done. Session written to {out}")
-
-
 def _list_evals() -> dict[str, Path]:
   """Return a mapping of eval-name → notebook path under chuck_dreamer/evals/."""
   evals_dir = Path(__file__).parent / "src" / "chuck_dreamer" / "evals"

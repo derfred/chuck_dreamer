@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from ..real.blob import detect_blob
+from .blob import detect_blob
 
 
 @dataclass
