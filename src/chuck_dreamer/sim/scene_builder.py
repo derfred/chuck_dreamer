@@ -23,6 +23,17 @@ _PYRAMID_MESH_NAME = "unit_pyramid"
 # We scale it via the mesh-asset ``scale`` attribute for each instance.
 _PYRAMID_VERTICES = "-1 -1 0  1 -1 0  1 1 0  -1 1 0  0 0 1"
 
+# External STL meshes registered on demand. Each entry maps a short tag (as
+# stored in ObjectConfig.mesh_path) to its absolute path and the native
+# bounding-cube half-extent so per-instance scaling matches the requested
+# size in metres.
+_MESH_ASSETS: dict[str, dict[str, object]] = {
+  "rhombicuboctahedron": {
+    "path": _ASSETS_DIR / "rhombicuboctahedron.stl",
+    "native_half_extent": 0.029,
+  },
+}
+
 # z-coordinate of the table geom centre in the base MJCF (see base_scene.xml).
 # Duplicated from scene_generator.py to keep this module standalone.
 _TABLE_GEOM_CENTRE_Z = 0.02
@@ -40,6 +51,7 @@ def _object_geom_element(
     cfg: ObjectConfig,
     name: str,
     pyramid_mesh_name: str | None = None,
+    mesh_asset_name: str | None = None,
 ) -> etree._Element:
     """Return an lxml ``<geom>`` element for the given object config."""
     geom = etree.Element("geom")
@@ -68,6 +80,11 @@ def _object_geom_element(
             raise ValueError("pyramid shape requires a registered mesh name")
         geom.set("type", "mesh")
         geom.set("mesh", pyramid_mesh_name)
+    elif shape == "mesh":
+        if mesh_asset_name is None:
+            raise ValueError("mesh shape requires a registered mesh-asset name")
+        geom.set("type", "mesh")
+        geom.set("mesh", mesh_asset_name)
     else:
         geom.set("type", "box")
         geom.set("size", "0.03 0.03 0.03")
@@ -80,6 +97,7 @@ def _make_object_body(
     name: str,
     colliding: bool,
     pyramid_mesh_name: str | None = None,
+    mesh_asset_name: str | None = None,
 ) -> etree._Element:
     """Build a ``<body>`` element at the config's world position."""
     body = etree.Element("body")
@@ -100,12 +118,36 @@ def _make_object_body(
         ival = max(2.0 / 5.0 * cfg.mass * r * r, 1e-6)
         inertial.set("diaginertia", f"{ival:.6e} {ival:.6e} {ival:.6e}")
 
-    geom = _object_geom_element(cfg, name, pyramid_mesh_name=pyramid_mesh_name)
+    geom = _object_geom_element(
+        cfg, name,
+        pyramid_mesh_name=pyramid_mesh_name,
+        mesh_asset_name=mesh_asset_name,
+    )
     if not colliding:
         geom.set("contype", "0")
         geom.set("conaffinity", "0")
     body.append(geom)
     return body
+
+
+def _register_stl_mesh(
+    root: etree._Element,
+    asset_name: str,
+    stl_path: Path,
+    scale: float,
+) -> None:
+    """Add an ``<asset><mesh file="..." scale="s s s"/>`` entry for an STL.
+
+    A fresh asset is registered per instance so each object can carry its own
+    uniform scale (MuJoCo bakes the scale into the asset, not the geom).
+    """
+    asset = root.find("asset")
+    if asset is None:
+        asset = etree.SubElement(root, "asset")
+    mesh = etree.SubElement(asset, "mesh")
+    mesh.set("name", asset_name)
+    mesh.set("file", str(stl_path))
+    mesh.set("scale", f"{scale:.6f} {scale:.6f} {scale:.6f}")
 
 
 def _register_pyramid_mesh(
@@ -275,25 +317,49 @@ class SceneBuilder:
             _register_pyramid_mesh(root, mesh_name, half_base, height)
             return mesh_name
 
-        target_mesh = _maybe_register_pyramid(config.target, "target_object")
+        def _maybe_register_mesh(cfg: ObjectConfig, name: str) -> str | None:
+            if cfg.shape != "mesh":
+                return None
+            tag = cfg.mesh_path
+            if tag is None or tag not in _MESH_ASSETS:
+                raise ValueError(
+                    f"Unknown mesh tag '{tag}'. Known: {list(_MESH_ASSETS)}"
+                )
+            spec = _MESH_ASSETS[tag]
+            requested_half = cfg.size[0] if cfg.size else 0.03
+            scale = float(requested_half) / float(spec["native_half_extent"])
+            asset_name = f"{name}_{tag}_mesh"
+            _register_stl_mesh(root, asset_name, spec["path"], scale)  # type: ignore[arg-type]
+            return asset_name
+
+        target_pyramid = _maybe_register_pyramid(config.target, "target_object")
+        target_mesh    = _maybe_register_mesh(config.target, "target_object")
         target_body = _make_object_body(
-            config.target, "target_object", colliding=True, pyramid_mesh_name=target_mesh
+            config.target, "target_object", colliding=True,
+            pyramid_mesh_name=target_pyramid,
+            mesh_asset_name=target_mesh,
         )
         worldbody.append(target_body)
 
         for i, obs_cfg in enumerate(config.obstacles):
             name = f"obstacle_{i}"
-            mesh_name = _maybe_register_pyramid(obs_cfg, name)
+            pyramid_name = _maybe_register_pyramid(obs_cfg, name)
+            mesh_name    = _maybe_register_mesh(obs_cfg, name)
             obs_body = _make_object_body(
-                obs_cfg, name, colliding=True, pyramid_mesh_name=mesh_name
+                obs_cfg, name, colliding=True,
+                pyramid_mesh_name=pyramid_name,
+                mesh_asset_name=mesh_name,
             )
             worldbody.append(obs_body)
 
         for i, cl_cfg in enumerate(config.clutter):
             name = f"clutter_{i}"
-            mesh_name = _maybe_register_pyramid(cl_cfg, name)
+            pyramid_name = _maybe_register_pyramid(cl_cfg, name)
+            mesh_name    = _maybe_register_mesh(cl_cfg, name)
             cl_body = _make_object_body(
-                cl_cfg, name, colliding=False, pyramid_mesh_name=mesh_name
+                cl_cfg, name, colliding=False,
+                pyramid_mesh_name=pyramid_name,
+                mesh_asset_name=mesh_name,
             )
             worldbody.append(cl_body)
 

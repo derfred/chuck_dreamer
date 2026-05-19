@@ -103,4 +103,7 @@ def object_half_z(cfg: ObjectConfig) -> float:
     if cfg.shape == "pyramid":
         # size = [half_base, height]; mesh is centred on its bounding-box centre
         return (s[1] / 2.0) if len(s) > 1 else s[0]
+    if cfg.shape == "mesh":
+        # size = [half_extent]; mesh is centred on its bounding-box centre
+        return s[0] if s else 0.03
     return 0.03

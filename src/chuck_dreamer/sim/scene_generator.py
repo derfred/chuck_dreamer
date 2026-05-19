@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from pathlib import Path
+
 from .scene_config import (
     CameraConfig,
     LightingConfig,
@@ -18,6 +20,18 @@ from .scene_config import (
 
 # z-coordinate of the table geom centre in the base MJCF (see base_scene.xml).
 _TABLE_GEOM_CENTRE_Z = 0.02
+
+# Pre-converted STL meshes available as the "mesh" shape. Keyed by a short
+# tag stored in ObjectConfig.mesh_path so the builder knows which asset to
+# register. The half-extent (native bounding-box half-side, in metres) lets
+# the generator pick a per-instance scale that yields a sensible footprint.
+_MESH_LIBRARY: dict[str, dict[str, Any]] = {
+  "rhombicuboctahedron": {
+    "stl": str(Path(__file__).parent.parent.parent.parent
+               / "assets" / "mujoco" / "rhombicuboctahedron.stl"),
+    "native_half_extent": 0.029,  # ~58mm bounding cube, centred at origin
+  },
+}
 
 # ---------------------------------------------------------------------------
 # Difficulty presets
@@ -40,8 +54,8 @@ _PRESETS: dict[str, dict[str, Any]] = {
     "color_mode": "target_red",
   },
   "medium": {
-    "target_shapes": ["box", "cylinder"],
-    "distractor_shapes": ["box", "cylinder", "pyramid"],
+    "target_shapes": ["box", "cylinder", "mesh"],
+    "distractor_shapes": ["box", "cylinder", "pyramid", "mesh"],
     "mass_range": (0.02, 0.5),
     "num_obstacles": (0, 2),
     "num_clutter": (0, 3),
@@ -52,8 +66,8 @@ _PRESETS: dict[str, dict[str, Any]] = {
     "color_mode": "target_red_distractors_non_red",
   },
   "hard": {
-    "target_shapes": ["box", "cylinder", "capsule", "sphere", "pyramid"],
-    "distractor_shapes": ["box", "cylinder", "capsule", "sphere", "pyramid"],
+    "target_shapes": ["box", "cylinder", "capsule", "sphere", "pyramid", "mesh"],
+    "distractor_shapes": ["box", "cylinder", "capsule", "sphere", "pyramid", "mesh"],
     "mass_range": (0.01, 1.0),
     "num_obstacles": (0, 5),
     "num_clutter": (0, 8),
@@ -94,6 +108,9 @@ def _object_footprint_radius(cfg: ObjectConfig) -> float:
   if cfg.shape == "pyramid":
     # Square base with half-extent s[0]; worst-case diagonal radius.
     return math.hypot(s[0], s[0])
+  if cfg.shape == "mesh":
+    # size = [half_extent]; conservative xy radius is the bounding diagonal.
+    return math.hypot(s[0], s[0])
   return 0.03
 
 
@@ -126,6 +143,7 @@ def _sample_object(
     color: list[float],
     margin: float = 0.07,
     min_x: float | None = None,
+    mesh_options: list[str] | None = None,
 ) -> ObjectConfig:
   shape       = str(rng.choice(shapes))
   mass        = float(rng.uniform(*mass_range))
@@ -137,6 +155,7 @@ def _sample_object(
   x     = float(rng.uniform(x_low, table_half_x - margin))
   y     = float(rng.uniform(-table_half_y + margin, table_half_y - margin))
 
+  mesh_tag: str | None = None
   if shape == "box":
     s    = float(rng.uniform(0.025, 0.05))
     size = [s, s, s]
@@ -155,6 +174,14 @@ def _sample_object(
     half_base = float(rng.uniform(0.025, 0.05))
     height    = float(rng.uniform(0.04, 0.08))
     size      = [half_base, height]
+  elif shape == "mesh":
+    if not mesh_options:
+      raise ValueError("'mesh' shape sampled but no mesh_options provided")
+    mesh_tag = str(rng.choice(mesh_options))
+    # Aim for a final bounding-cube half-extent in [0.020, 0.040] m so the
+    # mesh stays comparable to the primitive objects.
+    half = float(rng.uniform(0.020, 0.040))
+    size = [half]
   else:
     size = [0.03, 0.03, 0.03]
 
@@ -166,6 +193,7 @@ def _sample_object(
       pos=[x, y, 0.0],
       orientation=orientation,
       color=list(color),
+      mesh_path=mesh_tag,
   )
   z = table_top_z + object_half_z(partial)
   partial.pos[2] = z
@@ -244,11 +272,14 @@ class SceneGenerator:
       else:
         raise ValueError(f"Unknown color_mode '{color_mode}' in preset")
 
+      mesh_options = list(_MESH_LIBRARY.keys())
+
       # Target object — must end up on the reachable side
       target = _sample_object(
           rng, p["target_shapes"], p["mass_range"],
           table_half_x, table_half_y, table_top_z,
           color=target_color, margin=0.07,
+          mesh_options=mesh_options,
       )
 
       # Goal: push direction at a random angle from target
@@ -269,6 +300,7 @@ class SceneGenerator:
             table_half_x, table_half_y, table_top_z,
             color=distractor_color(rng),
             min_x=-table_half_x / 2,
+            mesh_options=mesh_options,
         )
         obstacles.append(obs)
 
@@ -281,6 +313,7 @@ class SceneGenerator:
             table_half_x, table_half_y, table_top_z,
             color=distractor_color(rng),
             min_x=-table_half_x / 2,
+            mesh_options=mesh_options,
         )
         clutter.append(cl)
 
