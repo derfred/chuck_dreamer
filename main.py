@@ -499,5 +499,49 @@ def eval_cmd(ctx, name, run_all, recordings, checkpoint_path, num_episodes,
     os.unlink(checkpoint_path)
     click.echo("Cleanup done.")
 
+
+@cli.command("run")
+@click.option("--policy", "policy_type", default=None, type=str,
+              help="Policy implementation: manual | dreamer | cem. "
+                   "Overrides cfg.real.policy.type.")
+@click.option("--checkpoint", "checkpoint_path", default=None, type=str,
+              help="Checkpoint path for dreamer / cem policies. "
+                   "Overrides cfg.real.policy.<type>.checkpoint.")
+@click.option("--camera", "camera_source", default=None, type=str,
+              help="Camera index or device path. Overrides cfg.real.camera.source.")
+@click.option("--port", "arm_port", default=None, type=str,
+              help="USB port for the SO-101 controller. Overrides cfg.real.arm.port.")
+@override_option
+@click.pass_context
+def run_cmd(ctx, policy_type, checkpoint_path, camera_source, arm_port, overrides):
+  """Run a policy on the real SO-101 arm.
+
+  Opens the configured camera, instantiates the policy, and feeds the
+  live observation stream to it. The arm only follows the policy after
+  the operator hits the start key (default ``s``).
+  """
+  from chuck_dreamer.real.run import run as run_loop
+
+  aliases: dict = {
+    "real.policy.type":     policy_type,
+    "real.camera.source":   camera_source,
+    "real.arm.port":        arm_port,
+  }
+  if checkpoint_path is not None:
+    ptype = policy_type or "dreamer"
+    if ptype not in ("dreamer", "cem"):
+      raise click.BadParameter(
+        f"--checkpoint only applies to dreamer/cem policies; got {ptype!r}"
+      )
+    aliases[f"real.policy.{ptype}.checkpoint"] = checkpoint_path
+
+  cfg = load_config(ctx.obj["config_path"], overrides=overrides, aliases=aliases)
+
+  click.echo("Running real arm with config:")
+  click.echo(OmegaConf.to_yaml(cfg.real))
+  click.echo("Press 's' to start the policy, 'q' or ESC to quit.")
+  run_loop(cfg)
+
+
 if __name__ == "__main__":
     cli()

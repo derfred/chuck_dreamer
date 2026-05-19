@@ -139,6 +139,55 @@ eval:
 hardware:
   device: "mlx"  # "auto", "mlx", "cpu", "gpu", "mps"
 
+real:
+  # Camera opened via cv2.VideoCapture. ``source`` accepts an integer index
+  # (``"0"``, ``"1"``) or a device path (``"/dev/video0"``); strings that
+  # parse cleanly as ints are converted to ints so the OpenCV V4L2 backend
+  # picks them up correctly.
+  camera:
+    source:   "0"
+    width:    640
+    height:   480
+    fps:      30
+    flip:     false   # mirror the frame horizontally before showing/feeding the policy
+
+  # SO-101 follower over USB. ``port`` is the serial device the lerobot bus
+  # opens (e.g. ``"/dev/tty.usbmodem58FA0834521"`` on macOS,
+  # ``"/dev/ttyACM0"`` on Linux). Leave null to run without an arm:
+  # the camera window and policy still come up, the IK solver still
+  # computes joint targets, but nothing is sent to hardware. EE/joint
+  # readings come from the IK model's idle pose. ``calibration_id``
+  # selects which calibration file the lerobot bus reads from disk;
+  # leave null to use whichever ships with the arm.
+  arm:
+    port:                          null
+    calibration_id:                null
+    disable_torque_on_disconnect:  true
+    max_relative_target:           5.0    # degrees per command, safety cap
+    use_degrees:                   true
+
+  # Policy used to control the arm. ``type`` selects the implementation;
+  # the matching subsection feeds its kwargs.
+  policy:
+    type: "manual"   # "manual" | "dreamer" | "cem"
+    manual:
+      step:       0.01     # meters per key press
+      home_xyz:   [0.0, -0.2, 0.15]
+    dreamer:
+      checkpoint: null     # path to .safetensors written by `main.py train`
+      sample:     false    # if true, draw from the actor distribution; else use the mode
+    cem:
+      checkpoint:     null
+      horizon:        12
+      num_samples:    256
+      num_elites:     32
+      num_iterations: 4
+
+  # Control loop pacing.
+  control_dt:        0.1    # seconds between policy steps
+  # Keys captured globally; "s" starts the policy, "q" or ESC quits.
+  start_key:         "s"
+
 env:
   difficulty: "medium"
   render_size: "512x512"
