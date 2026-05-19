@@ -165,7 +165,7 @@ class Trainer:
       os.makedirs(ckpt_dir, exist_ok=True)
       step_path   = os.path.join(ckpt_dir, f"step_{step:06d}.safetensors")
       latest_path = os.path.join(ckpt_dir, "latest.safetensors")
-      return [step_path, latest_path]
+      return [latest_path, step_path]
 
   def _checkpoint(self, step: int, temporary: bool = False) -> str:
     extra = {"iteration": str(int(step))}
