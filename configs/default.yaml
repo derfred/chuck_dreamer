@@ -150,3 +150,40 @@ env:
 
   reward: "goal_distance"
 
+# Object-localization pipeline (chuck_dreamer.real.object_localization).
+# Used by `python main.py analyze-cameras` to calibrate cameras from
+# LeRobot recordings, and by the rescale_joints_and_fk processor to
+# populate object_xy. All distance values are in millimeters.
+object_localization:
+  # Camera frame key shared across calibration datasets.
+  camera_key: "observation.images.front"
+
+  # Episode indices (shared across calibration datasets).
+  episodes:
+    empty:        0   # mat + arm, no checkerboard, no object
+    checkerboard: 1   # checkerboard waved through the scene
+    object_left:  2
+    object_mid:   3
+    object_right: 4
+
+  # Checkerboard geometry.
+  checkerboard:
+    inner_corners: [9, 6]   # cv2 convention: (cols, rows) of inner intersections
+    square_mm:     25.0
+
+  # Mat fiducials — measured once on the physical mat. Set these to your
+  # actual numbers before running `analyze-cameras`. The pipeline asserts
+  # they are floats at startup and refuses to run otherwise.
+  mat:
+    line_length_mm:     300.0   # L: length of each white line
+    line_separation_mm: 160.0   # D: perpendicular distance between the two lines
+    circle_radius_mm:   10.0    # r: radius of the white circle
+
+  # Pose estimator runtime paths. ``calibration_cache`` is where
+  # `analyze-cameras` writes per-dataset calibrations and the
+  # rescale_joints_and_fk processor reads them back from.
+  calibration_cache: "./calibration_cache"
+  mesh_path:         "assets/RobotLearning_Rhombicuboctahedron_Object.3mf"
+  use_sam2:          true   # set false to force the color-heuristic segmenter
+  device:            "cpu"  # "cpu" | "cuda" | "mps"
+
