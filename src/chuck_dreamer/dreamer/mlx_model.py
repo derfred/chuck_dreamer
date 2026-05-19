@@ -836,7 +836,6 @@ class DreamerMLXModel:
     self._opt_wm.update(self._wm_bundle, grads)
     mx.eval(self._wm_bundle.parameters())
 
-
     if tracker is not None:
       logs = {
         "wm/loss":    loss_val,
