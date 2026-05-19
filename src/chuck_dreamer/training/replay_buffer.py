@@ -238,6 +238,24 @@ class ReplayBuffer:
   def num_episodes(self) -> int:
     return len(self._episodes)
 
+  def size_by_tag(self) -> dict[str, tuple[int, int]]:
+    """Return ``{tag: (num_episodes, num_steps)}`` with double-counting.
+
+    Episodes with multiple tags contribute to each of their tags;
+    untagged episodes land in ``"untagged"``. Mirrors the convention in
+    :meth:`Tracker.log_batch_tags` so warmup summaries and per-batch
+    tag counts use the same bucket names.
+    """
+    counts: dict[str, tuple[int, int]] = {}
+    for ep in self._episodes:
+      steps = int(ep["action"].shape[0])
+      tags  = ep.get("tags") or ()
+      keys  = tags if tags else ("untagged",)
+      for t in keys:
+        n_eps, n_steps = counts.get(t, (0, 0))
+        counts[t]      = (n_eps + 1, n_steps + steps)
+    return counts
+
   def can_sample(self, batch_size: int, seq_len: int) -> bool:
     del batch_size  # any eligible episode is enough; weighted sampling with replacement
     for ep in self._episodes:
@@ -393,14 +411,15 @@ class ReplayBuffer:
     """
     dataset = EpisodeDataset(directory, format=format)
     count   = 0
-    for episode in dataset.stream(
+    for _path, processed in dataset.stream_processed(
+      self._sim_processor,
       progress=progress,
       num_episodes=num_episodes,
       rng=self._rng,
       num_workers=self._default_num_workers,
     ):
       before = self.num_episodes
-      self.add_sim_episode(episode.data)
+      self.add_episode(processed)
       if self.num_episodes > before:
         count += 1
     return count

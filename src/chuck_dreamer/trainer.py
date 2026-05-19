@@ -47,12 +47,24 @@ class Trainer:
         f"Loading warmup episodes from {src['path']} "
         f"(format={src['format']}, num_episodes={src['num_episodes']})"
       )
-      self._replay_buffer.load_sim_episodes(
+      inserted = self._replay_buffer.load_sim_episodes(
         src["path"],
         src["format"],
         progress=True,
         num_episodes=src["num_episodes"],
       )
+      logger.info(
+        f"  inserted {inserted} episodes from {src['path']} "
+        f"→ buffer now {self._replay_buffer.num_episodes} eps / "
+        f"{len(self._replay_buffer)} steps"
+      )
+
+    by_tag = self._replay_buffer.size_by_tag()
+    if by_tag:
+      logger.info("Warmup buffer by tag (episodes counted under each of their tags):")
+      for tag in sorted(by_tag):
+        n_eps, n_steps = by_tag[tag]
+        logger.info(f"  {tag}: {n_eps} eps / {n_steps} steps")
 
     # Eval episodes load is independent of the buffer warmup — preload
     # them here so the first eval phase doesn't pay the cost (and

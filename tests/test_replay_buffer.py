@@ -617,3 +617,24 @@ def test_sample_tags_default_to_empty_tuple_when_no_tags():
   buf.add_episode(_make_episode(0, length=20))
   batch = buf.sample(batch_size=4, seq_len=5)
   assert batch["tags"] == [()] * 4
+
+
+def test_size_by_tag_double_counts_multi_tagged_episodes():
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  buf.add_episode(_make_episode(0, length=10, tags=("real",)))
+  buf.add_episode(_make_episode(1, length=20, tags=("real", "demo")))
+  buf.add_episode(_make_episode(2, length=30))  # untagged
+
+  by_tag = buf.size_by_tag()
+  assert by_tag["real"]     == (2, 10 + 20)
+  assert by_tag["demo"]     == (1, 20)
+  assert by_tag["untagged"] == (1, 30)
+  # Step-sum across tag buckets exceeds the buffer total because the
+  # ("real", "demo") episode counts under both tags — the docstring
+  # promises double-counting.
+  assert sum(steps for _, steps in by_tag.values()) > len(buf)
+
+
+def test_size_by_tag_empty_buffer_returns_empty_dict():
+  buf = ReplayBuffer(capacity_steps=10_000, min_episode_len=5, seed=0)
+  assert buf.size_by_tag() == {}
