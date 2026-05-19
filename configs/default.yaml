@@ -171,8 +171,12 @@ real:
   policy:
     type: "manual"   # "manual" | "dreamer" | "cem"
     manual:
-      step:       0.01     # meters per key press
-      home_xyz:   [0.0, -0.2, 0.15]
+      # Serial port for the SO-101 *leader* arm (the one the operator
+      # moves by hand). The manual policy reads its joint positions
+      # each tick and mirrors them onto the follower.
+      port:           null
+      calibration_id: null
+      use_degrees:    true
     dreamer:
       checkpoint: null     # path to .safetensors written by `main.py train`
       sample:     false    # if true, draw from the actor distribution; else use the mode
