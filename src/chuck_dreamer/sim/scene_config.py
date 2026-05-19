@@ -65,6 +65,11 @@ class SceneConfig:
     max_steps: int
     control_dt: float              # seconds per action step
 
+    # Visual: when False the SceneBuilder skips the auto-generated goal disc.
+    # Used by the "real" preset where the goal is already drawn as part of
+    # the mat clutter (the white circle outline).
+    draw_goal_marker: bool = True
+
     @property
     def joint_initial_qpos(self) -> list[float] | None:
         if self.robot_initial_qpos is not None:

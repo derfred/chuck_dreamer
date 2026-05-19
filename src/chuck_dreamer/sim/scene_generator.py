@@ -77,7 +77,48 @@ _PRESETS: dict[str, dict[str, Any]] = {
     "robot_type": "so100",
     "color_mode": "shared",
   },
+  # Mirrors the real-world calibration mat: black table-top with two white
+  # 30 cm parallel lines (16 cm apart) in front of the arm and a 10 cm
+  # diameter white circle sitting between the lines' far-side endpoints.
+  # The pushable target is always the rhombicuboctahedron mesh — same object
+  # used in the physical experiments — placed somewhere reachable on the mat.
+  "real": {
+    "target_shapes": ["mesh"],
+    "distractor_shapes": [],
+    "mass_range": (0.05, 0.2),
+    "num_obstacles": (0, 0),
+    "num_clutter": (0, 0),
+    "camera_angle_range": 0.0,
+    "push_distance": (0.05, 0.15),
+    "lighting_variation": 0.0,
+    "robot_type": "so100",
+    "color_mode": "target_red",  # unused — target color overridden below
+  },
 }
+
+# --- "real" preset layout (matches the physical calibration mat) ----------
+# All coordinates are in metres. The pattern is rotated 90° relative to the
+# arm's reach axis: the two lines run along the y-axis, separated by D along
+# x, and the circle sits between their +y endpoints. The mat is centred on
+# (x, y) = (_REAL_MAT_CENTRE_X, 0), placing it inside the arm's reach annulus.
+_REAL_TABLE_COLOR     = [0.05, 0.05, 0.05, 1.0]
+_REAL_MARKING_COLOR   = [0.95, 0.95, 0.95, 1.0]
+_REAL_LINE_LENGTH     = 0.30
+_REAL_LINE_SEPARATION = 0.16
+_REAL_LINE_WIDTH      = 0.005   # 5 mm-wide painted lines
+_REAL_CIRCLE_RADIUS   = 0.05    # 10 cm diameter
+# Decal half-height — kept tiny so the markings read as paint on the mat.
+_REAL_MARKING_HALF_HEIGHT = 0.0005
+# Mat centred ~0.25 m in front of the arm base. Lines run from y = -L/2 to
+# y = +L/2; the circle sits at (_REAL_MAT_CENTRE_X, +L/2).
+_REAL_MAT_CENTRE_X = -0.35
+_REAL_LINE_Y_NEAR  = -_REAL_LINE_LENGTH / 2.0
+_REAL_LINE_Y_FAR   =  _REAL_LINE_LENGTH / 2.0
+
+# Circle is drawn as an unfilled outline (a ring of N tangent box segments).
+# Width is the radial thickness of the painted ring on the real mat.
+_REAL_CIRCLE_RING_SEGMENTS = 64
+_REAL_CIRCLE_RING_WIDTH    = 0.003   # 3 mm ring thickness
 
 # RGBA tuple for the "red" target color used in easy/medium difficulties.
 _RED_RGBA = [0.85, 0.15, 0.15, 1.0]
@@ -243,6 +284,8 @@ class SceneGenerator:
   # ------------------------------------------------------------------
 
   def _sample_unchecked(self, rng: np.random.Generator) -> SceneConfig:
+      if self.difficulty == "real":
+        return self._sample_real(rng)
       p = self._preset
 
       table_half_x, table_half_y, table_half_z = self.table_size
@@ -355,10 +398,151 @@ class SceneGenerator:
       )
 
   # ------------------------------------------------------------------
+  # "real" preset — fixed mat geometry, randomised target placement
+  # ------------------------------------------------------------------
+
+  def _sample_real(self, rng: np.random.Generator) -> SceneConfig:
+      p = self._preset
+
+      table_half_x, table_half_y, table_half_z = self.table_size
+      table_size      = list(self.table_size)
+      table_friction  = float(rng.uniform(0.4, 0.7))
+      table_color     = list(_REAL_TABLE_COLOR)
+      table_top_z     = _TABLE_GEOM_CENTRE_Z + table_half_z
+      robot_base_pos  = [-table_half_x, 0.0, table_half_z]
+
+      mesh_options = list(_MESH_LIBRARY.keys())
+
+      # Mat layout — pattern rotated 90°: lines run along the y-axis, separated
+      # along x by D. The circle sits between the +y endpoints; the camera is
+      # fixed on the same +y side so the operator's view always frames it.
+      half_sep = _REAL_LINE_SEPARATION / 2.0
+      line_x_left   = _REAL_MAT_CENTRE_X - half_sep
+      line_x_right  = _REAL_MAT_CENTRE_X + half_sep
+      circle_centre = (_REAL_MAT_CENTRE_X, _REAL_LINE_Y_FAR)
+
+      # Target: rhombicuboctahedron, placed somewhere between the lines and
+      # within the arm's reachable annulus.
+      target_color = [0.85, 0.15, 0.15, 1.0]
+      margin = 0.02
+      for _ in range(64):
+        tx = float(rng.uniform(line_x_left + margin, line_x_right - margin))
+        ty = float(rng.uniform(_REAL_LINE_Y_NEAR + margin, _REAL_LINE_Y_FAR - margin))
+        if _ARM_MIN_REACH <= math.hypot(tx - robot_base_pos[0], ty) <= _ARM_MAX_REACH:
+          break
+      mesh_tag = str(rng.choice(mesh_options))
+      half = float(rng.uniform(0.020, 0.030))
+      target = ObjectConfig(
+          shape="mesh",
+          size=[half],
+          mass=float(rng.uniform(*p["mass_range"])),
+          friction=float(rng.uniform(0.3, 0.8)),
+          pos=[tx, ty, 0.0],
+          orientation=float(rng.uniform(0.0, 2 * math.pi)),
+          color=target_color,
+          mesh_path=mesh_tag,
+      )
+      target.pos[2] = table_top_z + object_half_z(target)
+
+      # Goal: the centre of the white circle — fixed by the mat geometry.
+      goal_pos       = [circle_centre[0], circle_centre[1]]
+      goal_tolerance = _REAL_CIRCLE_RADIUS
+
+      # Visual mat markings: two white "lines" as thin elongated boxes (rotated
+      # 90° → long axis along y) plus a white "circle" outline rendered as a
+      # ring of N tangent box segments (unfilled — matches the painted ring on
+      # the physical mat). All live in the clutter list so the builder renders
+      # them with contype=0.
+      line_cy = (_REAL_LINE_Y_NEAR + _REAL_LINE_Y_FAR) / 2.0
+      line_cz = table_top_z + _REAL_MARKING_HALF_HEIGHT
+      line_half_length = _REAL_LINE_LENGTH / 2.0
+      line_half_width  = _REAL_LINE_WIDTH / 2.0
+      lines: list[ObjectConfig] = []
+      for sign in (-1.0, 1.0):
+        lines.append(ObjectConfig(
+            shape="box",
+            # size = (half_x, half_y, half_z); long axis is y, short axis is x
+            size=[line_half_width, line_half_length, _REAL_MARKING_HALF_HEIGHT],
+            mass=0.001,
+            friction=0.5,
+            pos=[_REAL_MAT_CENTRE_X + sign * half_sep, line_cy, line_cz],
+            orientation=0.0,
+            color=list(_REAL_MARKING_COLOR),
+        ))
+      # Ring of tangent box segments. Each segment is a small chord:
+      #   half-length along the tangent ≈ r·sin(π/N)
+      #   half-width  along the radius  = ring_width/2
+      n_seg          = _REAL_CIRCLE_RING_SEGMENTS
+      seg_half_chord = _REAL_CIRCLE_RADIUS * math.sin(math.pi / n_seg)
+      seg_half_width = _REAL_CIRCLE_RING_WIDTH / 2.0
+      cx, cy_c = circle_centre
+      ring: list[ObjectConfig] = []
+      for i in range(n_seg):
+        theta = 2.0 * math.pi * (i + 0.5) / n_seg
+        ring.append(ObjectConfig(
+            shape="box",
+            # Local axes before yaw: x = tangent, y = radial. We rotate by
+            # theta so x ends up tangent to the circle at angle theta.
+            size=[seg_half_chord, seg_half_width, _REAL_MARKING_HALF_HEIGHT],
+            mass=0.001,
+            friction=0.5,
+            pos=[
+                cx + _REAL_CIRCLE_RADIUS * math.cos(theta),
+                cy_c + _REAL_CIRCLE_RADIUS * math.sin(theta),
+                line_cz,
+            ],
+            orientation=theta + math.pi / 2.0,
+            color=list(_REAL_MARKING_COLOR),
+        ))
+      clutter = lines + ring
+
+      # Camera — operator's-eye pose on a 110° front-facing arc centred on
+      # the arm base, 50 cm above the table. Angle 0 = directly in front of
+      # the arm (+x direction); we sample in ±55° so the camera always looks
+      # back toward the arm and sees the full mat + arm.
+      cam_radius = 0.65
+      cam_height = 0.50
+      cam_angle  = float(rng.uniform(-math.radians(55.0), math.radians(55.0)))
+      bx, by, _bz = robot_base_pos
+      cam_pos = [
+          bx + cam_radius * math.cos(cam_angle),
+          by + cam_radius * math.sin(cam_angle),
+          cam_height,
+      ]
+      look_target = [_REAL_MAT_CENTRE_X, 0.0, table_top_z]
+      camera = CameraConfig(pos=cam_pos, look_at=look_target, fov=70.0)
+
+      lighting = LightingConfig(direction=[0.0, -0.5, -1.0], intensity=0.8, ambient=0.3)
+
+      return SceneConfig(
+          table_size=table_size,
+          table_friction=table_friction,
+          table_color=table_color,
+          robot_type=p["robot_type"],
+          robot_base_pos=robot_base_pos,
+          robot_initial_qpos=None,
+          target=target,
+          goal_pos=goal_pos,
+          goal_tolerance=goal_tolerance,
+          obstacles=[],
+          clutter=clutter,
+          camera=camera,
+          lighting=lighting,
+          max_steps=150,
+          control_dt=0.1,
+          draw_goal_marker=False,
+      )
+
+  # ------------------------------------------------------------------
   # Validity checks
   # ------------------------------------------------------------------
 
   def _is_valid(self, cfg: SceneConfig) -> bool:
+    if self.difficulty == "real":
+      # The mat-marking clutter intentionally sits past the arm's reach, and
+      # the goal (circle centre) is allowed to as well — only the target's
+      # reachability matters.
+      return self._check_reachability(cfg) and self._check_goal_on_table(cfg)
     return (
         self._check_reachability(cfg)
         and self._check_goal_reachability(cfg)

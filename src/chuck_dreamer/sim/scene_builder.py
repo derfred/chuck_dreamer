@@ -175,24 +175,40 @@ def _register_pyramid_mesh(
 # Camera: convert look-at to MuJoCo euler
 # ---------------------------------------------------------------------------
 
-def _lookat_to_euler(
+def _lookat_to_xyaxes(
         pos: list[float], look_at: list[float]) -> tuple[str, str]:
-    """Return (pos_str, euler_str) for a camera pointing from pos toward look_at."""
-    px, py, pz = pos
-    lx, ly, lz = look_at
-    fwd = np.array([lx - px, ly - py, lz - pz], dtype=float)
-    dist = np.linalg.norm(fwd)
-    if dist < 1e-6:
+    """Return (pos_str, xyaxes_str) for a camera pointing from pos toward look_at.
+
+    Uses MuJoCo's ``xyaxes`` attribute (camera +X and +Y axes in world frame),
+    which is unambiguous — the previous euler-based version produced incorrect
+    roll for cameras off the world Y axis. The camera's forward is local -Z;
+    we keep world +Z as "up" so the rendered image is upright.
+    """
+    pos_arr = np.array(pos, dtype=float)
+    look_arr = np.array(look_at, dtype=float)
+    fwd = look_arr - pos_arr
+    n = np.linalg.norm(fwd)
+    if n < 1e-6:
         fwd = np.array([0.0, 0.0, -1.0])
     else:
-        fwd /= dist
+        fwd /= n
 
-    pitch = math.atan2(-fwd[2], math.hypot(fwd[0], fwd[1]))
-    yaw = math.atan2(fwd[1], fwd[0]) + math.pi / 2
+    world_up = np.array([0.0, 0.0, 1.0])
+    # Degenerate case: forward parallel to world up → fall back to +Y as
+    # reference so we still produce a valid (if arbitrary) roll.
+    if abs(float(np.dot(fwd, world_up))) > 0.9999:
+        world_up = np.array([0.0, 1.0, 0.0])
 
-    pos_str = f"{px:.4f} {py:.4f} {pz:.4f}"
-    euler_str = f"{pitch:.4f} 0 {yaw:.4f}"
-    return pos_str, euler_str
+    right = np.cross(fwd, world_up)
+    right /= np.linalg.norm(right)
+    up = np.cross(right, fwd)
+
+    pos_str    = f"{pos_arr[0]:.4f} {pos_arr[1]:.4f} {pos_arr[2]:.4f}"
+    xyaxes_str = (
+        f"{right[0]:.6f} {right[1]:.6f} {right[2]:.6f} "
+        f"{up[0]:.6f} {up[1]:.6f} {up[2]:.6f}"
+    )
+    return pos_str, xyaxes_str
 
 
 # ---------------------------------------------------------------------------
@@ -365,31 +381,39 @@ class SceneBuilder:
 
         # Goal disc: a thin non-colliding cylinder lying flush on the table top.
         # Uses ``goal_tolerance`` as its radius so the rendered marker matches the
-        # success threshold the reward function uses.
+        # success threshold the reward function uses. Suppressed when the scene
+        # already provides its own goal visual (e.g. the "real" preset draws an
+        # unfilled ring as clutter).
         table_top_z = _TABLE_GEOM_CENTRE_Z + config.table_size[2]
-        goal_geom = etree.SubElement(worldbody, "geom")
-        goal_geom.set("name", "goal_marker")
-        goal_geom.set("type", "cylinder")
-        goal_geom.set(
-            "size", f"{config.goal_tolerance:.4f} {_GOAL_DISC_HALF_HEIGHT:.5f}"
-        )
-        goal_geom.set(
-            "pos",
-            f"{config.goal_pos[0]:.4f} {config.goal_pos[1]:.4f} "
-            f"{table_top_z + _GOAL_DISC_HALF_HEIGHT:.5f}",
-        )
-        goal_geom.set("rgba", "0.95 0.95 0.95 1")
-        goal_geom.set("contype", "0")
-        goal_geom.set("conaffinity", "0")
+        if config.draw_goal_marker:
+            goal_geom = etree.SubElement(worldbody, "geom")
+            goal_geom.set("name", "goal_marker")
+            goal_geom.set("type", "cylinder")
+            goal_geom.set(
+                "size", f"{config.goal_tolerance:.4f} {_GOAL_DISC_HALF_HEIGHT:.5f}"
+            )
+            goal_geom.set(
+                "pos",
+                f"{config.goal_pos[0]:.4f} {config.goal_pos[1]:.4f} "
+                f"{table_top_z + _GOAL_DISC_HALF_HEIGHT:.5f}",
+            )
+            goal_geom.set("rgba", "0.95 0.95 0.95 1")
+            goal_geom.set("contype", "0")
+            goal_geom.set("conaffinity", "0")
 
         cam_elem = root.find(".//camera[@name='main_camera']")
         if cam_elem is None:
             cam_elem = etree.SubElement(worldbody, "camera")
             cam_elem.set("name", "main_camera")
-        pos_str, euler_str = _lookat_to_euler(
+        pos_str, xyaxes_str = _lookat_to_xyaxes(
             config.camera.pos, config.camera.look_at)
         cam_elem.set("pos", pos_str)
-        cam_elem.set("euler", euler_str)
+        # xyaxes overrides any inherited rotation attribute; drop euler/quat
+        # to avoid MuJoCo complaining about conflicting orientations.
+        for key in ("euler", "quat", "axisangle"):
+            if key in cam_elem.attrib:
+                del cam_elem.attrib[key]
+        cam_elem.set("xyaxes", xyaxes_str)
         cam_elem.set("fovy", f"{config.camera.fov:.1f}")
 
         for lt in root.findall(".//light"):
