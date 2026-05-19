@@ -2,8 +2,8 @@
 
 All policies share the same surface:
 
-  reset(initial_obs)            -> None
-  act(obs) -> ee_action (7,)    # [x, y, z, qw, qx, qy, qz]
+  reset(initial_obs)  -> None
+  act(obs) -> action  # numpy array, shape policy-specific
 
 ``obs`` is whatever :class:`~chuck_dreamer.real.run.runner.Runner` builds
 per step — see that module for the schema. Policies that don't need an
@@ -11,8 +11,8 @@ image just ignore it.
 
 Three implementations:
 
-  * :class:`ManualPolicy` — captures arrow / w/a/s/d / q/e keystrokes and
-                            commands an EE delta in world space.
+  * :class:`ManualPolicy` — mirrors joint positions from an SO-101 leader
+                            arm onto the follower (teleoperation).
   * :class:`DreamerPolicyAdapter` — wraps a trained Dreamer model's actor
                                     (``model.actor_action`` on the
                                     posterior state).
@@ -21,11 +21,12 @@ Three implementations:
 
 from __future__ import annotations
 
-import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
+
+from .arm import LeaderArm, LeaderArmConfig
 
 
 # ---------------------------------------------------------------------------
@@ -39,123 +40,60 @@ class RealPolicy(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Manual keyboard policy
+# Manual teleop policy: SO-101 leader -> follower joint mirror
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class ManualPolicyConfig:
-  step:     float = 0.01
-  home_xyz: tuple[float, float, float] = (0.0, -0.2, 0.15)
+  """Configuration for the leader-arm-driven manual policy.
 
-
-@dataclass
-class _KeyState:
-  """Pressed-key set, mutated by the listener thread, read by ``act``.
-
-  ``lock`` protects ``pressed`` so the main loop sees a coherent snapshot
-  even if a key is released between the read and the act.
+  ``port`` is the serial device the leader bus connects to (e.g.
+  ``"/dev/tty.usbmodemXXXX"``). The leader uses lerobot's ``SOLeader``
+  teleoperator under the hood — same protocol as the follower's bus,
+  but read-only.
   """
-  pressed: set[str] = field(default_factory=set)
-  lock:    threading.Lock = field(default_factory=threading.Lock)
-
-
-_MOVE_BINDINGS: dict[str, tuple[float, float, float]] = {
-  # +x / -x: forward/back (away from arm base)
-  "w": (0.0, +1.0, 0.0),
-  "s": (0.0, -1.0, 0.0),
-  # left/right
-  "a": (-1.0, 0.0, 0.0),
-  "d": (+1.0, 0.0, 0.0),
-  # up/down
-  "q": (0.0, 0.0, +1.0),
-  "e": (0.0, 0.0, -1.0),
-}
+  port:           str
+  calibration_id: str | None = None
+  use_degrees:    bool = True
 
 
 class ManualPolicy:
-  """Keyboard-driven EE-delta policy.
+  """Joint-mirroring policy driven by an SO-101 leader arm.
 
-  Holds the most recent commanded EE pose; each :meth:`act` adds the
-  pressed-key direction × ``step`` to that pose. The hold-orientation
-  quaternion is captured from the first observation so the gripper keeps
-  whatever pose it started in.
+  Returns a ``(6,)`` joint qpos array (radians, simulator order) on each
+  ``act()`` call, sampled directly from the leader's current pose. The
+  runner is expected to pass that array to ``Arm.send_joint_qpos`` so
+  the follower tracks the leader's motion.
   """
 
   def __init__(self, config: ManualPolicyConfig) -> None:
     self.config = config
-    self._keys  = _KeyState()
-    self._listener = None
-    self._cmd_xyz:  np.ndarray | None = None
-    self._hold_quat: np.ndarray | None = None
+    self._leader: LeaderArm | None = None
 
-  # ------------------------------------------------------------------
-  # Key listener (pynput is a project dep)
-  # ------------------------------------------------------------------
-
-  def start_listener(self) -> None:
-    if self._listener is not None:
-      return
-    from pynput import keyboard  # lazy import — pynput pulls in X / Quartz
-
-    def _name(key) -> str | None:
-      try:
-        return key.char.lower() if key.char else None
-      except AttributeError:
-        return None
-
-    def on_press(key):
-      n = _name(key)
-      if n is None:
-        return
-      with self._keys.lock:
-        self._keys.pressed.add(n)
-
-    def on_release(key):
-      n = _name(key)
-      if n is None:
-        return
-      with self._keys.lock:
-        self._keys.pressed.discard(n)
-
-    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-    listener.daemon = True
-    listener.start()
-    self._listener = listener
-
-  def stop_listener(self) -> None:
-    if self._listener is not None:
-      self._listener.stop()
-      self._listener = None
-
-  # ------------------------------------------------------------------
-  # Policy API
-  # ------------------------------------------------------------------
+  def _ensure_leader(self) -> LeaderArm:
+    if self._leader is None:
+      self._leader = LeaderArm(LeaderArmConfig(
+        port=self.config.port,
+        calibration_id=self.config.calibration_id,
+        use_degrees=self.config.use_degrees,
+      ))
+      self._leader.connect()
+    return self._leader
 
   def reset(self, initial_obs: dict) -> None:
-    # No EE-pose feed from the runner anymore — seed from the configured
-    # home pose and an identity orientation. Callers that wire IK back in
-    # later can replace this with a real reading.
-    self._cmd_xyz   = np.asarray(self.config.home_xyz, dtype=np.float64)
-    self._hold_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-    self.start_listener()
+    self._ensure_leader()
 
   def act(self, obs: dict) -> np.ndarray:
-    if self._cmd_xyz is None or self._hold_quat is None:
-      raise RuntimeError("ManualPolicy.act() called before reset()")
-    with self._keys.lock:
-      pressed = set(self._keys.pressed)
+    leader = self._ensure_leader()
+    return leader.read_joint_qpos()
 
-    delta = np.zeros(3, dtype=np.float64)
-    for k, dir_ in _MOVE_BINDINGS.items():
-      if k in pressed:
-        delta += np.asarray(dir_, dtype=np.float64)
-    self._cmd_xyz = self._cmd_xyz + delta * self.config.step
-
-    return np.concatenate([
-      self._cmd_xyz.astype(np.float32),
-      self._hold_quat.astype(np.float32),
-    ])
+  # Symmetric with the rest of the run module; the runner calls this on
+  # shutdown to release the serial port.
+  def stop_listener(self) -> None:
+    if self._leader is not None:
+      self._leader.disconnect()
+      self._leader = None
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,11 @@
-"""SO-101 follower wrapper for the real-arm run loop.
+"""SO-101 follower + leader wrappers for the real-arm run loop.
 
-Owns the lerobot ``SOFollower`` bus and exposes joint readings/commands
-in radians as a ``(6,)`` numpy array, ordered to match the physical
-chain (shoulder pan → gripper).
+:class:`Arm` owns the lerobot ``SOFollower`` bus and exposes joint
+readings/commands in radians as a ``(6,)`` numpy array, ordered to
+match the physical chain (shoulder pan → gripper). :class:`LeaderArm`
+is a read-only twin that pulls joint positions from an SO-100/101
+*leader* (teleop) bus — used by the manual policy so the operator can
+move the leader arm and have the follower mirror it.
 
 The lerobot bus ships with ``use_degrees=True`` by default; we convert
 at the boundary so the rest of the pipeline stays in radians.
@@ -141,3 +144,68 @@ class Arm:
     if self.config.use_degrees:
       sent_vec = sent_vec * (np.pi / 180.0)
     return sent_vec
+
+
+@dataclass
+class LeaderArmConfig:
+  port:            str
+  calibration_id:  str | None = None
+  use_degrees:     bool = True
+
+
+class LeaderArm:
+  """Read-only SO-100/101 leader; wraps lerobot's ``SOLeader``.
+
+  Used by the manual policy to mirror operator-driven joint motion onto
+  the follower. ``read_joint_qpos`` is the only meaningful operation —
+  the leader is torque-disabled by lerobot, so the bus only reports
+  positions back.
+  """
+
+  def __init__(self, config: LeaderArmConfig) -> None:
+    self.config = config
+    self.joint_names = JOINT_NAMES
+    self._leader = None
+
+  # ------------------------------------------------------------------
+  # Lifecycle
+  # ------------------------------------------------------------------
+
+  def connect(self) -> None:
+    from lerobot.teleoperators.so_leader import SOLeader, SOLeaderTeleopConfig
+
+    cfg = SOLeaderTeleopConfig(
+      port=self.config.port,
+      id=self.config.calibration_id,
+      use_degrees=self.config.use_degrees,
+    )
+    self._leader = SOLeader(cfg)
+    self._leader.connect()
+
+  def disconnect(self) -> None:
+    if self._leader is not None and self._leader.is_connected:
+      self._leader.disconnect()
+
+  def __enter__(self) -> "LeaderArm":
+    self.connect()
+    return self
+
+  def __exit__(self, *_exc) -> None:
+    self.disconnect()
+
+  # ------------------------------------------------------------------
+  # I/O
+  # ------------------------------------------------------------------
+
+  def read_joint_qpos(self) -> np.ndarray:
+    """Return the leader's current joint positions in radians.
+
+    Returns a ``(6,)`` numpy array ordered to match :data:`JOINT_NAMES` /
+    the follower's :meth:`Arm.read_joint_qpos`.
+    """
+    assert self._leader is not None, "LeaderArm.read_joint_qpos() before connect()"
+    action = self._leader.get_action()
+    vec = np.array([action[f"{m}.pos"] for m in _LEROBOT_MOTORS], dtype=np.float32)
+    if self.config.use_degrees:
+      vec = vec * (np.pi / 180.0)
+    return vec

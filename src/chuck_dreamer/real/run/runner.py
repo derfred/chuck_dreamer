@@ -15,9 +15,9 @@ There is no IK in this loop — policies are expected to emit something
 the arm wrapper can consume directly (currently just a placeholder; the
 arm's ``send_action`` is a no-op so the manual policy can be wired up
 without hardware risk). The cv2 window blocks the main thread; ``s``
-starts the controller, ``q``/ESC quits. Key presses for the manual
-policy are captured by a separate background listener (see
-:class:`ManualPolicy`).
+starts the controller, ``q``/ESC quits. The manual policy mirrors
+joint positions from a leader arm onto the follower — see
+:class:`~chuck_dreamer.real.run.policies.ManualPolicy`.
 """
 
 from __future__ import annotations
@@ -67,9 +67,12 @@ def _build_policy(cfg) -> RealPolicy:
   ptype = cfg.real.policy.type
   if ptype == "manual":
     m = cfg.real.policy.manual
+    if not m.port:
+      raise ValueError("real.policy.manual.port must be set for the leader arm.")
     return ManualPolicy(ManualPolicyConfig(
-      step=float(m.step),
-      home_xyz=tuple(m.home_xyz),
+      port=str(m.port),
+      calibration_id=(None if m.calibration_id is None else str(m.calibration_id)),
+      use_degrees=bool(m.use_degrees),
     ))
   if ptype == "dreamer":
     from ...eval.checkpoint import load_checkpoint
@@ -189,6 +192,16 @@ def run(cfg) -> None:
           last_step_t = now
           if action is not None:
             last_action = action
+            # The manual policy emits a (6,) joint qpos; route it to the
+            # follower so the leader's pose is mirrored. Model-based
+            # policies (image-mode actor / CEM) still emit something
+            # else (action_dim depends on the trainer); for those we
+            # just log the action for now since IK is unwired.
+            if action.shape == (6,):
+              try:
+                arm.send_joint_qpos(action)
+              except Exception as e:  # noqa: BLE001 — serial faults vary
+                logger.warning("send_joint_qpos failed: %s — holding pose", e)
 
         # Draw + window event pump.
         hud = _draw_hud(bgr, controller.state, fps, dry_run=arm.is_dry_run)
