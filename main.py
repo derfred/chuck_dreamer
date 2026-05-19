@@ -285,45 +285,62 @@ def train(ctx, experiment_name, seed, resume, overrides):
   trainer.train(resume=resume_arg)
 
 
-def _list_evals() -> dict[str, Path]:
-  """Return a mapping of eval-name → notebook path under chuck_dreamer/evals/."""
-  evals_dir = Path(__file__).parent / "src" / "chuck_dreamer" / "evals"
-  return {p.stem: p for p in sorted(evals_dir.glob("*.ipynb"))}
-
-
 @cli.command("eval")
 @click.argument("name", required=False)
+@click.option("--all", "run_all", is_flag=True,
+              help="Run every notebook listed under cfg.eval.deep.notebooks. "
+                   "Mutually exclusive with NAME.")
+@click.option("--recordings/--no-recordings", default=None,
+              help="Also dump per-episode rerun recordings of the rollout into "
+                   "<output-dir>/recordings/. Default: follow cfg.eval.deep.recordings. "
+                   "Can be used WITHOUT a notebook to only dump recordings.")
 @click.option("--checkpoint", "checkpoint_path", default=None, type=str,
               help="Path to a trained checkpoint .safetensors file. "
                    "Defaults to {save_dir}/{experiment}/latest.safetensors.")
-@click.option("--num-episodes", default=20, type=int, help="Number of episodes to evaluate on.")
-@click.option("--burn-in", default=5, type=int, help="Closed-loop burn-in steps before open-loop rollout.")
-@click.option("--horizon", default=15, type=int, help="Open-loop horizon length.")
+@click.option("--num-episodes", default=None, type=int,
+              help="Episodes to evaluate on. Defaults to cfg.eval.deep.num_episodes.")
+@click.option("--burn-in", default=None, type=int,
+              help="Closed-loop burn-in steps. Defaults to cfg.eval.burn_in.")
+@click.option("--horizon", default=None, type=int,
+              help="Open-loop horizon length. Defaults to cfg.eval.deep.horizon.")
 @click.option("--seed", default=None, type=int, help="Random seed (random if omitted).")
-@click.option("--output", "output_path", default=None, type=str,
-              help="Where to write the executed notebook (default: ./<name>_<ckpt-stem>.ipynb in cwd).")
+@click.option("--output-dir", "output_dir", default=None, type=str,
+              help="Directory to write executed notebooks + recordings. "
+                   "Default: ./eval_runs/<ckpt-stem>/.")
 @click.option("-p", "--param", "extra_params", multiple=True, metavar="KEY=VALUE",
               help="Additional papermill parameter override (repeatable).")
 @override_option
 @click.pass_context
-def eval_cmd(ctx, name, checkpoint_path, num_episodes,
-             burn_in, horizon, seed, output_path, extra_params, overrides):
-  """Run an evaluation notebook on a trained checkpoint via papermill.
+def eval_cmd(ctx, name, run_all, recordings, checkpoint_path, num_episodes,
+             burn_in, horizon, seed, output_dir, extra_params, overrides):
+  """Run deep eval on a trained checkpoint.
 
-  NAME selects which notebook under ``src/chuck_dreamer/evals/`` to execute
-  (e.g. ``open_loop_rollout``). Run without NAME to list available evals.
+  Three modes:
+
+    * ``main.py eval``                          — list available notebooks.
+    * ``main.py eval <notebook>``               — execute one notebook.
+    * ``main.py eval --all``                    — execute every notebook
+                                                  in ``cfg.eval.deep.notebooks``.
+    * Add ``--recordings`` to also dump per-episode rerun rollout files.
+      ``--recordings`` works without a notebook too — useful for just
+      generating viewer-ready recordings against a checkpoint.
   """
   import os
 
-  evals = _list_evals()
-  if not name:
-    click.echo("Available evals:")
-    for n, p in evals.items():
+  from chuck_dreamer.eval import DeepEvalRunner, available_notebooks
+
+  notebooks = available_notebooks()
+  if not name and not run_all and recordings is None:
+    click.echo("Available notebooks:")
+    for n, p in notebooks.items():
       click.echo(f"  {n:<30s} {p}")
+    click.echo("\nUse `eval <name>` to run one, `eval --all` to run every configured "
+               "notebook, or `eval --recordings` to dump recordings without notebooks.")
     return
-  if name not in evals:
-    raise click.BadParameter(f"unknown eval {name!r}. Available: {sorted(evals)}")
-  nb_in = evals[name]
+  if name and run_all:
+    raise click.BadParameter("--all is mutually exclusive with a notebook NAME argument.")
+  if name and name not in notebooks:
+    raise click.BadParameter(f"unknown notebook {name!r}. Available: {sorted(notebooks)}")
 
   cfg = load_config(ctx.obj["config_path"], overrides=overrides, aliases={"seed": seed})
 
@@ -333,42 +350,55 @@ def eval_cmd(ctx, name, checkpoint_path, num_episodes,
   if not Path(checkpoint_path).exists():
     raise click.ClickException(f"checkpoint not found: {checkpoint_path}")
 
-  # The eval notebook expects one data path. Pull from the first warmup source.
-  first_source = cfg.training.data.warmup_source[0]
-  data_path    = first_source["path"]
-  data_format  = first_source["format"]
-
-  if output_path is None:
-    output_path = f"{name}_{Path(checkpoint_path).stem}.ipynb"
+  if name:
+    chosen_notebooks: tuple[str, ...] = (name,)
+  elif run_all:
+    chosen_notebooks = tuple(cfg.eval.deep.notebooks or ())
+    if not chosen_notebooks:
+      click.echo("cfg.eval.deep.notebooks is empty — only recordings will be dumped.")
   else:
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    chosen_notebooks = ()
 
-  parameters: dict = {
-    "checkpoint_path": str(checkpoint_path),
-    "data_path":       str(data_path),
-    "data_format":     str(data_format),
-    "num_episodes":    int(num_episodes),
-    "burn_in":         int(burn_in),
-    "horizon":         int(horizon),
-    "seed":            int(cfg.seed),
-  }
+  effective_recordings = (
+    bool(cfg.eval.deep.recordings) if recordings is None else bool(recordings)
+  )
+  if not chosen_notebooks and not effective_recordings:
+    raise click.BadParameter(
+      "nothing to do: pass a notebook NAME, --all, or --recordings."
+    )
+
+  if output_dir is None:
+    output_dir = os.path.join("eval_runs", Path(checkpoint_path).stem)
+  Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+  extras: dict = {}
   for kv in extra_params:
     if "=" not in kv:
       raise click.BadParameter(f"--param expects KEY=VALUE, got {kv!r}")
     k, v = kv.split("=", 1)
-    parameters[k.strip()] = v
+    extras[k.strip()] = v
 
-  click.echo(f"Executing {nb_in} → {output_path}")
-  click.echo(f"Parameters: {parameters}")
+  click.echo(f"Deep eval on checkpoint: {checkpoint_path}")
+  click.echo(f"Output dir:              {output_dir}")
+  click.echo(f"Notebooks:               {list(chosen_notebooks) or '—'}")
+  click.echo(f"Recordings:              {'on' if effective_recordings else 'off'}")
 
-  import papermill as pm
-  pm.execute_notebook(
-    input_path=str(nb_in),
-    output_path=str(output_path),
-    parameters=parameters,
-    cwd=str(Path(__file__).parent),
+  runner = DeepEvalRunner(cfg)
+  summary = runner.run_sync(
+    checkpoint_path=str(checkpoint_path),
+    output_dir=output_dir,
+    notebooks=chosen_notebooks,
+    recordings=effective_recordings,
+    num_episodes=num_episodes,
+    burn_in=burn_in,
+    horizon=horizon,
+    extra_params=extras,
   )
-  click.echo(f"Done. Executed notebook: {output_path}")
+  click.echo("Done.")
+  for nb in summary["executed"]:
+    click.echo(f"  notebook → {nb}")
+  if summary["recordings_path"]:
+    click.echo(f"  recordings → {summary['recordings_path']}")
 
 
 if __name__ == "__main__":

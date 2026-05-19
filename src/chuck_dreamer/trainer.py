@@ -7,8 +7,8 @@ from .reward import build_reward_fn
 from .sim.pushing_env import PushingEnv
 from .sim.episode_collector import EpisodeCollector
 
+from .eval import OnlineEvaluator
 from .training.episode_processor import processor_for
-from .training.evaluator import Evaluator
 from .training.replay_buffer import ReplayBuffer
 from .training.tracker import Tracker
 
@@ -34,7 +34,7 @@ class Trainer:
     self.model     = build_model(config, obs_shape=obs_shape, action_dim=action_dim)
     self.policy    = self._build_policy(config, obs_shape, action_dim)
     self.collector = EpisodeCollector(self.env, self.policy)
-    self.evaluator = Evaluator(config, self.model)
+    self.evaluator = OnlineEvaluator(config, self.model)
     self.tracker   = Tracker(config)
     self.tracker.init()
 
@@ -114,8 +114,12 @@ class Trainer:
         tracker.log_batch_tags(batch.pop("tags", []))
         self.model.wm_update(batch, tracker=tracker)
 
-  def _eval_phase(self, iteration: int):
-    self.evaluator.evaluate(iteration, self.tracker)
+  def _eval_phase(self, iteration: int, checkpoint_path: str | None = None, cleanup: bool = False):
+    self.evaluator.evaluate(
+      iteration, self.tracker,
+      checkpoint_path=checkpoint_path,
+      cleanup=cleanup,
+    )
 
   def _checkpoint_dir(self) -> str:
     name = self.config.logging.experiment_name or "default"
@@ -151,15 +155,24 @@ class Trainer:
     logger.info(f"Resuming at iteration {start}")
     return start
 
-  def _checkpoint(self, step: int):
-    ckpt_dir = self._checkpoint_dir()
-    os.makedirs(ckpt_dir, exist_ok=True)
-    step_path   = os.path.join(ckpt_dir, f"step_{step:06d}.safetensors")
-    latest_path = os.path.join(ckpt_dir, "latest.safetensors")
+  def _checkpoint_paths(self, step: int, temporary: bool) -> list[str]:
+    if temporary:
+      temp_dir = os.path.join(self._checkpoint_dir(), "temp")
+      os.makedirs(temp_dir, exist_ok=True)
+      return [os.path.join(temp_dir, f"step_{step:06d}.safetensors")]
+    else:
+      ckpt_dir = self._checkpoint_dir()
+      os.makedirs(ckpt_dir, exist_ok=True)
+      step_path   = os.path.join(ckpt_dir, f"step_{step:06d}.safetensors")
+      latest_path = os.path.join(ckpt_dir, "latest.safetensors")
+      return [step_path, latest_path]
+
+  def _checkpoint(self, step: int, temporary: bool = False) -> str:
     extra = {"iteration": str(int(step))}
-    self.model.save(step_path,   extra_metadata=extra)
-    self.model.save(latest_path, extra_metadata=extra)
-    logger.info(f"Saved checkpoint to {step_path}")
+    for path in self._checkpoint_paths(step, temporary):
+      self.model.save(path, extra_metadata=extra)
+    if not temporary:
+      logger.info(f"Saved checkpoint to {path}")
 
   def train(self, resume: bool | str = False):
     start = self._resume(resume)
@@ -167,10 +180,14 @@ class Trainer:
     for i in range(start, self.config.training.num_iterations):
       self._collect_phase(i)
       self._train_phase(i)
-      if i % self.config.training.eval_every == 0:
-        self._eval_phase(i)
+      checkpoint_path = None
       if i % self.config.training.save_every == 0:
-        self._checkpoint(i)
+        checkpoint_path = self._checkpoint(i)
+      if i % self.config.training.eval_every == 0:
+        present_checkpoint = checkpoint_path is not None
+        if not present_checkpoint:
+          checkpoint_path = self._checkpoint(i, temporary=True)
+        self._eval_phase(i, checkpoint_path=checkpoint_path, cleanup=not present_checkpoint)
 
     final_path = os.path.join(self._checkpoint_dir(), "final.safetensors")
     os.makedirs(self._checkpoint_dir(), exist_ok=True)

@@ -121,6 +121,21 @@ eval:
 
   burn_in: 5  # Posterior steps before switching to prior in the open-loop rollout.
 
+  # Deep eval — slow, in-depth analysis that complements the per-phase
+  # online metrics. The trainer fires a detached `python main.py eval`
+  # subprocess every Nth eval phase (so it does not block training);
+  # the same code path runs synchronously when `main.py eval` is invoked
+  # by hand on a checkpoint.
+  deep:
+    every_n_evals: null      # int or null to disable in-training deep eval.
+    notebooks:                # Notebooks under src/chuck_dreamer/evals/ to execute.
+      - open_loop_rollout
+      - latent_probe
+    recordings: true         # Also dump per-episode rerun recordings of the rollout.
+    output_dir: "eval_runs"  # Where executed notebooks + recordings land.
+    num_episodes: 20         # Episode budget per deep-eval pass.
+    horizon: 15              # Open-loop horizon length (steps after burn_in).
+
 hardware:
   device: "mlx"  # "auto", "mlx", "cpu", "gpu", "mps"
 

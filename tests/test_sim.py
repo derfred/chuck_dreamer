@@ -158,7 +158,7 @@ class TestSceneGenerator:
     gen = SceneGenerator(_make_env_cfg(difficulty="medium"))
     cfg = gen.sample()
     assert isinstance(cfg, SceneConfig)
-    assert cfg.target.shape in ["box", "cylinder", "capsule"]
+    assert cfg.target.shape in ["box", "cylinder", "capsule", "mesh"]
 
   def test_sample_hard(self):
     gen = SceneGenerator(_make_env_cfg(difficulty="hard"))
