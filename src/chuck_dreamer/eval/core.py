@@ -32,7 +32,7 @@ from typing import Any, Iterator
 
 import numpy as np
 
-from ..dreamer.world_model import EvalRollout, eval_split_rollout
+from ..dreamer.world_model import EvalRollout, as_numpy, eval_split_rollout
 from ..training.episode_dataset import EpisodeDataset
 from ..training.episode_processor import processor_for
 from ..training.observation import Observation
@@ -240,9 +240,9 @@ def run_split_rollout(
   reward_posterior: np.ndarray | None = None
   reward_prior:     np.ndarray | None = None
   if predict_reward and rollout.posterior.rewards is not None:
-    reward_posterior = _unbatch(np.asarray(rollout.posterior.rewards))
+    reward_posterior = _unbatch(as_numpy(rollout.posterior.rewards))
   if predict_reward and rollout.prior.rewards is not None:
-    reward_prior = _unbatch(np.asarray(rollout.prior.rewards))
+    reward_prior = _unbatch(as_numpy(rollout.prior.rewards))
 
   # Targets: post-action obs are obs[1:], so the prior-tail target is
   # obs[burn_in + 1 : T_window + 1]. The "full" target carries the
