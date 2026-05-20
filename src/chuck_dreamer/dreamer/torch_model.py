@@ -907,10 +907,11 @@ class DreamerTorchModel:
       grad_norm = torch.nn.utils.clip_grad_norm_(self._wm_bundle.parameters(), max_norm)
     self._opt_wm.step()
 
+    loss_val = float(loss.item())
     if tracker is not None:
       kl_per_dim = aux["kl_per_dim"].detach().cpu().numpy()
       logs = {
-        "wm/loss":  float(loss.item()),
+        "wm/loss":  loss_val,
         "wm/recon": float(aux["recon"].item()),
         "wm/rew":   float(aux["rew"].item()),
         "wm/kl":    float(aux["kl"].item()),
@@ -931,7 +932,7 @@ class DreamerTorchModel:
         logs["wm/grad_clipped"] = float(gn > max_norm)
       tracker.log(logs)
 
-    return aux["post_states"]
+    return aux["post_states"], loss_val
 
   # ---------------------------------------------------------------------
   # Persistence — MLX-compatible on-disk format

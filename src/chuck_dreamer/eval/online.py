@@ -86,7 +86,14 @@ class OnlineEvaluator:
       if len(src.dataset) == 0:
         logger.warning(f"Eval source {src.path!r} contains no episodes.")
 
-  def evaluate(self, iteration: int, tracker, *, checkpoint_path: str | None = None, cleanup: bool = False) -> None:
+  def evaluate(
+    self,
+    iteration: int,
+    tracker,
+    *,
+    checkpoint_path: str | None = None,
+    cleanup: bool = False,
+  ) -> None:
     """Run one eval pass across all sources and log to ``tracker``.
 
     No-op if every eval source ended up empty. When the deep-eval

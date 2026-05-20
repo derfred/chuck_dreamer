@@ -341,8 +341,9 @@ def test_wm_update_runs_and_advances_params():
     "action": torch.randn(B, T, 6),
     "reward": torch.randn(B, T),
   }
-  post_states = model.wm_update(batch)
+  post_states, loss_val = model.wm_update(batch)
   assert len(post_states) == T
+  assert isinstance(loss_val, float)
   # WM optimizer ran; some param should have changed (non-zero gradient).
   assert not torch.equal(before, first_linear.detach())
 

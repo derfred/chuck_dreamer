@@ -5,11 +5,19 @@ from datetime import datetime
 from ..sim.episode_writer import EpisodeWriter
 
 
+_UNSET: object = object()
+
+
 class Tracker:
-  def __init__(self, config, data={}, parent=None):
+  def __init__(self, config, data={}, parent=None, *, step=_UNSET):
     self.config  = config
     self.data    = data
     self._parent = parent
+    # When set on a derived tracker, all log() calls through this node
+    # (and its children that don't override) use this step value. Walks
+    # up the parent chain in _resolve_step. Sentinel distinguishes
+    # "explicitly set to None" from "not set on this node".
+    self._step   = step
 
     # One writer instance backs both collect and eval dumps — the file
     # naming differs but the format/output dir are shared.
@@ -27,6 +35,12 @@ class Tracker:
       eval_on    = ep_cfg.every_n_evals is not None
       if (collect_on or eval_on) and ep_cfg.dump_path:
         self._episode_writer = EpisodeWriter(ep_cfg.dump_path, format=ep_cfg.dump_format)
+
+      # Owning the gradient-step counter here keeps the trainer ignorant
+      # of the wandb/trackio step axis: it just calls `tick()` to
+      # advance and bind the step on a derived tracker. Lives on the
+      # root only; children read/write via :meth:`_root`.
+      self._step_counter = 0
 
   def _collect_root(self):
     node = self
@@ -123,15 +137,34 @@ class Tracker:
       name_suffix=f"iteration{iteration:04d}-{source_filename}",
     )
 
-  def log(self, data: dict, **kwargs):
+  def _resolve_step(self, explicit) -> int | None:
+    # Explicit kwarg wins. Otherwise walk up the chain for the nearest
+    # node with a bound step. Falls back to None (wandb auto-increment).
+    if explicit is not _UNSET:
+      return explicit
+    node = self
+    while node is not None:
+      if node._step is not _UNSET:
+        return node._step
+      node = node._parent
+    return None
+
+  def log(self, data: dict, *, step=_UNSET):
+    # `step` keeps wandb/trackio rows on a single monotonic axis owned
+    # by the trainer (gradient-step counter). Without it, every log()
+    # auto-increments wandb's internal step and rows without a
+    # `wm_loss` key produce visible gaps in the wm_loss series. Inner
+    # code usually omits `step=` and inherits from a step-bound parent
+    # tracker created via :meth:`at_step`.
+    resolved = self._resolve_step(step)
     if self._parent:
-      self._parent.log({**self.data, **data}, **kwargs)
+      self._parent.log({**self.data, **data}, step=resolved)
     elif self.config.logging.logger == "wandb":
       import wandb
-      wandb.log({**data, **kwargs})
+      wandb.log(data, step=resolved)
     elif self.config.logging.logger == "trackio":
       import trackio
-      trackio.log({**data, **kwargs})
+      trackio.log(data, step=resolved)
 
   def log_replay_buffer_size(self, replay_buffer):
     """Log total replay-buffer size plus a per-tag breakdown of episodes/steps."""
@@ -159,9 +192,44 @@ class Tracker:
     if counts:
       self.log({f"batch_tag/{t or 'untagged'}": n for t, n in counts.items()})
 
-  def derive(self, data: dict):
-    return Tracker(self.config, data=data, parent=self)
+  def derive(self, data: dict, *, step=_UNSET):
+    return Tracker(self.config, data=data, parent=self, step=step)
+
+  def at_step(self, step: int | None) -> "Tracker":
+    """Return a child tracker that binds ``step`` for all log calls.
+
+    Use at the boundary of a logical "tick" (e.g. one gradient step or
+    one eval phase). Inner code that takes the returned tracker as a
+    parameter no longer needs to pass ``step=`` explicitly — the
+    derived tracker carries it via the parent chain. Combine with
+    :meth:`scope` to attach both step and phase data.
+    """
+    return self.derive({}, step=step)
+
+  @property
+  def current_step(self) -> int:
+    """Current value of the root tracker's gradient-step counter."""
+    return self._collect_root()._step_counter
+
+  def set_step(self, step: int) -> None:
+    """Reset the gradient-step counter (e.g. on resume).
+
+    Subsequent :meth:`tick` calls advance from this value.
+    """
+    self._collect_root()._step_counter = int(step)
+
+  def tick(self) -> "Tracker":
+    """Advance the gradient-step counter and return a step-bound tracker.
+
+    Combined op — folds the common ``counter += 1; tracker.at_step(counter)``
+    pattern at the top of a gradient-step loop into one call. The returned
+    tracker is a child of ``self`` so any scope data (``phase``,
+    ``iteration``) is inherited; only the bound step changes.
+    """
+    root = self._collect_root()
+    root._step_counter += 1
+    return self.at_step(root._step_counter)
 
   @contextmanager
-  def scope(self, data: dict):
-    yield self.derive(data)
+  def scope(self, data: dict, *, step=_UNSET):
+    yield self.derive(data, step=step)

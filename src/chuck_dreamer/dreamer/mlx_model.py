@@ -813,6 +813,9 @@ class DreamerMLXModel:
 
     The replay buffer hands us numpy arrays so it stays backend-agnostic;
     we lift to ``mx.array`` once here before entering the autodiff loop.
+
+    Returns ``(post_states, loss_val)`` on success, or ``(None, None)``
+    when the step was skipped due to non-finite gradients.
     """
     (loss, aux), grads = self._wm_grad(self._wm_bundle, self.coerce(batch))
 
@@ -831,7 +834,7 @@ class DreamerMLXModel:
     if bad:
       if tracker is not None:
         tracker.log({"wm/skipped": 1.0})
-      return None
+      return None, None
 
     self._opt_wm.update(self._wm_bundle, grads)
     mx.eval(self._wm_bundle.parameters())
@@ -861,7 +864,7 @@ class DreamerMLXModel:
         logs["wm/grad_clipped"] = float(gn > max_norm)
       tracker.log(logs)
 
-    return aux["post_states"]
+    return aux["post_states"], loss_val
 
   def save(self, path: str, extra_metadata: dict[str, str] | None = None) -> None:
     """Save model weights (and optimizer state during training) to ``path``.

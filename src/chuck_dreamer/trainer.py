@@ -1,6 +1,7 @@
 import logging
 import os
 from collections import defaultdict
+import numpy as np
 import tqdm
 
 from .reward import build_reward_fn
@@ -82,41 +83,67 @@ class Trainer:
   def _collect_phase(self, iteration: int):
     collect_data: defaultdict[str, int] = defaultdict(int)
     num_collect  = self.config.training.num_collect_episodes
-    for _ in tqdm.tqdm(range(num_collect), desc=f"Collecting episodes - iteration {iteration}", total=num_collect):
-      scene = self.collector.reset()
-      if self.config.env.max_steps is not None:
-        scene.max_steps = int(self.config.env.max_steps)
+    with self.tracker.scope(
+      {"phase": "collect", "iteration": iteration}, step=self.tracker.current_step,
+    ) as tracker:
+      for _ in tqdm.tqdm(range(num_collect), desc=f"Collecting episodes - iteration {iteration}", total=num_collect):
+        scene = self.collector.reset()
+        if self.config.env.max_steps is not None:
+          scene.max_steps = int(self.config.env.max_steps)
 
-      episode_data, outcome = self.collector.run()
-      collect_data[outcome] += 1
+        episode_data, outcome = self.collector.run()
+        collect_data[outcome] += 1
 
-      if episode_data is not None:
-        self._replay_buffer.add_sim_episode(episode_data)
-        self.tracker.maybe_log_collect_episode(episode_data, scene, outcome, {"iteration": iteration})
+        if episode_data is not None:
+          self._replay_buffer.add_sim_episode(episode_data)
+          tracker.maybe_log_collect_episode(episode_data, scene, outcome, {"iteration": iteration})
 
-    self.tracker.log({
-      "phase": "collect",
-      "iteration": iteration,
-      "num_episodes": sum(collect_data.values()),
-      **{f"outcome/{k}": v for k, v in collect_data.items()},
-    })
+      tracker.log({
+        "num_episodes": sum(collect_data.values()),
+        **{f"outcome/{k}": v for k, v in collect_data.items()},
+      })
 
   def _train_phase(self, iteration: int):
-    with self.tracker.scope({"phase": "train", "iteration": iteration}) as tracker:
+    with self.tracker.scope(
+      {"phase": "train", "iteration": iteration}, step=self.tracker.current_step,
+    ) as tracker:
       tracker.log_replay_buffer_size(self._replay_buffer)
       if not self._replay_buffer.can_sample(self.config.training.batch_size, self.config.training.seq_len):
         logger.warning("Buffer too small to sample (have %d steps); skipping train phase.", len(self._replay_buffer))
         return
 
       num_steps = self.config.training.num_gradient_steps
+      phase_losses: list[float] = []
       for _ in tqdm.tqdm(range(num_steps), desc=f"Training - iteration {iteration}", total=num_steps):
+        # tick() advances the global step counter and returns a child
+        # tracker bound to the new step, so batch_tags + wm_update logs
+        # land on the same row.
+        step_tracker = tracker.tick()
         batch = self._replay_buffer.sample(self.config.training.batch_size, self.config.training.seq_len)
-        tracker.log_batch_tags(batch.pop("tags", []))
-        self.model.wm_update(batch, tracker=tracker)
+        step_tracker.log_batch_tags(batch.pop("tags", []))
+        _, loss_val = self.model.wm_update(batch, tracker=step_tracker)
+        if loss_val is not None:
+          phase_losses.append(loss_val)
+
+      # Plateau diagnostic: normalized slope of wm_loss across this phase.
+      # |slope_normalized| ~ 0 means flat (over-training); strongly
+      # negative means still descending (under-training). Log on the last
+      # grad step of the phase so it shares an axis with wm/loss.
+      if len(phase_losses) >= 2:
+        losses = np.asarray(phase_losses, dtype=np.float64)
+        x      = np.arange(len(losses), dtype=np.float64)
+        slope  = float(np.polyfit(x, losses, 1)[0])
+        denom  = max(abs(float(losses[0])), 1e-8)
+        tracker.at_step(tracker.current_step).log({
+          "wm/loss_slope":            slope,
+          "wm/loss_slope_normalized": slope / denom,
+          "wm/loss_phase_first":      float(losses[0]),
+          "wm/loss_phase_last":       float(losses[-1]),
+        })
 
   def _eval_phase(self, iteration: int, checkpoint_path: str | None = None, cleanup: bool = False):
     self.evaluator.evaluate(
-      iteration, self.tracker,
+      iteration, self.tracker.at_step(self.tracker.current_step),
       checkpoint_path=checkpoint_path,
       cleanup=cleanup,
     )
@@ -152,6 +179,10 @@ class Trainer:
     if iteration is None:
       return 0
     start = int(iteration) + 1
+    # Approximate the grad-step counter from iteration count so post-resume
+    # logs land beyond the previous run's step axis. Off-by-a-few when
+    # earlier train phases were skipped (buffer too small), but monotonic.
+    self.tracker.set_step(start * int(self.config.training.num_gradient_steps))
     logger.info(f"Resuming at iteration {start}")
     return start
 

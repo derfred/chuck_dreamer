@@ -182,6 +182,10 @@ class _BaseEpisodeWriter:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _path_for(self, prefix: str, name_suffix: str) -> Path:
+        # Re-mkdir on every lookup: long-running training shares `data/`
+        # with cleanup scripts and other runs, so the dir created in
+        # __init__ may be gone by the time we write the next episode.
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         return self.output_dir / f"{prefix}-{name_suffix}.{self.file_extension}"
 
 
@@ -435,6 +439,7 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
 
         ep_path = self._path_for(EPISODE_FILENAME_PREFIX, name_suffix)
         rec = self._new_recording(f"{EPISODE_FILENAME_PREFIX}-{name_suffix}")
+        rec.save(str(ep_path))
 
         props = _rerun_metadata_props(metadata)
         if metadata is not None and metadata.get("goal_xy") is not None:
@@ -488,7 +493,6 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
                 rec.log("camera/seg/background",
                         rr.SegmentationImage(np.asarray(seg_background[i], dtype=np.uint8)))
 
-        rec.save(str(ep_path))
         return ep_path
 
     def write_eval_episode(
@@ -503,6 +507,7 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         recording_id = f"{EVAL_EPISODE_FILENAME_PREFIX}-{name_suffix}"
         ep_path      = self._path_for(EVAL_EPISODE_FILENAME_PREFIX, name_suffix)
         rec          = self._new_recording(recording_id)
+        rec.save(str(ep_path))
 
         self._log_metadata(rec, _rerun_metadata_props(
             metadata, extra_keys=("iteration", "episode_index", "burn_in"),
@@ -554,5 +559,4 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             rec.log("latent/h_prior", rr.Scalars(h_prior[i].tolist()))
             rec.log("latent/s_prior", rr.Scalars(s_prior[i].tolist()))
 
-        rec.save(str(ep_path))
         return ep_path
