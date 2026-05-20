@@ -58,6 +58,119 @@ class RunSettings:
 # ---------------------------------------------------------------------------
 
 
+_SO101_JOINTS = (
+  "shoulder_pan", "shoulder_lift", "elbow_flex",
+  "wrist_flex",   "wrist_roll",    "gripper",
+)
+_URDF_PATH = "assets/urdf/SO101/so101_meshless.urdf"
+
+
+def _quat_wxyz_to_rotmat(quat_wxyz: np.ndarray) -> np.ndarray:
+  """Convert [qw, qx, qy, qz] to a 3x3 rotation matrix.
+
+  chuck_dreamer's EE actions encode quaternions as wxyz; scipy expects
+  xyzw, so we re-order and delegate.
+  """
+  from scipy.spatial.transform import Rotation as R
+  qw, qx, qy, qz = (float(c) for c in quat_wxyz)
+  return R.from_quat([qx, qy, qz, qw]).as_matrix()
+
+
+class _EEToJointsIK:
+  """Adapter: 7-D EE action (CEM output) -> 6-D joint qpos (rad).
+
+  Uses lerobot's placo-backed ``RobotKinematics`` to solve IK against
+  the SO-101 URDF. Built once per run; each call re-uses the current
+  follower qpos as the IK initial guess so successive plans stay near
+  the live arm pose (faster convergence + fewer "flip" solutions).
+  """
+
+  def __init__(self) -> None:
+    from lerobot.model.kinematics import RobotKinematics
+
+    self.solver = RobotKinematics(
+      urdf_path=_URDF_PATH,
+      target_frame_name="gripper_frame_link",
+      joint_names=list(_SO101_JOINTS),
+    )
+
+  def solve(self, ee_action: np.ndarray, current_qpos_rad: np.ndarray) -> np.ndarray:
+    if ee_action.shape != (7,):
+      raise ValueError(f"expected (7,) EE action, got {ee_action.shape}")
+    T = np.eye(4)
+    T[:3, 3]  = ee_action[:3]
+    T[:3, :3] = _quat_wxyz_to_rotmat(ee_action[3:])
+    # placo's set_joint bindings only accept Python double; numpy.float32
+    # raises a "did not match C++ signature" error inside its C++ layer.
+    # Force float64 here so IK works regardless of the upstream dtype.
+    current_deg = np.rad2deg(np.asarray(current_qpos_rad, dtype=np.float64))
+    target_deg  = self.solver.inverse_kinematics(current_deg, T)
+    return np.deg2rad(np.asarray(target_deg, dtype=np.float64)).astype(np.float32)
+
+  def current_ee_action(self, current_qpos_rad: np.ndarray) -> np.ndarray:
+    """FK: ``(6,)`` joint qpos (rad) -> ``(7,)`` EE action ``[x,y,z,qw,qx,qy,qz]``.
+
+    Used to warm-start CEM's action distribution at the current arm
+    pose. Without this, CEM cold-starts with ``mean = zeros``, which in
+    EE mode commands the gripper to the world origin with a degenerate
+    zero quaternion — every sampled rollout is then unreachable noise.
+    """
+    from scipy.spatial.transform import Rotation as R
+    current_deg = np.rad2deg(np.asarray(current_qpos_rad, dtype=np.float64))
+    T = self.solver.forward_kinematics(current_deg)
+    pos = T[:3, 3].astype(np.float32)
+    # scipy returns [x, y, z, w]; chuck_dreamer's EE action is [w, x, y, z].
+    qx, qy, qz, qw = R.from_matrix(T[:3, :3]).as_quat()
+    quat_wxyz = np.asarray([qw, qx, qy, qz], dtype=np.float32)
+    return np.concatenate([pos, quat_wxyz])
+
+
+def _seed_cem_from_current_pose(
+  policy: RealPolicy, ik: "_EEToJointsIK", current_qpos_rad: np.ndarray,
+  *, init_std: float = 0.08, verbose: bool = False,
+) -> None:
+  """Poke ``CEMPolicy._mean`` / ``_prev_action`` / ``init_std`` after release.
+
+  ``GatedPolicy.release`` resets the inner ``CEMPolicy``, which sets
+  ``_mean = None`` (i.e. zeros on first ``act()``). For ``act_mode=ee``
+  that means CEM begins by sampling action sequences around
+  ``[0, 0, 0, 0, 0, 0, 0]`` — EE pose at the world origin with a
+  degenerate zero quaternion, far outside reachable space. The reward
+  head has nothing useful to score so CEM ends up playing essentially
+  random actions, and you see the arm thrashing.
+
+  This helper computes the current EE pose via FK and tiles it across
+  the planning horizon as the initial action mean, plus drops
+  ``init_std`` to a tight ball (5 cm position, 0.05 quat unit) so the
+  first iteration's samples stay inside the reachable workspace. The
+  refit / warm-start logic then carries the plan forward as usual.
+
+  No-op for non-CEM policies (e.g. ``ManualPolicy``) and for non-EE
+  CEM (action_dim != 7); the cold-start failure only manifests in EE
+  mode.
+  """
+  from chuck_dreamer.policy import GatedPolicy
+
+  if not isinstance(policy, GatedPolicy):
+    return
+  inner = policy.inner
+  if not isinstance(inner, CEMPolicyAdapter):
+    return
+  cem = inner._cem
+  if cem.model.action_dim != 7:
+    return
+
+  seed = ik.current_ee_action(current_qpos_rad)
+  cem._mean        = np.tile(seed, (cem.horizon, 1)).astype(np.float32)
+  cem._prev_action = seed.copy()
+  cem.init_std     = float(init_std)
+  if verbose:
+    logger.info(
+      "CEM seeded from current EE pose pos=%s quat=%s, init_std=%.3f",
+      seed[:3].round(3), seed[3:].round(3), cem.init_std,
+    )
+
+
 def _hold_qpos(obs: dict) -> np.ndarray:
   """Hold-action for the real arm: command the current joint qpos.
 
@@ -97,7 +210,7 @@ def _build_policy(cfg) -> RealPolicy:
     d = cfg.real.policy.dreamer
     if not d.checkpoint:
       raise ValueError("real.policy.dreamer.checkpoint must be set")
-    loaded = load_checkpoint(str(d.checkpoint))
+    loaded = load_checkpoint(str(d.checkpoint), device=str(cfg.hardware.device))
     return GatedPolicy(
       DreamerPolicyAdapter(loaded.model, sample=bool(d.sample)),
       hold_action=_hold_qpos,
@@ -107,7 +220,7 @@ def _build_policy(cfg) -> RealPolicy:
     c = cfg.real.policy.cem
     if not c.checkpoint:
       raise ValueError("real.policy.cem.checkpoint must be set")
-    loaded = load_checkpoint(str(c.checkpoint))
+    loaded = load_checkpoint(str(c.checkpoint), device=str(cfg.hardware.device))
     # Action bounds come from the env that was rebuilt alongside the
     # checkpoint — that's the env CEM is implicitly planning for.
     action_space = loaded.env.action_space
@@ -178,6 +291,15 @@ def run(cfg) -> None:
   policy = _build_policy(cfg)
   controller = Controller(policy)
 
+  # Build the IK adapter once if the configured policy can emit
+  # EE-mode (7-D) actions. We instantiate eagerly here (not inside
+  # the action loop) so the URDF parse + placo init don't add per-step
+  # latency. ``ManualPolicy`` already emits joint qpos so we skip it.
+  ik: _EEToJointsIK | None = None
+  if str(cfg.real.policy.type) in ("cem", "dreamer"):
+    ik = _EEToJointsIK()
+    logger.info("IK adapter built (URDF=%s)", _URDF_PATH)
+
   start_keycode = ord(settings.start_key[0])
 
   with Camera(cam_cfg) as camera, Arm(arm_cfg) as arm:
@@ -218,18 +340,40 @@ def run(cfg) -> None:
         # Hand off to the controller at control_dt cadence — camera
         # refreshes faster than control to keep the HUD lively.
         if now - last_step_t >= settings.control_dt:
+          # Re-seed CEM each step so the planning distribution stays
+          # anchored on the live arm pose. Without this, ``_mean``
+          # warm-starts from the previous step and drifts under the
+          # reward-head's gradient noise — over many ticks the mean
+          # walks off into unreachable territory and the follower
+          # tries to teleport to a workspace-edge pose, slamming the
+          # table. No-op for non-CEM/non-EE policies.
+          if ik is not None and controller.state == "running":
+            _seed_cem_from_current_pose(policy, ik, current_qpos)
           action = controller.step(obs)
           last_step_t = now
           if action is not None:
             last_action = action
-            # The manual policy emits a (6,) joint qpos; route it to the
-            # follower so the leader's pose is mirrored. Model-based
-            # policies (image-mode actor / CEM) still emit something
-            # else (action_dim depends on the trainer); for those we
-            # just log the action for now since IK is unwired.
+            # The manual policy emits (6,) joint qpos directly; CEM /
+            # Dreamer policies trained with ``act_mode=ee`` emit a (7,)
+            # ``[x, y, z, qw, qx, qy, qz]`` EE pose that has to go
+            # through IK before reaching the follower. Anything else
+            # is logged and dropped (placeholder for future shapes).
+            joint_action: np.ndarray | None = None
             if action.shape == (6,):
+              joint_action = action
+            elif action.shape == (7,) and ik is not None:
               try:
-                arm.send_joint_qpos(action)
+                joint_action = ik.solve(action, current_qpos)
+              except Exception as e:  # noqa: BLE001 — placo errors vary
+                logger.warning("IK solve failed: %s — holding pose", e)
+            else:
+              logger.warning(
+                "unsupported action shape %s; holding pose", action.shape,
+              )
+
+            if joint_action is not None:
+              try:
+                arm.send_joint_qpos(joint_action)
               except Exception as e:  # noqa: BLE001 — serial faults vary
                 logger.warning("send_joint_qpos failed: %s — holding pose", e)
 
@@ -241,6 +385,12 @@ def run(cfg) -> None:
         if key == start_keycode:
           controller.start(obs)
           logger.info("controller started")
+          # Seed CEM's action distribution from the current EE pose so
+          # the first planning iteration samples reachable trajectories
+          # (see _seed_cem_from_current_pose for the why). No-op for
+          # non-CEM / non-EE policies.
+          if ik is not None:
+            _seed_cem_from_current_pose(policy, ik, current_qpos, verbose=True)
         elif key in (27, ord("q")):  # ESC or q
           logger.info("quit requested")
           break
