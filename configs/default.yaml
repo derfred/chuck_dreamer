@@ -208,12 +208,19 @@ env:
   reward: "goal_distance"
 
 # Object-localization pipeline (chuck_dreamer.real.object_localization).
-# Used by `python main.py analyze-cameras` to calibrate cameras from
-# LeRobot recordings, and by the rescale_joints_and_fk processor to
-# populate object_xy. All distance values are in millimeters.
+# Used by `python main.py calibrate-intrinsics` + `python main.py annotate-mat`
+# to calibrate cameras from LeRobot recordings, and by the
+# rescale_joints_and_fk processor to populate object_xy. All distance
+# values are in millimeters.
 object_localization:
   # Camera frame key shared across calibration datasets.
   camera_key: "observation.images.front"
+
+  # Cache root for per-dataset intrinsics/extrinsics/verification artifacts.
+  cache_dir: "./calibration_cache"
+  # Legacy alias kept so older configs / scripts that read
+  # ``calibration_cache`` continue to work; the package reads cache_dir.
+  calibration_cache: "./calibration_cache"
 
   # Episode indices (shared across calibration datasets).
   episodes:
@@ -223,24 +230,53 @@ object_localization:
     object_mid:   3
     object_right: 4
 
-  # Checkerboard geometry.
+  # Checkerboard geometry. `inner_corners` is the spec's `size` field
+  # under a longer-lived name; both refer to (cols, rows) of interior
+  # intersections in cv2's convention.
   checkerboard:
-    inner_corners: [9, 6]   # cv2 convention: (cols, rows) of inner intersections
+    inner_corners: [9, 6]
     square_mm:     25.0
 
   # Mat fiducials — measured once on the physical mat. Set these to your
-  # actual numbers before running `analyze-cameras`. The pipeline asserts
-  # they are floats at startup and refuses to run otherwise.
+  # actual numbers before running calibration. The pipeline asserts
+  # they are floats at startup and refuses to run otherwise. The names
+  # map to the spec's L / D / r symbols.
   mat:
     line_length_mm:     300.0   # L: length of each white line
     line_separation_mm: 160.0   # D: perpendicular distance between the two lines
     circle_radius_mm:   50.0    # r: radius of the white circle
+    circle_samples:     64      # N, matched to the UI's ellipse sample count
 
-  # Pose estimator runtime paths. ``calibration_cache`` is where
-  # `analyze-cameras` writes per-dataset calibrations and the
-  # rescale_joints_and_fk processor reads them back from.
-  calibration_cache: "./calibration_cache"
-  mesh_path:         "assets/RobotLearning_Rhombicuboctahedron_Object.3mf"
-  use_sam2:          true   # set false to force the color-heuristic segmenter
-  device:            "cpu"  # "cpu" | "cuda" | "mps"
+  intrinsics:
+    n_frames_target:   5       # sample this many frames from the checkerboard episode
+    n_frames_min:      5        # abort if fewer usable detections
+    rms_threshold_px:  0.3      # warn (not fail) above this
+    coverage_grid:    [6, 4]    # >=80% of cells must contain >=1 detected corner
+    # Distortion model. 5 -> Brown-Conrady (k1, k2, p1, p2, k3); 2 ->
+    # k1+k2 only with p1=p2=k3=0; 0 -> pinhole, no distortion. With
+    # <~20 views the higher-order coefficients are not well-constrained
+    # and inflate test-time error; 2 is the safe default for sparse fits.
+    distortion_model:  5
+
+  extrinsics:
+    rms_threshold_px:  1.0
+    annotation_frame:  0        # frame of episode `empty` to annotate
+
+  # Pose-estimator runtime knobs.
+  object:
+    mesh_path:        "assets/RobotLearning_Rhombicuboctahedron_Object.3mf"
+    sam2_checkpoint:  "facebook/sam2-hiera-large"
+    n_yaw_inits:      4
+    silhouette:
+      chamfer_max_iter: 100
+    edges:
+      canny_low:        50
+      canny_high:       150
+      search_range_px:  25
+      max_iter:         50
+
+  # Legacy paths read by the rescale_joints_and_fk processor.
+  mesh_path: "assets/RobotLearning_Rhombicuboctahedron_Object.3mf"
+  use_sam2:  true   # set false to force the color-heuristic segmenter
+  device:    "cpu"  # "cpu" | "cuda" | "mps"
 

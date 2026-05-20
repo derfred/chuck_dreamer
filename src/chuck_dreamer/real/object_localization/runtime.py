@@ -42,6 +42,7 @@ class ObjectLocalizationConfig:
   intrinsics_n_frames_min:    int
   intrinsics_rms_threshold_px: float
   intrinsics_coverage_grid:   tuple[int, int]
+  intrinsics_distortion_model: int   # 0, 2, or 5 (see configs/default.yaml)
 
   extrinsics_rms_threshold_px: float
   extrinsics_annotation_frame: int
@@ -140,9 +141,10 @@ def _parse(raw: dict[str, Any]) -> ObjectLocalizationConfig:
     mat_circle_samples     = int(mat.get("circle_samples", 64)),
 
     intrinsics_n_frames_target   = int(intrinsics.get("n_frames_target", 64)),
-    intrinsics_n_frames_min      = int(intrinsics.get("n_frames_min", 30)),
+    intrinsics_n_frames_min      = int(intrinsics.get("n_frames_min", 5)),
     intrinsics_rms_threshold_px  = float(intrinsics.get("rms_threshold_px", 0.3)),
     intrinsics_coverage_grid     = coverage,
+    intrinsics_distortion_model  = _parse_distortion_model(intrinsics.get("distortion_model", 5)),
 
     extrinsics_rms_threshold_px  = float(extrinsics.get("rms_threshold_px", 1.0)),
     extrinsics_annotation_frame  = int(extrinsics.get("annotation_frame", 0)),
@@ -172,3 +174,19 @@ def _read_checkerboard_size(checkerboard: dict[str, Any]) -> tuple[int, int]:
 
 def _float(v: Any) -> float:
   return float(v)
+
+
+def _parse_distortion_model(v: Any) -> int:
+  """Validate the ``intrinsics.distortion_model`` value.
+
+  Accepts the integer count of distortion coefficients to fit. Only
+  ``0`` (pinhole), ``2`` (k1, k2), and ``5`` (full Brown-Conrady) are
+  supported because OpenCV's calibration flags don't compose cleanly
+  beyond those points.
+  """
+  n = int(v)
+  if n not in (0, 2, 5):
+    raise ValueError(
+      f"object_localization.intrinsics.distortion_model: expected 0, 2, or 5, "
+      f"got {v!r}.")
+  return n

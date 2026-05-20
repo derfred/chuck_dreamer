@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 import click
 import numpy as np
@@ -31,23 +30,25 @@ from ..types import (
   write_extrinsics,
   write_mat_annotation,
 )
+from .common import override_option
 
 logger = logging.getLogger(__name__)
 
 
 @click.command("annotate-mat")
 @click.argument("dataset_ids", nargs=-1, required=True)
-@click.option("--config", "config_path", default=None, type=str)
-@click.option("-o", "--override", "overrides", multiple=True, metavar="KEY=VALUE")
 @click.option("--force", is_flag=True, default=False,
               help="Re-annotate even if extrinsics.json already exists.")
 @click.option("--review", is_flag=True, default=False,
               help="Skip the click UI; reload mat_annotation.json, re-solve, "
                    "re-render verification, prompt to overwrite.")
-def annotate_mat_cmd(dataset_ids: tuple[str, ...], config_path: Optional[str],
-                     overrides: tuple[str, ...], force: bool, review: bool) -> None:
+@override_option
+@click.pass_context
+def annotate_mat_cmd(ctx, dataset_ids: tuple[str, ...],
+                     force: bool, review: bool,
+                     overrides: tuple[str, ...]) -> None:
   """Annotate the mat fiducials and solve per-dataset extrinsics."""
-  cfg = load_config(config_path, overrides=overrides)
+  cfg = load_config(ctx.obj["config_path"], overrides=overrides)
   ol_cfg = init_from_config(cfg)
   cache_root = Path(ol_cfg.cache_dir)
 

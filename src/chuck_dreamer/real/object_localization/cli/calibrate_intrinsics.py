@@ -1,93 +1,110 @@
-"""`calibrate-intrinsics` CLI: per-dataset checkerboard calibration."""
+"""`calibrate-intrinsics` CLI: pooled checkerboard calibration across datasets.
+
+This command always pools all dataset arguments into one calibration —
+the supplied recordings each fix the checkerboard in a single pose for
+the whole episode, so per-dataset calibration is degenerate. The same
+``intrinsics.json`` is written into each dataset's cache dir so the
+downstream per-dataset loader contract still works.
+"""
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
-from typing import Optional
 
 import click
 
 from chuck_dreamer.config import load_config
 
-from ..calibration.intrinsics import IntrinsicsAbort, calibrate_intrinsics
+from ..calibration.intrinsics import IntrinsicsAbort, calibrate_intrinsics_pooled
 from ..runtime import init_from_config
 from ..types import dataset_cache_dir, read_intrinsics
+from .common import override_option
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_WORKERS_CAP = 8
 
 
 @click.command("calibrate-intrinsics")
 @click.argument("dataset_ids", nargs=-1, required=True)
-@click.option("--config", "config_path", default=None, type=str,
-              help="Path to project config (default: configs/default.yaml).")
-@click.option("-o", "--override", "overrides", multiple=True, metavar="KEY=VALUE",
-              help="Dotted-path config override, repeatable.")
 @click.option("--force", is_flag=True, default=False,
-              help="Recompute even if intrinsics.json already exists.")
+              help="Recompute even if intrinsics.json already exists in every "
+                   "dataset's cache dir.")
+@click.option("--workers", default=None, type=int,
+              help=f"Parallel worker count for frame decode + corner detection. "
+                   f"Default: min(os.cpu_count(), {_DEFAULT_WORKERS_CAP}).")
 @click.option("--no-show", is_flag=True, default=False,
               help="Suppress interactive display; PNGs are written either way.")
-def calibrate_intrinsics_cmd(dataset_ids: tuple[str, ...], config_path: Optional[str],
-                             overrides: tuple[str, ...], force: bool, no_show: bool) -> None:
-  """Calibrate camera intrinsics from each dataset's checkerboard episode."""
-  cfg = load_config(config_path, overrides=overrides)
+@override_option
+@click.pass_context
+def calibrate_intrinsics_cmd(ctx, dataset_ids: tuple[str, ...],
+                             force: bool, workers: int | None, no_show: bool,
+                             overrides: tuple[str, ...]) -> None:
+  """Pool the checkerboard episodes of all DATASET_IDS into one calibration."""
+  cfg = load_config(ctx.obj["config_path"], overrides=overrides)
   ol_cfg = init_from_config(cfg)
   cache_root = Path(ol_cfg.cache_dir)
+  ids = list(dataset_ids)
 
-  any_failed = False
-  for dataset_id in dataset_ids:
-    out_dir   = dataset_cache_dir(cache_root, dataset_id)
-    intr_path = out_dir / "intrinsics.json"
-    if intr_path.exists() and not force:
-      try:
-        cached = read_intrinsics(cache_root, dataset_id)
-        click.echo(f"{dataset_id}: intrinsics already cached "
-                   f"(rms={cached.rms_px:.2f}px), skipping. "
-                   f"(use --force to recompute)")
-        verify_dir = out_dir / "intrinsics_verify"
-        if not verify_dir.exists():
-          click.echo(f"  note: verification artifacts missing at {verify_dir}; "
-                     f"re-run with --force to regenerate them.")
-        continue
-      except Exception as e:
-        click.echo(f"{dataset_id}: cached intrinsics unreadable ({e}); recomputing.")
+  if workers is None:
+    workers = min(os.cpu_count() or 1, _DEFAULT_WORKERS_CAP)
+  workers = max(1, int(workers))
 
-    click.echo(f"{dataset_id}: loading LeRobotDataset (episode "
-               f"{ol_cfg.episode_checkerboard}) ...")
-    try:
-      from lerobot.datasets.lerobot_dataset import LeRobotDataset  # type: ignore
-    except Exception as e:
-      raise click.ClickException(f"lerobot not importable: {e}")
-    t_load = time.perf_counter()
-    ds = LeRobotDataset(dataset_id)
-    click.echo(f"{dataset_id}:   dataset object built in "
-               f"{time.perf_counter() - t_load:.1f}s "
-               f"(total frames={len(ds)}). Starting corner detection — see INFO logs.")
+  # Idempotent short-circuit: if every dataset already has a cached
+  # intrinsics.json and --force isn't set, just confirm and exit.
+  if not force:
+    cached_all = True
+    for did in ids:
+      p = dataset_cache_dir(cache_root, did) / "intrinsics.json"
+      if not p.exists():
+        cached_all = False
+        break
+    if cached_all:
+      sample = read_intrinsics(cache_root, ids[0])
+      click.echo(f"All {len(ids)} datasets already have intrinsics.json "
+                 f"(rms={sample.rms_px:.3f}px from {ids[0]}). "
+                 f"Use --force to recompute.")
+      return
 
-    try:
-      result = calibrate_intrinsics(ds, ol_cfg, cache_root, dataset_id, force=force)
-    except IntrinsicsAbort as e:
-      click.echo(f"{dataset_id}: ABORT — {e}", err=True)
-      any_failed = True
-      continue
+  click.echo(f"Pooling {len(ids)} datasets with {workers} workers. "
+             f"Target: {ol_cfg.intrinsics_n_frames_target} distinct viewpoint "
+             f"buckets (min {ol_cfg.intrinsics_n_frames_min}). "
+             f"Streaming progress via INFO logs.")
+  for did in ids:
+    click.echo(f"  - {did}")
 
-    rms = result.intrinsics.rms_px
-    msg = (f"{dataset_id}: rms={rms:.3f}px  "
-           f"frames_used={result.intrinsics.n_frames_used}  "
-           f"coverage={result.coverage_filled_cells}/{result.coverage_total_cells} cells")
-    if rms > ol_cfg.intrinsics_rms_threshold_px:
-      click.echo(click.style(msg + f"  WARN: rms > {ol_cfg.intrinsics_rms_threshold_px:.2f}px",
-                              fg="yellow"))
-    else:
-      click.echo(msg)
-    click.echo(f"  wrote: {out_dir / 'intrinsics.json'}")
-    click.echo(f"  verify: {out_dir / 'intrinsics_verify'}")
+  t0 = time.perf_counter()
+  try:
+    result = calibrate_intrinsics_pooled(ids, ol_cfg, cache_root, workers=workers)
+  except IntrinsicsAbort as e:
+    raise click.ClickException(str(e))
 
-    if not no_show:
-      _show_artifacts(out_dir / "intrinsics_verify" / "coverage_mosaic.png")
+  rms = result.intrinsics.rms_px
+  msg = (f"Pooled fit: rms={rms:.3f}px  "
+         f"views_used={result.intrinsics.n_frames_used}  "
+         f"coverage={result.coverage_filled_cells}/{result.coverage_total_cells} cells  "
+         f"elapsed={time.perf_counter() - t0:.1f}s")
+  if rms > ol_cfg.intrinsics_rms_threshold_px:
+    click.echo(click.style(
+      msg + f"  WARN: rms > {ol_cfg.intrinsics_rms_threshold_px:.2f}px",
+      fg="yellow"))
+  else:
+    click.echo(msg)
 
-  if any_failed:
-    raise click.ClickException("one or more datasets failed; see messages above.")
+  click.echo("Per-dataset view contribution:")
+  for did, counts in result.per_dataset.items():
+    n_used = sum(1 for d in result.detections if d.dataset_id == did)
+    click.echo(f"  {did}: views_used={n_used}  "
+               f"(attempts={counts.attempts} hits={counts.hits} "
+               f"misses={counts.misses} dupes={counts.dupes})")
+    out_dir = dataset_cache_dir(cache_root, did)
+    click.echo(f"    wrote: {out_dir / 'intrinsics.json'}")
+    click.echo(f"    verify: {out_dir / 'intrinsics_verify'}")
+
+  if not no_show:
+    _show_artifacts(dataset_cache_dir(cache_root, ids[0]) / "intrinsics_verify" / "coverage_mosaic.png")
 
 
 def _show_artifacts(path: Path) -> None:
@@ -100,7 +117,7 @@ def _show_artifacts(path: Path) -> None:
     img = mpimg.imread(str(path))
     plt.figure(figsize=(10, 6))
     plt.imshow(img)
-    plt.title(str(path.name))
+    plt.title(str(path))
     plt.axis("off")
     plt.show()
   except Exception:

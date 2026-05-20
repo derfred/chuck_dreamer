@@ -1,201 +1,263 @@
-"""Per-dataset intrinsic calibration from the checkerboard episode.
+"""Pooled intrinsic calibration across multiple datasets, in parallel.
 
 Algorithm overview (full spec in ``object_localization_spec.md``,
-Deliverable 1):
+Deliverable 1, adapted for pooled multi-dataset input):
 
-  1. Sample frames evenly across the checkerboard episode.
-  2. Run ``findChessboardCornersSB`` + a sub-pixel refinement.
-  3. Refuse to calibrate if spatial coverage is too thin.
-  4. ``cv2.calibrateCamera`` on the surviving views.
-  5. Write the camera matrix + per-view residuals to disk and render
-     verification PNGs so the user can sanity-check.
+  1. Build a flat work queue of (dataset_id, frame_idx) items, interleaved
+     across datasets so the early submissions cover a diverse mix of
+     viewpoints.
+  2. Fan the queue out across worker processes. Each worker rebuilds its
+     own LeRobotDataset on first touch, then loads the frame and runs
+     ``findChessboardCornersSB`` + a sub-pixel refinement.
+  3. Main process accumulates results as they arrive; applies a shared
+     centroid-bucket dedupe so near-duplicate viewpoints don't bloat the
+     fit, and stops draining the queue once the bucket count hits target.
+  4. ``cv2.calibrateCamera`` runs once on the deduped pool.
+  5. The same intrinsics.json + verification artifacts are written into
+     *each* input dataset's cache dir so the per-dataset loader contract
+     used downstream keeps working.
 
-The verification renders are the single most important artifact for the
-user: ``coverage_mosaic.png`` shows whether the checkerboard explored
-the whole field of view, which is what actually determines whether the
-fit can be trusted away from the center.
+The pool exists because the supplied recordings each fix the
+checkerboard in a single pose for the entire episode; one episode does
+not contain enough independent views to calibrate. Pooling across all
+recording sessions from the same physical camera turns that into a
+single well-conditioned fit.
 """
 from __future__ import annotations
 
 import logging
+import os
 import time
-from dataclasses import dataclass
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 
 from ..dataset import episode_bounds, get_frame, iter_episode_frame_indices
 from ..runtime import ObjectLocalizationConfig
 from ..types import Intrinsics, dataset_cache_dir, write_intrinsics
+from . import _worker  # noqa: F401 — registers the worker module path
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class DetectedFrame:
-  frame_idx: int
-  corners: np.ndarray   # (N, 1, 2) float32 image coords
+  dataset_id: str
+  frame_idx: int            # global frame index inside that dataset
+  corners: np.ndarray       # (N, 1, 2) float32 image coords
+  bucket: tuple[int, int]   # centroid bucket the corners landed in
 
 
 @dataclass
-class IntrinsicsResult:
+class PerDatasetCounts:
+  attempts: int = 0
+  hits: int = 0
+  misses: int = 0
+  dupes: int = 0
+
+
+@dataclass
+class PooledIntrinsicsResult:
   intrinsics: Intrinsics
   detections: list[DetectedFrame]
   per_view_rms: list[float]
   coverage_filled_cells: int
   coverage_total_cells: int
+  per_dataset: dict[str, PerDatasetCounts] = field(default_factory=dict)
 
 
 class IntrinsicsAbort(RuntimeError):
-  """Raised when the calibration should not be persisted (coverage / count)."""
+  """Raised when the pooled calibration can't be persisted."""
 
 
-def calibrate_intrinsics(
-  ds: Any, ol_cfg: ObjectLocalizationConfig,
-  cache_dir: Path, dataset_id: str,
-  force: bool = False,
-) -> IntrinsicsResult:
-  """Run the full intrinsics pipeline; raises ``IntrinsicsAbort`` if the
-  spatial-coverage or min-frame thresholds aren't met.
+def calibrate_intrinsics_pooled(
+  dataset_ids: list[str], ol_cfg: ObjectLocalizationConfig,
+  cache_dir: Path, workers: int,
+) -> PooledIntrinsicsResult:
+  """Pooled + parallel checkerboard calibration.
 
-  On success, writes ``intrinsics.json`` + verification artifacts under
-  ``cache_dir/<slug>/``.
+  Submits one work item per candidate frame, drained `as_completed`. Stops
+  submitting more work once we've filled enough distinct centroid buckets,
+  but still drains any in-flight futures so their (rare) extra hits land.
   """
-  import cv2
+  if not dataset_ids:
+    raise IntrinsicsAbort("calibrate_intrinsics_pooled called with no datasets.")
 
-  out_dir = dataset_cache_dir(cache_dir, dataset_id)
-  out_dir.mkdir(parents=True, exist_ok=True)
-  verify_dir = out_dir / "intrinsics_verify"
-
-  t0 = time.perf_counter()
-  logger.info("[%s] locating checkerboard episode (idx=%d) ...",
-              dataset_id, ol_cfg.episode_checkerboard)
-  ep_fr, ep_to = episode_bounds(ds, ol_cfg.episode_checkerboard)
-  logger.info("[%s]   episode %d spans frames [%d, %d) (length=%d). "
-              "Target: %d good detections (min %d).",
-              dataset_id, ol_cfg.episode_checkerboard, ep_fr, ep_to, ep_to - ep_fr,
-              ol_cfg.intrinsics_n_frames_target, ol_cfg.intrinsics_n_frames_min)
-
-  initial, fallback = iter_episode_frame_indices(
-    ds, ol_cfg.episode_checkerboard, ol_cfg.intrinsics_n_frames_target,
-  )
-  if not initial:
-    raise IntrinsicsAbort(
-      f"episode {ol_cfg.episode_checkerboard} of {dataset_id} is empty.")
-
-  ck_size = tuple(int(x) for x in ol_cfg.checkerboard_size)
+  ck_size = (int(ol_cfg.checkerboard_size[0]), int(ol_cfg.checkerboard_size[1]))
   ck_obj  = _checkerboard_object_points(ck_size, ol_cfg.checkerboard_square_mm)
+  bucket_grid = tuple(int(x) for x in ol_cfg.intrinsics_coverage_grid)
 
-  logger.info("[%s] starting corner detection on %d initial frames "
-              "(fallback pool: %d). Each frame is loaded from the LeRobot "
-              "video stream then run through findChessboardCornersSB.",
-              dataset_id, len(initial), len(fallback))
+  # Step 1 — enumerate per-dataset candidate frames (cheap, sequential).
+  t0 = time.perf_counter()
+  per_dataset_queues: dict[str, list[int]] = {}
+  per_dataset_counts: dict[str, PerDatasetCounts] = {d: PerDatasetCounts() for d in dataset_ids}
+  for dataset_id in dataset_ids:
+    logger.info("[pool] enumerating frames for %s (episode %d) ...",
+                dataset_id, ol_cfg.episode_checkerboard)
+    try:
+      from lerobot.datasets.lerobot_dataset import LeRobotDataset  # type: ignore
+    except Exception as e:
+      raise IntrinsicsAbort(f"lerobot import failed: {e}")
+    ds = LeRobotDataset(dataset_id)
+    ep_fr, ep_to = episode_bounds(ds, ol_cfg.episode_checkerboard)
+    if ep_to <= ep_fr:
+      logger.warning("[pool] %s episode %d is empty; skipping.",
+                     dataset_id, ol_cfg.episode_checkerboard)
+      per_dataset_queues[dataset_id] = []
+      continue
+    initial, fallback = iter_episode_frame_indices(
+      ds, ol_cfg.episode_checkerboard, ol_cfg.intrinsics_n_frames_target,
+    )
+    per_dataset_queues[dataset_id] = list(initial) + list(fallback)
+    logger.info("[pool]   %s: episode spans [%d, %d) length=%d  "
+                "queue=%d (initial=%d + fallback=%d)",
+                dataset_id, ep_fr, ep_to, ep_to - ep_fr,
+                len(per_dataset_queues[dataset_id]), len(initial), len(fallback))
+    del ds  # free the video decoder before the next iteration
 
+  # Step 2 — interleave the per-dataset queues into a single flat queue.
+  flat_queue: list[tuple[str, int]] = _interleave_queues(per_dataset_queues)
+  total_queue = len(flat_queue)
+  if total_queue == 0:
+    raise IntrinsicsAbort("no frames available across any input dataset.")
+
+  logger.info("[pool] total work items: %d; target: %d distinct buckets; "
+              "workers=%d", total_queue, ol_cfg.intrinsics_n_frames_target, workers)
+
+  # Step 3 — fan out via ProcessPool. We use a small bounded-inflight
+  # pattern so we don't submit the entire queue at once (each pending
+  # future pins a frame's worth of memory once it runs).
   detections: list[DetectedFrame] = []
-  obj_points:  list[np.ndarray]   = []
-  img_points:  list[np.ndarray]   = []
-  used_indices: list[int]         = []
-
-  # Track frame W/H once we see the first frame.
-  image_size: tuple[int, int] | None = None
-
-  # Centroid-bucket dedupe: when the checkerboard is stationary across
-  # many frames, near-duplicate views inflate the view count without
-  # adding information (and bias the calibrate-camera fit). We bucket
-  # the checkerboard centroid into a coverage-grid-sized image grid and
-  # only keep the first HIT per bucket. The bucket grid is intentionally
-  # tied to coverage_grid so "covered" and "deduped" use the same
-  # spatial resolution.
-  bucket_grid = ol_cfg.intrinsics_coverage_grid
   occupied_buckets: set[tuple[int, int]] = set()
+  image_size: tuple[int, int] | None = None
+  target = int(ol_cfg.intrinsics_n_frames_target)
+  inflight_cap = max(workers * 3, 8)
 
-  pending = list(initial)
-  retry_pool = list(fallback)
-  attempts = 0
-  hits = 0
-  misses = 0
-  dupes = 0
-  last_log = time.perf_counter()
-  while pending and len(detections) < ol_cfg.intrinsics_n_frames_target:
-    idx = pending.pop(0)
-    attempts += 1
-    t_load = time.perf_counter()
-    frame = get_frame(ds, idx, ol_cfg.camera_key)
-    t_loaded = time.perf_counter()
-    if image_size is None:
-      image_size = (frame.shape[1], frame.shape[0])
-      logger.info("[%s]   first frame loaded in %.2fs; image_size=%dx%d",
-                  dataset_id, t_loaded - t_load, image_size[0], image_size[1])
-    corners = _detect_corners(frame, ck_size)
-    t_det = time.perf_counter()
-    if corners is None:
-      misses += 1
-      verdict = "MISS"
-      if retry_pool:
-        pending.append(retry_pool.pop(0))
-    else:
-      bucket = _centroid_bucket(corners, image_size, bucket_grid)
-      if bucket in occupied_buckets:
-        dupes += 1
-        verdict = f"DUP@{bucket}"
-        if retry_pool:
-          pending.append(retry_pool.pop(0))
-      else:
-        hits += 1
-        verdict = f"HIT@{bucket}"
-        occupied_buckets.add(bucket)
-        detections.append(DetectedFrame(frame_idx=idx, corners=corners))
-        obj_points.append(ck_obj.copy())
-        img_points.append(corners)
-        used_indices.append(idx)
+  log_state = {"last": time.perf_counter()}
 
+  def _maybe_log(verdict: str, item: tuple[str, int]) -> None:
     now = time.perf_counter()
-    if (now - last_log) > 5.0 or attempts <= 3 or attempts % 10 == 0:
-      logger.info(
-        "[%s]   frame %d: %s  load=%.2fs detect=%.2fs  "
-        "hits=%d misses=%d dupes=%d  pending=%d retry_pool=%d  elapsed=%.1fs",
-        dataset_id, idx, verdict,
-        t_loaded - t_load, t_det - t_loaded,
-        hits, misses, dupes, len(pending), len(retry_pool), now - t0,
-      )
-      last_log = now
+    if (now - log_state["last"]) < 5.0:
+      return
+    log_state["last"] = now
+    totals = _totals(per_dataset_counts)
+    logger.info(
+      "[pool] %s %s/%d: %s  hits=%d misses=%d dupes=%d  buckets=%d/%d  "
+      "queue_left=%d  elapsed=%.1fs",
+      item[0], _short_frame(item[1]), total_queue, verdict,
+      totals["hits"], totals["misses"], totals["dupes"],
+      len(occupied_buckets), target,
+      total_queue - totals["attempts"], now - t0,
+    )
 
+  with ProcessPoolExecutor(max_workers=workers) as pool:
+    queue_iter = iter(flat_queue)
+    pending: dict[Any, tuple[str, int]] = {}
+
+    def _submit_more() -> None:
+      while len(pending) < inflight_cap and len(occupied_buckets) < target:
+        try:
+          item = next(queue_iter)
+        except StopIteration:
+          return
+        fut = pool.submit(_worker.detect_corners_worker,
+                          item[0], item[1], ol_cfg.camera_key, ck_size)
+        pending[fut] = item
+
+    _submit_more()
+
+    while pending:
+      done, _ = wait(list(pending.keys()), return_when=FIRST_COMPLETED)
+      for fut in done:
+        item = pending.pop(fut)
+        dataset_id, frame_idx = item
+        per_dataset_counts[dataset_id].attempts += 1
+        try:
+          ok, payload = fut.result()
+        except Exception as e:
+          per_dataset_counts[dataset_id].misses += 1
+          logger.warning("[pool] %s frame %d: worker raised %s",
+                         dataset_id, frame_idx, e)
+          _maybe_log("ERR", item)
+          continue
+
+        if not ok:
+          per_dataset_counts[dataset_id].misses += 1
+          _maybe_log("MISS", item)
+          continue
+
+        corners, frame_image_size = payload
+        if image_size is None:
+          image_size = frame_image_size
+          logger.info("[pool] first detection on %s frame %d; image_size=%dx%d",
+                      dataset_id, frame_idx, image_size[0], image_size[1])
+        bucket = _centroid_bucket(corners, image_size, bucket_grid)
+        if bucket in occupied_buckets:
+          per_dataset_counts[dataset_id].dupes += 1
+          _maybe_log(f"DUP@{bucket}", item)
+          continue
+
+        occupied_buckets.add(bucket)
+        per_dataset_counts[dataset_id].hits += 1
+        detections.append(DetectedFrame(
+          dataset_id=dataset_id, frame_idx=frame_idx,
+          corners=corners, bucket=bucket,
+        ))
+        _maybe_log(f"HIT@{bucket}", item)
+
+      _submit_more()
+
+  totals = _totals(per_dataset_counts)
   logger.info(
-    "[%s] corner-detection loop done in %.1fs: %d hits / %d misses / %d dupes "
-    "(%d frames attempted; %d in fallback pool unused; %d distinct buckets occupied).",
-    dataset_id, time.perf_counter() - t0, hits, misses, dupes,
-    attempts, len(retry_pool), len(occupied_buckets),
+    "[pool] detection complete in %.1fs: hits=%d misses=%d dupes=%d  "
+    "distinct buckets=%d/%d.",
+    time.perf_counter() - t0, totals["hits"], totals["misses"], totals["dupes"],
+    len(occupied_buckets), target,
   )
+  for did, c in per_dataset_counts.items():
+    logger.info("[pool]   %s: attempts=%d hits=%d misses=%d dupes=%d",
+                did, c.attempts, c.hits, c.misses, c.dupes)
 
   if image_size is None:
-    raise IntrinsicsAbort(f"could not load any frame from {dataset_id}.")
+    raise IntrinsicsAbort("no checkerboard detected in any frame from any dataset.")
 
   if len(detections) < ol_cfg.intrinsics_n_frames_min:
-    _render_coverage(detections, ds, ol_cfg, verify_dir, image_size)
+    _write_failure_coverage(detections, ol_cfg, cache_dir, dataset_ids, image_size)
     raise IntrinsicsAbort(
-      f"only {len(detections)} usable detections (need >= "
-      f"{ol_cfg.intrinsics_n_frames_min}). Coverage written to {verify_dir}.")
+      f"only {len(detections)} usable detections across all "
+      f"{len(dataset_ids)} datasets (need >= {ol_cfg.intrinsics_n_frames_min}). "
+      f"Re-record episode {ol_cfg.episode_checkerboard} with the board "
+      f"swept through the full field of view.")
 
-  filled, total = _coverage_fill(detections, image_size, ol_cfg.intrinsics_coverage_grid)
-  logger.info("[%s] spatial coverage: %d / %d cells (%.0f%%).",
-              dataset_id, filled, total, 100.0 * filled / max(1, total))
+  filled, total = _coverage_fill(detections, image_size, bucket_grid)
+  logger.info("[pool] spatial coverage: %d / %d cells (%.0f%%).",
+              filled, total, 100.0 * filled / max(1, total))
   if filled / max(1, total) < 0.8:
-    _render_coverage(detections, ds, ol_cfg, verify_dir, image_size)
+    _write_failure_coverage(detections, ol_cfg, cache_dir, dataset_ids, image_size)
     raise IntrinsicsAbort(
       f"checkerboard covers only {filled}/{total} grid cells (<80%). "
       f"Re-record episode {ol_cfg.episode_checkerboard} with the board "
-      f"swept through the full field of view. Mosaic at {verify_dir}.")
+      f"swept through the full field of view.")
 
-  logger.info("[%s] running cv2.calibrateCamera on %d views ...",
-              dataset_id, len(detections))
+  import cv2
+  obj_points = [ck_obj.copy() for _ in detections]
+  img_points = [d.corners for d in detections]
+
+  calib_flags = _distortion_flags(cv2, ol_cfg.intrinsics_distortion_model)
+  logger.info("[pool] running cv2.calibrateCamera on %d views "
+              "(distortion_model=%d coefficients)...",
+              len(detections), ol_cfg.intrinsics_distortion_model)
   t_cal = time.perf_counter()
   criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
   rms_px, K, dist, rvecs, tvecs = cv2.calibrateCamera(
-    obj_points, img_points, image_size, None, None, criteria=criteria,
+    obj_points, img_points, image_size, None, None,
+    flags=calib_flags, criteria=criteria,
   )
-  logger.info("[%s]   calibrateCamera done in %.1fs (rms=%.3fpx).",
-              dataset_id, time.perf_counter() - t_cal, float(rms_px))
+  logger.info("[pool]   calibrateCamera done in %.1fs (rms=%.3fpx).",
+              time.perf_counter() - t_cal, float(rms_px))
   K    = np.asarray(K, dtype=np.float64)
   dist = np.asarray(dist, dtype=np.float64).reshape(-1)
   if dist.size < 5:
@@ -204,7 +266,6 @@ def calibrate_intrinsics(
     dist = dist[:5]
 
   per_view_rms = _per_view_rms(obj_points, img_points, rvecs, tvecs, K, dist)
-
   intrinsics = Intrinsics(
     image_size   = image_size,
     K            = K,
@@ -213,30 +274,101 @@ def calibrate_intrinsics(
     n_frames_used = len(detections),
   )
 
-  write_intrinsics(cache_dir, dataset_id, intrinsics, extra={
-    "frame_indices":   used_indices,
-    "per_view_rms_px": [float(x) for x in per_view_rms],
+  # Step 4 — write the same intrinsics into each dataset's cache dir.
+  pool_meta = {
+    "source_datasets": list(dataset_ids),
+    "per_dataset_view_counts": {
+      did: sum(1 for d in detections if d.dataset_id == did)
+      for did in dataset_ids
+    },
+    "per_view_rms_px":  [float(x) for x in per_view_rms],
     "rms_threshold_px": float(ol_cfg.intrinsics_rms_threshold_px),
-  })
+    "view_provenance":  [
+      {"dataset_id": d.dataset_id, "frame_idx": d.frame_idx,
+       "bucket": list(d.bucket)} for d in detections
+    ],
+  }
+  for did in dataset_ids:
+    write_intrinsics(cache_dir, did, intrinsics, extra=pool_meta)
+    logger.info("[pool]   wrote intrinsics.json for %s",
+                dataset_cache_dir(cache_dir, did))
 
-  logger.info("[%s] rendering verification artifacts to %s ...",
-              dataset_id, verify_dir)
-  t_render = time.perf_counter()
-  _render_verification(
-    detections, ds, ol_cfg, verify_dir, image_size,
-    K=K, dist=dist, rvecs=rvecs, tvecs=tvecs,
-    per_view_rms=per_view_rms, ck_obj=ck_obj,
-  )
-  logger.info("[%s]   verification render done in %.1fs (total elapsed %.1fs).",
-              dataset_id, time.perf_counter() - t_render, time.perf_counter() - t0)
+  # Step 5 — render verification artifacts. The coverage mosaic uses the
+  # first dataset's empty-scene frame as backdrop; per-frame overlays
+  # come from whichever dataset that view originated in.
+  for did in dataset_ids:
+    verify_dir = dataset_cache_dir(cache_dir, did) / "intrinsics_verify"
+    _render_pooled_verification(
+      detections, ol_cfg, verify_dir, image_size,
+      K=K, dist=dist, rvecs=rvecs, tvecs=tvecs,
+      per_view_rms=per_view_rms, ck_obj=ck_obj, backdrop_dataset=did,
+    )
 
-  return IntrinsicsResult(
+  return PooledIntrinsicsResult(
     intrinsics            = intrinsics,
     detections            = detections,
     per_view_rms          = list(per_view_rms),
     coverage_filled_cells = filled,
     coverage_total_cells  = total,
+    per_dataset           = per_dataset_counts,
   )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _interleave_queues(per_dataset: dict[str, list[int]]) -> list[tuple[str, int]]:
+  """Round-robin interleave per-dataset frame lists into a flat queue.
+
+  Datasets with longer queues end up tailing the output, but the first
+  ``min(N) * D`` items hit every dataset before any one is exhausted —
+  important because the early hits are what populate the bucket set and
+  trigger the early-stop.
+  """
+  out: list[tuple[str, int]] = []
+  iters = {k: iter(v) for k, v in per_dataset.items()}
+  while iters:
+    drained: list[str] = []
+    for k, it in iters.items():
+      try:
+        out.append((k, next(it)))
+      except StopIteration:
+        drained.append(k)
+    for k in drained:
+      del iters[k]
+  return out
+
+
+def _totals(per_dataset: dict[str, PerDatasetCounts]) -> dict[str, int]:
+  return {
+    "attempts": sum(c.attempts for c in per_dataset.values()),
+    "hits":     sum(c.hits     for c in per_dataset.values()),
+    "misses":   sum(c.misses   for c in per_dataset.values()),
+    "dupes":    sum(c.dupes    for c in per_dataset.values()),
+  }
+
+
+def _short_frame(idx: int) -> str:
+  return f"f{idx}"
+
+
+def _distortion_flags(cv2_mod: Any, n_coeffs: int) -> int:
+  """OpenCV calibrateCamera flag mask for the requested distortion model.
+
+  - 0: pinhole (everything zero).
+  - 2: k1, k2 only; tangential + k3 zeroed.
+  - 5: default Brown-Conrady (k1, k2, p1, p2, k3).
+  """
+  if n_coeffs == 5:
+    return 0
+  if n_coeffs == 2:
+    return cv2_mod.CALIB_ZERO_TANGENT_DIST | cv2_mod.CALIB_FIX_K3
+  if n_coeffs == 0:
+    return (cv2_mod.CALIB_ZERO_TANGENT_DIST
+            | cv2_mod.CALIB_FIX_K1 | cv2_mod.CALIB_FIX_K2
+            | cv2_mod.CALIB_FIX_K3)
+  raise ValueError(f"unsupported distortion coefficient count: {n_coeffs}")
 
 
 def _checkerboard_object_points(size: tuple[int, int], square_mm: float) -> np.ndarray:
@@ -245,18 +377,6 @@ def _checkerboard_object_points(size: tuple[int, int], square_mm: float) -> np.n
   grid = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2).astype(np.float32)
   objp[:, :2] = grid * float(square_mm)
   return objp
-
-
-def _detect_corners(rgb: np.ndarray, size: tuple[int, int]) -> np.ndarray | None:
-  import cv2
-  gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-  flags = cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY
-  found, corners = cv2.findChessboardCornersSB(gray, size, flags=flags)
-  if not found or corners is None:
-    return None
-  refine_criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 1e-3)
-  corners = cv2.cornerSubPix(gray, corners.astype(np.float32), (11, 11), (-1, -1), refine_criteria)
-  return corners
 
 
 def _centroid_bucket(corners: np.ndarray, image_size: tuple[int, int],
@@ -299,22 +419,81 @@ def _per_view_rms(obj_points: list[np.ndarray], img_points: list[np.ndarray],
   return out
 
 
-def _representative_frame(ds: Any, ol_cfg: ObjectLocalizationConfig) -> np.ndarray | None:
+def _backdrop_frame(dataset_id: str, ol_cfg: ObjectLocalizationConfig) -> np.ndarray | None:
+  """Pull the first frame of the empty episode from ``dataset_id``."""
   try:
-    from ..dataset import episode_bounds
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset  # type: ignore
+    ds = LeRobotDataset(dataset_id)
     fr, _ = episode_bounds(ds, ol_cfg.episode_empty)
     return get_frame(ds, fr, ol_cfg.camera_key)
-  except Exception:
+  except Exception as e:
+    logger.warning("backdrop frame from %s unavailable (%s)", dataset_id, e)
     return None
 
 
-def _render_coverage(detections: list[DetectedFrame], ds: Any,
-                     ol_cfg: ObjectLocalizationConfig, out_dir: Path,
-                     image_size: tuple[int, int]) -> None:
+def _render_pooled_verification(
+  detections: list[DetectedFrame], ol_cfg: ObjectLocalizationConfig,
+  out_dir: Path, image_size: tuple[int, int],
+  K: np.ndarray, dist: np.ndarray, rvecs: list[np.ndarray], tvecs: list[np.ndarray],
+  per_view_rms: list[float], ck_obj: np.ndarray, backdrop_dataset: str,
+) -> None:
+  import cv2
+  out_dir.mkdir(parents=True, exist_ok=True)
+  _render_coverage_mosaic(detections, ol_cfg, out_dir, image_size, backdrop_dataset)
+
+  per_frame_dir = out_dir / "per_frame"
+  per_frame_dir.mkdir(parents=True, exist_ok=True)
+
+  if not detections:
+    return
+
+  # Render up to 10 sample frames spaced across the deduped pool. We only
+  # render frames from the same dataset we wrote the mosaic backdrop for,
+  # so each cache dir stays self-contained even though the calibration
+  # was pooled.
+  same_ds = [(i, d) for i, d in enumerate(detections) if d.dataset_id == backdrop_dataset]
+  if not same_ds:
+    return
+  picks = np.linspace(0, len(same_ds) - 1, num=min(10, len(same_ds)), dtype=int)
+
+  try:
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset  # type: ignore
+    ds = LeRobotDataset(backdrop_dataset)
+  except Exception as e:
+    logger.warning("[%s] per-frame render unavailable (%s)", backdrop_dataset, e)
+    return
+
+  for k in picks:
+    idx, det = same_ds[int(k)]
+    try:
+      frame = get_frame(ds, det.frame_idx, ol_cfg.camera_key)
+    except Exception as e:
+      logger.warning("[%s] frame %d render skipped (%s)",
+                     backdrop_dataset, det.frame_idx, e)
+      continue
+    canvas = cv2.cvtColor(frame.copy(), cv2.COLOR_RGB2BGR)
+    proj, _ = cv2.projectPoints(ck_obj, rvecs[int(idx)], tvecs[int(idx)], K, dist)
+    obs = det.corners.reshape(-1, 2)
+    rep = proj.reshape(-1, 2)
+    for o in obs:
+      cv2.circle(canvas, (int(o[0]), int(o[1])), 4, (0, 200, 0), -1)
+    for r in rep:
+      cv2.drawMarker(canvas, (int(r[0]), int(r[1])), (0, 0, 255),
+                     cv2.MARKER_CROSS, 8, 1)
+    text = f"frame={det.frame_idx}  rms={per_view_rms[int(idx)]:.3f}px"
+    cv2.putText(canvas, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX,
+                0.65, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.imwrite(str(per_frame_dir / f"{det.frame_idx:05d}.png"), canvas)
+
+
+def _render_coverage_mosaic(detections: list[DetectedFrame],
+                             ol_cfg: ObjectLocalizationConfig,
+                             out_dir: Path, image_size: tuple[int, int],
+                             backdrop_dataset: str) -> None:
   import cv2
   out_dir.mkdir(parents=True, exist_ok=True)
   W, H = image_size
-  base = _representative_frame(ds, ol_cfg)
+  base = _backdrop_frame(backdrop_dataset, ol_cfg)
   if base is None:
     base = np.full((H, W, 3), 32, dtype=np.uint8)
   canvas = cv2.cvtColor(base.copy(), cv2.COLOR_RGB2BGR)
@@ -354,37 +533,13 @@ def _render_coverage(detections: list[DetectedFrame], ds: Any,
   cv2.imwrite(str(out_dir / "coverage_mosaic.png"), canvas)
 
 
-def _render_verification(
-  detections: list[DetectedFrame], ds: Any, ol_cfg: ObjectLocalizationConfig,
-  out_dir: Path, image_size: tuple[int, int],
-  K: np.ndarray, dist: np.ndarray, rvecs: list[np.ndarray], tvecs: list[np.ndarray],
-  per_view_rms: list[float], ck_obj: np.ndarray,
-) -> None:
-  import cv2
-  out_dir.mkdir(parents=True, exist_ok=True)
-  _render_coverage(detections, ds, ol_cfg, out_dir, image_size)
-
-  per_frame_dir = out_dir / "per_frame"
-  per_frame_dir.mkdir(parents=True, exist_ok=True)
-
-  if not detections:
-    return
-
-  n_render = min(10, len(detections))
-  pick = np.linspace(0, len(detections) - 1, num=n_render, dtype=int)
-  for i in pick:
-    d = detections[int(i)]
-    frame = get_frame(ds, d.frame_idx, ol_cfg.camera_key)
-    canvas = cv2.cvtColor(frame.copy(), cv2.COLOR_RGB2BGR)
-    proj, _ = cv2.projectPoints(ck_obj, rvecs[int(i)], tvecs[int(i)], K, dist)
-    obs = d.corners.reshape(-1, 2)
-    rep = proj.reshape(-1, 2)
-    for o in obs:
-      cv2.circle(canvas, (int(o[0]), int(o[1])), 4, (0, 200, 0), -1)
-    for r in rep:
-      cv2.drawMarker(canvas, (int(r[0]), int(r[1])), (0, 0, 255),
-                     cv2.MARKER_CROSS, 8, 1)
-    text = f"frame={d.frame_idx}  rms={per_view_rms[int(i)]:.3f}px"
-    cv2.putText(canvas, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX,
-                0.65, (255, 255, 255), 2, cv2.LINE_AA)
-    cv2.imwrite(str(per_frame_dir / f"{d.frame_idx:05d}.png"), canvas)
+def _write_failure_coverage(detections: list[DetectedFrame],
+                             ol_cfg: ObjectLocalizationConfig,
+                             cache_dir: Path, dataset_ids: list[str],
+                             image_size: tuple[int, int]) -> None:
+  """On abort, dump the coverage mosaic into every input cache dir so
+  the user can see *why* it failed.
+  """
+  for did in dataset_ids:
+    out_dir = dataset_cache_dir(cache_dir, did) / "intrinsics_verify"
+    _render_coverage_mosaic(detections, ol_cfg, out_dir, image_size, did)

@@ -44,7 +44,7 @@ def build_model(config, obs_shape, action_dim: int):
   if device == "mlx":
     from .mlx_model import DreamerMLXModel
     return DreamerMLXModel(config, obs_shape=obs_shape, action_dim=action_dim)
-  if device in _TORCH_DEVICES:
+  if device in _TORCH_DEVICES or device.startswith("cuda:"):
     from .torch_model import DreamerTorchModel
     return DreamerTorchModel(config, obs_shape=obs_shape, action_dim=action_dim)
   raise ValueError(f"Unsupported library specified in config: {device}")
