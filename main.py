@@ -6,6 +6,16 @@ This is the main entry point for the project. It provides a CLI interface
 for training models, processing data, and running experiments.
 """
 
+import os
+import platform
+
+if (
+  platform.system() == "Linux"
+  and "MUJOCO_GL" not in os.environ
+  and not os.environ.get("DISPLAY")
+):
+  os.environ["MUJOCO_GL"] = "egl"
+
 import click
 import logging
 from pathlib import Path
