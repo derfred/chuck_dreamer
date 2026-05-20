@@ -219,6 +219,77 @@ class TeleopProxyReward:
 
 
 # ---------------------------------------------------------------------------
+# Push-shaped reward: "get behind the object first, then push to goal"
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PushReward:
+  """Two-stage shaped reward that explicitly encodes the push strategy.
+
+  CEM trained against the legacy ``goal_distance`` reward learns
+  "minimize object-to-goal distance" — and would in principle figure
+  out "approach the object from behind so a push moves it forward." In
+  practice, the world model's prediction of object response to gripper
+  contact is the *weakest* signal it learns (peak probe R² ≈ 0.5
+  versus ee R² ≈ 0.85). The policy ends up driving the gripper
+  straight at the object, hitting it from the goal-side, and pushing
+  it the *wrong way*.
+
+  This reward hand-encodes the strategy:
+
+    +w_progress  · clip(s_along / L, 0, 1)             object progress along the line
+    +w_goal      · 𝟙[‖object − goal‖ < goal_radius]    goal bonus
+    −w_approach  · ‖ee_xy − approach_point‖            "be behind the object"
+
+  where ``approach_point`` is positioned ``approach_offset`` metres
+  behind the object along the object→goal direction. As the object
+  gets pushed toward the goal, the approach point moves with it, so
+  the gripper is always rewarded for being in the right "pushing
+  station" for the *current* object position.
+
+  This is reward shaping in the most literal sense — it bakes the
+  human intuition for pushing into the scalar signal, so the world
+  model doesn't have to learn it from scratch. Trade-off: the policy
+  may overfit to "stay behind the object" even when the cube has
+  already reached the goal. The goal-radius bonus is meant to
+  counteract that, but you may want to tune ``w_goal >> w_approach``
+  so the bonus dominates once success is in reach.
+  """
+
+  line_start_xy:    tuple[float, float] = (-0.15, 0.18)
+  approach_offset:  float = 0.05   # metres behind the object
+  goal_radius:      float = 0.05
+  w_progress:       float = 1.0
+  w_goal:           float = 5.0
+  w_approach:       float = 2.0
+
+  def __call__(self, info: "StepInfo") -> float:
+    start = np.asarray(self.line_start_xy, dtype=np.float32)
+    s_along, _s_perp, length = _project_onto_line(
+      info.object_xy, start, info.goal_xy,
+    )
+    progress = float(np.clip(s_along / max(length, 1e-6), 0.0, 1.0))
+
+    push_vec = info.goal_xy - info.object_xy
+    push_len = float(np.linalg.norm(push_vec))
+    if push_len < 1e-6:
+      approach_point = info.object_xy.astype(np.float32)
+    else:
+      push_dir = push_vec / push_len
+      approach_point = info.object_xy - self.approach_offset * push_dir
+    d_approach = float(np.linalg.norm(info.ee_pos[:2] - approach_point))
+
+    in_goal = float(push_len < self.goal_radius)
+
+    return (
+        self.w_progress * progress
+      + self.w_goal     * in_goal
+      - self.w_approach * d_approach
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
