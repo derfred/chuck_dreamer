@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
@@ -126,6 +127,63 @@ _REAL_CIRCLE_RING_WIDTH    = 0.003   # 3 mm ring thickness
 # the painted lines (y); the "across" axis is perpendicular to them (x).
 _REAL_MAT_OFFSET_ALONG  = 0.050   # ±50 mm along the lines (y)
 _REAL_MAT_OFFSET_ACROSS = 0.025   # ±25 mm across the lines (x)
+
+# Probability of spawning the central red-cylinder obstacle in the "real"
+# preset. When sampled, the obstacle is rigidly placed at the mat-pattern
+# centre and the target is constrained to stay clear of it.
+_REAL_OBSTACLE_PROBABILITY = 0.0
+
+# Red cylinder obstacle that sits at the centre of the mat pattern. Unlike
+# clutter, it has contact enabled so it can interact with the target.
+_REAL_OBSTACLE_RADIUS       = 0.04   # 4 cm radius
+_REAL_OBSTACLE_HALF_HEIGHT  = 0.01   # 2 cm tall → half-height = 1 cm
+_REAL_OBSTACLE_COLOR        = [0.85, 0.15, 0.15, 1.0]
+_REAL_OBSTACLE_MASS         = 0.1
+_REAL_OBSTACLE_FRICTION     = 0.5
+# Minimum centre-to-centre distance between target and obstacle when the
+# obstacle is present (5 cm — measured from the mat / obstacle centre point).
+_REAL_OBSTACLE_TARGET_CLEARANCE = 0.05
+
+# Minimum centre-to-centre distance between the goal and the target's initial
+# position in the "real" preset.
+_REAL_MIN_GOAL_TARGET_DISTANCE = 0.1
+
+# Optional camera calibration: if this file exists we derive the "real" preset's
+# camera fovy from its fy and the calibration image height (a scale-invariant
+# ratio — render resolution doesn't have to match the calibration size).
+# Principal-point offset and lens distortion are ignored: MuJoCo's renderer is
+# a centred pinhole, so undistort real frames at capture time to match it.
+_INTRINSICS_JSON = (
+    Path(__file__).parent.parent.parent.parent / "calibration_cache" / "intrinsics.json"
+)
+
+
+def _load_real_camera_fovy_deg() -> float | None:
+  """Return vertical FOV (degrees) derived from intrinsics.json, or None."""
+  if not _INTRINSICS_JSON.exists():
+    return None
+  try:
+    data = json.loads(_INTRINSICS_JSON.read_text())
+    fy = float(data["K"][1][1])
+    img_h = float(data["image_size"][1])
+  except (KeyError, ValueError, TypeError, json.JSONDecodeError):
+    return None
+  if fy <= 0.0 or img_h <= 0.0:
+    return None
+  return math.degrees(2.0 * math.atan(img_h / (2.0 * fy)))
+
+
+# Fallback fovy for the "real" preset when no calibration file is present.
+_REAL_DEFAULT_FOVY_DEG = 70.0
+
+# Palette the "real" target mesh is coloured from. Picked to stay visually
+# distinct from the red central obstacle so they don't blur together.
+_REAL_TARGET_COLORS: list[list[float]] = [
+  [0.95, 0.95, 0.95, 1.0],  # white
+  [0.15, 0.35, 0.85, 1.0],  # blue
+  [0.95, 0.55, 0.10, 1.0],  # orange
+  [0.15, 0.70, 0.25, 1.0],  # green
+]
 
 # RGBA tuple for the "red" target color used in easy/medium difficulties.
 _RED_RGBA = [0.85, 0.15, 0.15, 1.0]
@@ -437,15 +495,43 @@ class SceneGenerator:
       line_x_right  = mat_centre_x + half_sep
       circle_centre = (mat_centre_x, line_y_far)
 
+      # Goal: the centre of the white circle — fixed by the mat geometry.
+      goal_pos       = [circle_centre[0], circle_centre[1]]
+      goal_tolerance = _REAL_CIRCLE_RADIUS
+
+      # Optional central red-cylinder obstacle (10% of episodes). When present
+      # it sits exactly at the mat-pattern centre and the target must keep
+      # ≥ _REAL_OBSTACLE_TARGET_CLEARANCE clear of that same point.
+      spawn_obstacle = bool(rng.random() < _REAL_OBSTACLE_PROBABILITY)
+      obstacles: list[ObjectConfig] = []
+      if spawn_obstacle:
+        obstacle_z = table_top_z + _REAL_OBSTACLE_HALF_HEIGHT
+        obstacles.append(ObjectConfig(
+            shape="cylinder",
+            size=[_REAL_OBSTACLE_RADIUS, _REAL_OBSTACLE_HALF_HEIGHT],
+            mass=_REAL_OBSTACLE_MASS,
+            friction=_REAL_OBSTACLE_FRICTION,
+            pos=[mat_centre_x, mat_offset_y, obstacle_z],
+            orientation=0.0,
+            color=list(_REAL_OBSTACLE_COLOR),
+        ))
+
       # Target: rhombicuboctahedron, placed somewhere between the lines and
-      # within the arm's reachable annulus.
-      target_color = [0.85, 0.15, 0.15, 1.0]
+      # within the arm's reachable annulus. Also enforce a minimum distance
+      # to the goal and (when present) clearance from the central obstacle.
+      target_color = list(_REAL_TARGET_COLORS[int(rng.integers(0, len(_REAL_TARGET_COLORS)))])
       margin = 0.02
-      for _ in range(64):
+      tx, ty = 0.0, 0.0
+      for _ in range(256):
         tx = float(rng.uniform(line_x_left + margin, line_x_right - margin))
         ty = float(rng.uniform(line_y_near + margin, line_y_far - margin))
-        if _ARM_MIN_REACH <= math.hypot(tx - robot_base_pos[0], ty) <= _ARM_MAX_REACH:
-          break
+        if not (_ARM_MIN_REACH <= math.hypot(tx - robot_base_pos[0], ty) <= _ARM_MAX_REACH):
+          continue
+        if math.hypot(tx - goal_pos[0], ty - goal_pos[1]) < _REAL_MIN_GOAL_TARGET_DISTANCE:
+          continue
+        if spawn_obstacle and math.hypot(tx - mat_centre_x, ty - mat_offset_y) < _REAL_OBSTACLE_TARGET_CLEARANCE:
+          continue
+        break
       mesh_tag = str(rng.choice(mesh_options))
       half = float(rng.uniform(0.020, 0.030))
       target = ObjectConfig(
@@ -459,10 +545,6 @@ class SceneGenerator:
           mesh_path=mesh_tag,
       )
       target.pos[2] = table_top_z + object_half_z(target)
-
-      # Goal: the centre of the white circle — fixed by the mat geometry.
-      goal_pos       = [circle_centre[0], circle_centre[1]]
-      goal_tolerance = _REAL_CIRCLE_RADIUS
 
       # Visual mat markings: two white "lines" as thin elongated boxes (rotated
       # 90° → long axis along y) plus a white "circle" outline rendered as a
@@ -526,7 +608,9 @@ class SceneGenerator:
           cam_height,
       ]
       look_target = [mat_centre_x, mat_offset_y, table_top_z]
-      camera = CameraConfig(pos=cam_pos, look_at=look_target, fov=70.0)
+      fovy_deg = _load_real_camera_fovy_deg() or _REAL_DEFAULT_FOVY_DEG
+      fovy_deg = _REAL_DEFAULT_FOVY_DEG
+      camera = CameraConfig(pos=cam_pos, look_at=look_target, fov=fovy_deg)
 
       lighting = LightingConfig(direction=[0.0, -0.5, -1.0], intensity=0.8, ambient=0.3)
 
@@ -540,7 +624,7 @@ class SceneGenerator:
           target=target,
           goal_pos=goal_pos,
           goal_tolerance=goal_tolerance,
-          obstacles=[],
+          obstacles=obstacles,
           clutter=clutter,
           camera=camera,
           lighting=lighting,
@@ -558,7 +642,12 @@ class SceneGenerator:
     if self.difficulty == "real":
       # The mat-marking clutter intentionally sits past the arm's reach, and
       # the goal (circle centre) is allowed to as well — only the target's
-      # reachability matters.
+      # reachability matters. Also enforce the minimum target↔goal distance
+      # so the rejection loop in _sample_real never silently degrades it.
+      tx, ty = cfg.target.pos[:2]
+      gx, gy = cfg.goal_pos
+      if math.hypot(tx - gx, ty - gy) < _REAL_MIN_GOAL_TARGET_DISTANCE:
+        return False
       return self._check_reachability(cfg) and self._check_goal_on_table(cfg)
     return (
         self._check_reachability(cfg)
