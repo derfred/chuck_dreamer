@@ -189,6 +189,80 @@ class CEMPolicyAdapter:
 
 
 # ---------------------------------------------------------------------------
+# Probe-based CEM adapter
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CEMProbeRunConfig(CEMRunConfig):
+  """CEM-with-probe configuration.
+
+  In addition to all standard CEM knobs, picks up:
+
+    * ``probe_path``  — path to a probe ``.pt`` file written by
+                       :mod:`scripts.train_probe`.
+    * ``reward_kind`` — kind string passed to :func:`build_reward_fn`
+                       (e.g. ``"push_shaped"``, ``"line_push"``).
+    * ``goal_xy``     — fixed goal position in robot-frame metres.
+                       The probe predicts ``object_xy``; the reward
+                       needs a goal to compare against. Per-task
+                       config (Eval-1 has a fixed goal circle centre).
+  """
+  probe_path:   str = ""
+  reward_kind:  str = "push_shaped"
+  goal_xy:      tuple[float, float] = (0.15, 0.18)
+
+
+class CEMProbePolicyAdapter:
+  """Like :class:`CEMPolicyAdapter` but scoring goes through a probe
+  + Python reward instead of the WM's trained reward head.
+
+  Lets you swap the reward shape without retraining the WM. The probe
+  is loaded once at construction; per-step inference is a tiny MLP
+  call so the overhead vs vanilla CEM is negligible.
+  """
+
+  def __init__(self, model, run_cfg: CEMProbeRunConfig) -> None:
+    from ...dreamer.cem_probe_policy import CEMProbePolicy, ProbeBundle
+    from ...reward import build_reward_fn
+
+    if run_cfg.action_low is None or run_cfg.action_high is None:
+      raise ValueError(
+        "CEMProbeRunConfig requires action_low/action_high — pass env.action_space bounds."
+      )
+    if not run_cfg.probe_path:
+      raise ValueError(
+        "CEMProbeRunConfig.probe_path must be set; train one via "
+        "scripts/train_probe.py."
+      )
+
+    probe = ProbeBundle.from_file(run_cfg.probe_path)
+    reward_fn = build_reward_fn(run_cfg.reward_kind)
+
+    self.model = model
+    self._cem  = CEMProbePolicy(
+      model,
+      probe=probe,
+      reward_fn=reward_fn,
+      goal_xy=run_cfg.goal_xy,
+      horizon=run_cfg.horizon,
+      num_samples=run_cfg.num_samples,
+      num_elites=run_cfg.num_elites,
+      num_iterations=run_cfg.num_iterations,
+      discount=run_cfg.discount,
+      action_low=run_cfg.action_low,
+      action_high=run_cfg.action_high,
+    )
+
+  def reset(self, initial_obs: dict) -> None:
+    self._cem.reset(None)
+
+  def act(self, obs: dict) -> np.ndarray:
+    projected = _project_obs_for_model(obs, self.model.obs_mode)
+    return self._cem.act(projected)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

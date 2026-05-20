@@ -240,6 +240,51 @@ def _build_policy(cfg) -> RealPolicy:
       ),
       hold_action=_hold_qpos,
     )
+  if ptype == "cem_probe":
+    from ...eval.checkpoint import load_checkpoint
+    from .policies import CEMProbePolicyAdapter, CEMProbeRunConfig
+
+    # Read from a real.policy.cem_probe block if present, fall back
+    # to the standard cem block for shared knobs (horizon, num_samples
+    # etc.) so users can flip ptype without re-doing all defaults.
+    cp = cfg.real.policy.get("cem_probe", {}) if hasattr(cfg.real.policy, "get") else {}
+    c  = cfg.real.policy.cem
+    chk = cp.get("checkpoint") if hasattr(cp, "get") else None
+    chk = chk or c.checkpoint
+    if not chk:
+      raise ValueError(
+        "real.policy.cem_probe.checkpoint (or real.policy.cem.checkpoint) must be set."
+      )
+    probe_path  = cp.get("probe_path",  "") if hasattr(cp, "get") else ""
+    reward_kind = cp.get("reward_kind", "push_shaped") if hasattr(cp, "get") else "push_shaped"
+    goal_xy_raw = cp.get("goal_xy", [0.15, 0.18]) if hasattr(cp, "get") else [0.15, 0.18]
+    goal_xy = (float(goal_xy_raw[0]), float(goal_xy_raw[1]))
+    if not probe_path:
+      raise ValueError(
+        "real.policy.cem_probe.probe_path must be set — point at a .pt "
+        "file from scripts/train_probe.py."
+      )
+    loaded = load_checkpoint(str(chk), device=str(cfg.hardware.device))
+    action_space = loaded.env.action_space
+    return GatedPolicy(
+      CEMProbePolicyAdapter(
+        loaded.model,
+        CEMProbeRunConfig(
+          checkpoint=str(chk),
+          horizon=int(c.horizon),
+          num_samples=int(c.num_samples),
+          num_elites=int(c.num_elites),
+          num_iterations=int(c.num_iterations),
+          discount=float(c.get("discount", 1.0)) if hasattr(c, "get") else 1.0,
+          action_low=action_space.low,
+          action_high=action_space.high,
+          probe_path=str(probe_path),
+          reward_kind=str(reward_kind),
+          goal_xy=goal_xy,
+        ),
+      ),
+      hold_action=_hold_qpos,
+    )
   raise ValueError(f"unknown real.policy.type: {ptype!r}")
 
 

@@ -340,6 +340,8 @@ def build_reward_fn(kind_or_env_cfg: Any) -> RewardFn:
     return StraightLinePushReward(**params)
   if kind == "obstacle_push":
     return ObstaclePushReward(**params)
+  if kind == "push_shaped":
+    return PushReward(**params)
   if kind == "teleop_proxy":
     return TeleopProxyReward(**params)
   raise ValueError(f"Unknown reward kind: {kind!r}")

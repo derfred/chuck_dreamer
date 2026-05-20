@@ -270,20 +270,32 @@ def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
 @click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
 @click.option("--step-delay", default=0.05, type=float, help="Seconds to sleep between steps (default 0.05)")
 @click.option("--policy", "policy_type", default="scripted",
-              type=click.Choice(["scripted", "cem", "dreamer"]),
-              help="Which policy to drive the scene with. cem/dreamer load a "
-                   "trained world model from --checkpoint and are wrapped in a "
-                   "GatedPolicy that holds the arm still until you press Space, "
-                   "then hands off control.")
+              type=click.Choice(["scripted", "cem", "dreamer", "cem_probe"]),
+              help="Which policy to drive the scene with. cem/dreamer/cem_probe "
+                   "load a trained world model from --checkpoint and are "
+                   "wrapped in a GatedPolicy that holds the arm still until "
+                   "you press Space. ``cem_probe`` replaces the WM's "
+                   "reward_head with a small probe MLP + Python reward — see "
+                   "scripts/train_probe.py.")
 @click.option("--checkpoint", "checkpoint_path", default=None, type=str,
               help="Path to a trained .safetensors checkpoint. Required for "
-                   "--policy cem and --policy dreamer.")
+                   "--policy cem, --policy dreamer, --policy cem_probe.")
+@click.option("--probe", "probe_path", default=None, type=str,
+              help="Path to a probe .pt file from scripts/train_probe.py. "
+                   "Required for --policy cem_probe.")
+@click.option("--reward-kind", "reward_kind", default="push_shaped", type=str,
+              help="Reward function name passed through build_reward_fn for "
+                   "--policy cem_probe. Default: push_shaped.")
+@click.option("--goal-xy", "goal_xy_str", default="0.15,0.18", type=str,
+              help="Fixed goal_xy for --policy cem_probe, as 'x,y' (metres).")
 @click.option("--close", "close_on_done", is_flag=True, default=False,
               help="Close the viewer as soon as the episode terminates. "
                    "Default: leave the window open so you can inspect the final state.")
 @override_option
 @click.pass_context
-def show_scene(ctx, seed, step_delay, policy_type, checkpoint_path, close_on_done, overrides):
+def show_scene(ctx, seed, step_delay, policy_type, checkpoint_path,
+               probe_path, reward_kind, goal_xy_str,
+               close_on_done, overrides):
   """Generate a scene and run it in the interactive MuJoCo viewer.
 
   With ``--policy scripted`` (default) the user presses Space to advance
@@ -325,6 +337,31 @@ def show_scene(ctx, seed, step_delay, policy_type, checkpoint_path, close_on_don
       c = cfg.real.policy.cem
       inner = CEMPolicy(
         loaded.model,
+        horizon=int(c.horizon),
+        num_samples=int(c.num_samples),
+        num_elites=int(c.num_elites),
+        num_iterations=int(c.num_iterations),
+        discount=float(c.get("discount", 1.0)),
+        action_low=env.action_space.low,
+        action_high=env.action_space.high,
+      )
+    elif policy_type == "cem_probe":
+      if not probe_path:
+        raise click.BadParameter("--probe is required for --policy cem_probe")
+      from chuck_dreamer.dreamer.cem_probe_policy import CEMProbePolicy, ProbeBundle
+      from chuck_dreamer.reward import build_reward_fn
+      c = cfg.real.policy.cem
+      try:
+        gx, gy = (float(v) for v in goal_xy_str.split(","))
+      except Exception as exc:
+        raise click.BadParameter(
+          f"--goal-xy must be 'x,y' (metres); got {goal_xy_str!r}: {exc}",
+        )
+      inner = CEMProbePolicy(
+        loaded.model,
+        probe=ProbeBundle.from_file(probe_path),
+        reward_fn=build_reward_fn(reward_kind),
+        goal_xy=(gx, gy),
         horizon=int(c.horizon),
         num_samples=int(c.num_samples),
         num_elites=int(c.num_elites),
