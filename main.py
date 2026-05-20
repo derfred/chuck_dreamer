@@ -38,11 +38,12 @@ def cli(ctx, config, verbose):
   ctx.obj['config_path'] = config
 
 
-def _collect_one_episode(cfg, output, fmt, ep_idx, episode_seed):
+def _collect_one_episode(cfg, output, fmt, ep_idx, episode_seed, min_steps):
   """Worker entry point: build env + writer, roll one episode, write it.
 
-  Returns ``(ep_idx, outcome, crashed_on_reset)``. Runs in a child process,
-  so it imports the heavy deps lazily and owns its own MuJoCo handles.
+  Returns ``(ep_idx, outcome, crashed_on_reset, skipped_short)``. Runs in a
+  child process, so it imports the heavy deps lazily and owns its own
+  MuJoCo handles.
   """
   from dataclasses import asdict
 
@@ -66,7 +67,10 @@ def _collect_one_episode(cfg, output, fmt, ep_idx, episode_seed):
     episode_data, outcome = collector.run()
 
     if episode_data is None:
-      return ep_idx, outcome, True
+      return ep_idx, outcome, True, False
+
+    if len(episode_data["reward"]) < min_steps:
+      return ep_idx, outcome, False, True
 
     writer.write_episode(
       episode_data,
@@ -79,7 +83,7 @@ def _collect_one_episode(cfg, output, fmt, ep_idx, episode_seed):
       },
       name_suffix=f"{ep_idx:05d}",
     )
-    return ep_idx, outcome, False
+    return ep_idx, outcome, False, False
   finally:
     env.close()
 
@@ -96,9 +100,11 @@ def _collect_one_episode(cfg, output, fmt, ep_idx, episode_seed):
                    "out over a ProcessPoolExecutor, each worker building its own "
                    "PushingEnv. Each episode's seed is cfg.seed + ep_idx, so output is "
                    "deterministic across worker counts.")
+@click.option("--min-steps", default=20, type=int,
+              help="Drop episodes shorter than this many steps instead of writing them.")
 @override_option
 @click.pass_context
-def generate_scenes(ctx, episodes, output, seed, fmt, workers, overrides):
+def generate_scenes(ctx, episodes, output, seed, fmt, workers, min_steps, overrides):
   """Generate pushing scenes using the scripted heuristic policy."""
   import os
 
@@ -113,29 +119,36 @@ def generate_scenes(ctx, episodes, output, seed, fmt, workers, overrides):
 
   from tqdm import tqdm
 
+  short_skipped = 0
   if workers <= 1:
     for ep_idx in tqdm(range(episodes), desc="Collecting"):
-      _, outcome, crashed_on_reset = _collect_one_episode(
-        cfg, output, fmt, ep_idx, cfg.seed + ep_idx,
+      _, outcome, crashed_on_reset, skipped_short = _collect_one_episode(
+        cfg, output, fmt, ep_idx, cfg.seed + ep_idx, min_steps,
       )
       outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
       if crashed_on_reset:
         click.echo(f"[ep {ep_idx}] crashed on reset, skipping")
+      if skipped_short:
+        short_skipped += 1
+        click.echo(f"[ep {ep_idx}] shorter than {min_steps} steps, skipping write")
   else:
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     with ProcessPoolExecutor(max_workers=workers) as pool:
       futures = [
-        pool.submit(_collect_one_episode, cfg, output, fmt, ep_idx, cfg.seed + ep_idx)
+        pool.submit(_collect_one_episode, cfg, output, fmt, ep_idx, cfg.seed + ep_idx, min_steps)
         for ep_idx in range(episodes)
       ]
       for fut in tqdm(as_completed(futures), total=episodes, desc="Collecting"):
-        ep_idx, outcome, crashed_on_reset = fut.result()
+        ep_idx, outcome, crashed_on_reset, skipped_short = fut.result()
         outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
         if crashed_on_reset:
           click.echo(f"[ep {ep_idx}] crashed on reset, skipping")
+        if skipped_short:
+          short_skipped += 1
+          click.echo(f"[ep {ep_idx}] shorter than {min_steps} steps, skipping write")
 
-  click.echo(f"Done. Outcomes: {outcome_counts}")
+  click.echo(f"Done. Outcomes: {outcome_counts}  (skipped {short_skipped} short episodes)")
 
 
 @cli.command("import-lerobot")
