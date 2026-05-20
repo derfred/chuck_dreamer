@@ -193,12 +193,16 @@ real:
   start_key:         "s"
 
 env:
-  difficulty: "medium"
+  difficulty: "real"
   render_size: "512x512"
   table_size: [0.60, 0.5, 0.02]  # [half_x, half_y, half_z]
   max_steps: null  # Per-episode step cap; null uses the difficulty preset's default.
 
-  obs_mode: "image"   # "state" | "image" | "image_proprio"
+  # Any non-empty subset of: "image" (CNN), "state" (MLP over
+  # object_xy + joint_qpos), "proprio" (MLP over joint_qpos),
+  # "ee" (MLP over ee_pos + ee_quat). Each listed component gets its
+  # own encoder/decoder branch; embeddings are fused to embed_size.
+  obs_mode: ["image"]
   act_mode: "ee"      # "joint" | "ee"
 
   reward: "goal_distance"
@@ -230,7 +234,7 @@ object_localization:
   mat:
     line_length_mm:     300.0   # L: length of each white line
     line_separation_mm: 160.0   # D: perpendicular distance between the two lines
-    circle_radius_mm:   10.0    # r: radius of the white circle
+    circle_radius_mm:   50.0    # r: radius of the white circle
 
   # Pose estimator runtime paths. ``calibration_cache`` is where
   # `analyze-cameras` writes per-dataset calibrations and the

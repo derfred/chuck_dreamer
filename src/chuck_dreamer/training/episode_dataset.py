@@ -55,7 +55,7 @@ SUPPORTED_FORMATS = ("hdf5", "rerun")
 # format but are properties of the whole episode. We surface them on
 # ``Episode.metadata`` so call sites can read them without sniffing the
 # raw arrays dict.
-_METADATA_KEYS: tuple[str, ...] = ("goal_xy", "tags")
+_METADATA_KEYS: tuple[str, ...] = ("goal_xy", "mat_centre", "tags")
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +101,8 @@ def _load_hdf5_episode(path: str | Path) -> RawEpisode:
       meta = f["metadata"]
       if "goal_xy" in meta:
         raw["goal_xy"] = np.asarray(meta["goal_xy"][()], dtype=np.float32)
+      if "mat_centre" in meta:
+        raw["mat_centre"] = np.asarray(meta["mat_centre"][()], dtype=np.float32)
       if "tags" in meta:
         raw_tags = meta["tags"][()]
         raw["tags"] = tuple(

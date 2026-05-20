@@ -21,10 +21,10 @@ from chuck_dreamer.dreamer.mlx_model import (  # noqa: E402
   CNNEncoder,
   Critic,
   DreamerMLXModel,
-  ImageProprioDecoder,
-  ImageProprioEncoder,
   MLPDecoder,
   MLPEncoder,
+  MultiModalDecoder,
+  MultiModalEncoder,
   RewardHead,
   RSSM,
   feat,
@@ -234,11 +234,13 @@ def test_actor_initial_std_uses_init_std_offset():
 
 def test_dreamer_model_builds_from_default_config():
   cfg = load_config()
-  cfg.env.obs_mode = "state"
-  model = build_model(cfg, obs_shape=(15,), action_dim=6)
+  cfg.env.obs_mode = ["state"]
+  model = build_model(cfg, obs_shape={"state": (15,)}, action_dim=6)
   assert isinstance(model, DreamerMLXModel)
-  assert isinstance(model.encoder, MLPEncoder)
-  assert isinstance(model.decoder, MLPDecoder)
+  assert isinstance(model.encoder, MultiModalEncoder)
+  assert isinstance(model.decoder, MultiModalDecoder)
+  assert isinstance(model.encoder.b_state, MLPEncoder)
+  assert isinstance(model.decoder.h_state, MLPDecoder)
   assert isinstance(model.rssm, RSSM)
   assert isinstance(model.reward_head, RewardHead)
   assert isinstance(model.actor, Actor)
@@ -247,11 +249,11 @@ def test_dreamer_model_builds_from_default_config():
 
 def test_dreamer_model_end_to_end_forward_shapes():
   cfg = load_config()
-  cfg.env.obs_mode = "state"
+  cfg.env.obs_mode = ["state"]
   B, T, obs_dim, action_dim = 2, 4, 15, 6
-  model = build_model(cfg, obs_shape=(obs_dim,), action_dim=action_dim)
+  model = build_model(cfg, obs_shape={"state": (obs_dim,)}, action_dim=action_dim)
 
-  obs = mx.zeros((B, T, obs_dim))
+  obs = {"state": mx.zeros((B, T, obs_dim))}
   actions = mx.zeros((B, T, action_dim))
 
   embeds = model.encoder(obs)
@@ -265,7 +267,8 @@ def test_dreamer_model_end_to_end_forward_shapes():
   f = feat(states[-1])
   assert f.shape == (B, feat_dim)
 
-  assert model.decoder(f).shape == (B, obs_dim)
+  decoded = model.decoder(f)
+  assert decoded["state"].shape == (B, obs_dim)
   assert model.reward_head(f).shape == (B,)
 
   action, mean, std = model.actor(f)
@@ -278,8 +281,8 @@ def test_dreamer_model_end_to_end_forward_shapes():
 
 def test_dreamer_model_imagine_uses_actor_and_yields_horizon_plus_one():
   cfg = load_config()
-  cfg.env.obs_mode = "state"
-  model = build_model(cfg, obs_shape=(15,), action_dim=6)
+  cfg.env.obs_mode = ["state"]
+  model = build_model(cfg, obs_shape={"state": (15,)}, action_dim=6)
 
   init = model.rssm.initial_state(batch_size=3)
 
@@ -296,17 +299,17 @@ def test_dreamer_model_imagine_uses_actor_and_yields_horizon_plus_one():
 
 def test_dreamer_model_rejects_unsupported_obs_mode():
   cfg = load_config()
-  cfg.env.obs_mode = "depth"  # not in {state, image, image_proprio}
+  cfg.env.obs_mode = ["depth"]
   with pytest.raises(ValueError):
-    build_model(cfg, obs_shape=(64, 64, 3), action_dim=7)
+    build_model(cfg, obs_shape={"image": (64, 64, 3)}, action_dim=7)
 
 
 def test_build_model_rejects_unknown_device():
   cfg = load_config()
-  cfg.env.obs_mode = "state"
+  cfg.env.obs_mode = ["state"]
   cfg.hardware.device = "not-a-real-backend"
   with pytest.raises(ValueError):
-    build_model(cfg, obs_shape=(15,), action_dim=6)
+    build_model(cfg, obs_shape={"state": (15,)}, action_dim=6)
 
 
 # ---------------------------------------------------------------------------
@@ -344,15 +347,17 @@ def test_cnn_encoder_validates_unequal_lengths():
                embed_dim=10, image_size=16)
 
 
-def test_image_proprio_encoder_decoder_roundtrip_shapes():
+def test_multi_modal_encoder_decoder_roundtrip_shapes():
   strides = (2, 2)
   img = derive_image_size(strides)
   cnn_enc = CNNEncoder(in_channels=3, channels=(32, 64), kernels=(4, 4),
                        strides=strides, embed_dim=64, image_size=img)
   cnn_dec = CNNDecoder(feat_dim=80, channels=(32, 64), kernels=(4, 4),
                        strides=strides, out_channels=3, image_size=img)
-  enc = ImageProprioEncoder(cnn_enc, proprio_dim=13, proprio_hidden=(64,), embed_dim=64)
-  dec = ImageProprioDecoder(feat_dim=80, cnn=cnn_dec, proprio_hidden=(64,), proprio_dim=13)
+  mlp_enc = MLPEncoder(obs_dim=13, hidden=(64,), embed_dim=64)
+  mlp_dec = MLPDecoder(feat_dim=80, hidden=(64,), obs_dim=13)
+  enc = MultiModalEncoder({"image": cnn_enc, "proprio": mlp_enc}, embed_dim=64)
+  dec = MultiModalDecoder({"image": cnn_dec, "proprio": mlp_dec})
 
   obs = {"image": mx.zeros((2, 3, img, img, 3), dtype=mx.uint8),
          "proprio": mx.zeros((2, 3, 13))}
@@ -371,38 +376,39 @@ def test_image_proprio_encoder_decoder_roundtrip_shapes():
 
 def test_dreamer_model_builds_image_mode():
   cfg = load_config()
-  cfg.env.obs_mode = "image"
+  cfg.env.obs_mode = ["image"]
   img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
-  model = build_model(cfg, obs_shape=(img, img, 3), action_dim=6)
+  model = build_model(cfg, obs_shape={"image": (img, img, 3)}, action_dim=6)
   assert isinstance(model, DreamerMLXModel)
-  assert model.obs_mode == "image"
+  assert model.obs_mode == ("image",)
   assert model.image_size == img
-  assert isinstance(model.encoder, CNNEncoder)
-  assert isinstance(model.decoder, CNNDecoder)
+  assert isinstance(model.encoder.b_image, CNNEncoder)
+  assert isinstance(model.decoder.h_image, CNNDecoder)
 
 
 def test_dreamer_model_builds_image_proprio_mode():
   cfg = load_config()
-  cfg.env.obs_mode = "image_proprio"
+  cfg.env.obs_mode = ["image", "proprio"]
   img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
   model = build_model(cfg, obs_shape={"image": (img, img, 3), "proprio": (13,)}, action_dim=6)
-  assert model.obs_mode == "image_proprio"
+  assert model.obs_mode == ("image", "proprio")
   assert model.image_size == img
-  assert model.proprio_dim == 13
-  assert isinstance(model.encoder, ImageProprioEncoder)
-  assert isinstance(model.decoder, ImageProprioDecoder)
+  assert isinstance(model.encoder.b_image, CNNEncoder)
+  assert isinstance(model.encoder.b_proprio, MLPEncoder)
+  assert isinstance(model.decoder.h_image, CNNDecoder)
+  assert isinstance(model.decoder.h_proprio, MLPDecoder)
 
 
 def test_dreamer_image_recon_loss_on_normalized_obs():
   cfg = load_config()
-  cfg.env.obs_mode = "image"
+  cfg.env.obs_mode = ["image"]
   img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
-  model = build_model(cfg, obs_shape=(img, img, 3), action_dim=6)
+  model = build_model(cfg, obs_shape={"image": (img, img, 3)}, action_dim=6)
   # Obs arrive pre-normalized from :class:`ImageProcessor` (float in
   # ``[-0.5, 0.5]``). Use uint8-zero's normalized value (-0.5) as a
   # fixed target so the per-pixel error is 0.5.
-  recon  = Observation.image_only(mx.zeros((2, 3, img, img, 3)))
-  target = Observation.image_only(mx.full((2, 3, img, img, 3), -0.5))
+  recon  = Observation.from_components({"image": mx.zeros((2, 3, img, img, 3))})
+  target = Observation.from_components({"image": mx.full((2, 3, img, img, 3), -0.5)})
   loss = model._recon_loss(recon, target)
   expected = 0.25 * img * img * 3
   assert abs(float(loss.item()) - expected) < 1e-3
@@ -414,17 +420,18 @@ def test_dreamer_image_recon_loss_with_focus_mask_applies_per_pixel_weighting():
   #   * mask=0 everywhere ⇒ same loss as unmasked.
   #   * mask=1 everywhere ⇒ loss scales by ``1 + focus_scale``.
   cfg = load_config()
-  cfg.env.obs_mode = "image"
+  cfg.env.obs_mode = ["image"]
   cfg.training.losses.focus_scale = 4.0
   img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
-  model = build_model(cfg, obs_shape=(img, img, 3), action_dim=6)
+  model = build_model(cfg, obs_shape={"image": (img, img, 3)}, action_dim=6)
 
-  recon  = Observation.image_only(mx.zeros((2, 3, img, img, 3)))
-  target = Observation.image_only(mx.full((2, 3, img, img, 3), -0.5))
+  recon  = Observation.from_components({"image": mx.zeros((2, 3, img, img, 3))})
+  target = Observation.from_components({"image": mx.full((2, 3, img, img, 3), -0.5)})
   base   = float(model._recon_loss(recon, target).item())
 
-  target_zero = Observation.image_only(target.image, focus_mask=mx.zeros((2, 3, img, img)))
-  target_one  = Observation.image_only(target.image, focus_mask=mx.ones((2, 3, img, img)))
+  tgt_img = target.components["image"]
+  target_zero = Observation.from_components({"image": tgt_img}, focus_mask=mx.zeros((2, 3, img, img)))
+  target_one  = Observation.from_components({"image": tgt_img}, focus_mask=mx.ones((2, 3, img, img)))
   loss_zero   = float(model._recon_loss(recon, target_zero).item())
   loss_one    = float(model._recon_loss(recon, target_one).item())
 
@@ -434,14 +441,18 @@ def test_dreamer_image_recon_loss_with_focus_mask_applies_per_pixel_weighting():
 
 def test_dreamer_image_proprio_recon_loss_sums_image_and_proprio():
   cfg = load_config()
-  cfg.env.obs_mode = "image_proprio"
+  cfg.env.obs_mode = ["image", "proprio"]
   img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
   model = build_model(cfg, obs_shape={"image": (img, img, 3), "proprio": (4,)}, action_dim=6)
-  recon  = Observation.image_proprio(mx.zeros((2, 3, img, img, 3)),
-                                     mx.zeros((2, 3, 4)))
+  recon  = Observation.from_components({
+    "image":   mx.zeros((2, 3, img, img, 3)),
+    "proprio": mx.zeros((2, 3, 4)),
+  })
   # Image obs pre-normalized to -0.5 (uint8-zero post-normalize).
-  target = Observation.image_proprio(mx.full((2, 3, img, img, 3), -0.5),
-                                     mx.ones((2, 3, 4)))
+  target = Observation.from_components({
+    "image":   mx.full((2, 3, img, img, 3), -0.5),
+    "proprio": mx.ones((2, 3, 4)),
+  })
   loss = model._recon_loss(recon, target)
   expected_img = 0.25 * img * img * 3
   expected_pro = 4.0  # ((0 - 1)**2).sum(-1) == 4 per (b,t), mean over (B,T) = 4.
@@ -450,10 +461,10 @@ def test_dreamer_image_proprio_recon_loss_sums_image_and_proprio():
 
 def test_dreamer_state_recon_loss_unchanged():
   cfg = load_config()
-  cfg.env.obs_mode = "state"
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
-  recon  = Observation.state_vector(mx.zeros((2, 3, 5)))
-  target = Observation.state_vector(mx.ones((2, 3, 5)))
+  cfg.env.obs_mode = ["state"]
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  recon  = Observation.from_components({"state": mx.zeros((2, 3, 5))})
+  target = Observation.from_components({"state": mx.ones((2, 3, 5))})
   loss = model._recon_loss(recon, target)
   assert abs(float(loss.item()) - 5.0) < 1e-6  # 5 dims, all (0-1)^2 = 1, summed.
 
@@ -474,27 +485,27 @@ def test_aux_head_disabled_by_default():
   Skipping construction keeps the parameter tree (and checkpoint key set)
   identical to pre-aux runs."""
   cfg = load_config()
-  cfg.env.obs_mode = "state"
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  cfg.env.obs_mode = ["state"]
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   assert model.aux_head is None
 
 
 def test_aux_head_built_when_aux_scale_positive():
   cfg = load_config()
-  cfg.env.obs_mode = "state"
+  cfg.env.obs_mode = ["state"]
   cfg.training.losses.aux_scale = 1.0
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   assert isinstance(model.aux_head, AuxHead)
   assert model.aux_head.target_dim == int(cfg.model.aux.target_dim)
 
 
 def test_wm_loss_uses_aux_when_head_present():
   cfg = load_config()
-  cfg.env.obs_mode = "state"
+  cfg.env.obs_mode = ["state"]
   cfg.training.losses.aux_scale = 1.0
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   batch = {
-    "obs":        mx.zeros((2, 4, 5)),
+    "obs":        {"state": mx.zeros((2, 4, 5))},
     "action":     mx.zeros((2, 4, 6)),
     "reward":     mx.zeros((2, 4)),
     "aux_target": mx.ones((2, 4, int(cfg.model.aux.target_dim))),
@@ -508,16 +519,16 @@ def test_wm_loss_uses_aux_when_head_present():
 
 def test_aux_head_round_trips_through_save_load(tmp_path):
   cfg = load_config()
-  cfg.env.obs_mode = "state"
+  cfg.env.obs_mode = ["state"]
   cfg.training.losses.aux_scale = 1.0
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
 
   path = str(tmp_path / "ckpt.safetensors")
   model.save(path)
 
   # Build a fresh model and reload — aux head must be present and weights
   # must match (we test via output equality on a fixed input).
-  model2 = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model2 = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   model2.load(path)
 
   f = mx.zeros((3, cfg.model.rssm.stoch_size + cfg.model.rssm.deter_size))

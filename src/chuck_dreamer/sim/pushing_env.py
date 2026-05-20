@@ -10,6 +10,14 @@ import numpy as np
 from gymnasium import spaces
 
 from ..reward import GoalDistanceReward
+from ..training.observation import (
+  EE,
+  IMAGE,
+  PROPRIO,
+  STATE,
+  ObsMode,
+  normalize_obs_mode,
+)
 from .observation_image import ObservationImage
 from .scene_builder import SceneBuilder
 from .scene_generator import SceneGenerator
@@ -18,7 +26,6 @@ from .step_info import StepInfo
 
 Observation = dict[str, Any]
 
-ObsMode = Literal["state", "image", "image_proprio"]
 ActMode = Literal["joint", "ee"]
 
 
@@ -251,7 +258,7 @@ class PushingEnv(gym.Env):
     self.generator = SceneGenerator(config)
 
     env_cfg = config.get("env", {}) if hasattr(config, "get") else {}
-    self.obs_mode: ObsMode = cast(ObsMode, env_cfg.get("obs_mode", "state"))
+    self.obs_mode: ObsMode = normalize_obs_mode(env_cfg.get("obs_mode", "state"))
     self.act_mode: ActMode = cast(ActMode, env_cfg.get("act_mode", "ee"))
 
     self.model: mujoco.MjModel | None = None
@@ -278,45 +285,59 @@ class PushingEnv(gym.Env):
       return len(self.scene.joint_names)
     return self.generator.n_joints
 
+  def _component_dims(self) -> dict[str, tuple[int, ...]]:
+    """Per-component trailing shapes for the current ``obs_mode``.
+
+    Vector components are computed from the configured scene (number of
+    joints, etc.); the image component reports the render size — the
+    model-side shape is overridden in :attr:`model_obs_shape` to match
+    the loader's resize.
+    """
+    H, W = self.render_size
+    dims: dict[str, tuple[int, ...]] = {}
+    for c in self.obs_mode:
+      if c == IMAGE:
+        dims[c] = (H, W, 3)
+      elif c == STATE:
+        dims[c] = (2 + self.n_joints,)             # object_xy ‖ joint_qpos
+      elif c == PROPRIO:
+        dims[c] = (self.n_joints,)                  # joint_qpos
+      elif c == EE:
+        dims[c] = (3 + 4,)                          # ee_pos ‖ ee_quat
+      else:
+        raise ValueError(f"unknown obs_mode component {c!r}")
+    return dims
+
   @property
   def observation_space(self) -> spaces.Space:  # type: ignore[override]
-    H, W = self.render_size
-    if self.obs_mode == "image":
-      return spaces.Box(low=0, high=255, shape=(H, W, 3), dtype=np.uint8)
+    """Gym observation space as a dict over the configured components.
 
-    proprio_dim = 3 + 4 + self.n_joints  # ee_pos + ee_quat + arm_qpos
-
-    if self.obs_mode == "image_proprio":
-      return spaces.Tuple((
-        spaces.Box(low=0, high=255, shape=(H, W, 3), dtype=np.uint8),
-        spaces.Box(low=-np.inf, high=np.inf, shape=(proprio_dim,), dtype=np.float32),
-      ))
-
-    state_dim = proprio_dim + 2  # + object_xy
-    return spaces.Box(low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32)
+    Always a ``spaces.Dict`` keyed by component name — uniform whether
+    one or many components are listed. Image dims are reported at the
+    raw render size; the loader resizes them before they reach the model.
+    """
+    dims = self._component_dims()
+    parts: dict[str, spaces.Space] = {}
+    for c, shape in dims.items():
+      if c == IMAGE:
+        parts[c] = spaces.Box(low=0, high=255, shape=shape, dtype=np.uint8)
+      else:
+        parts[c] = spaces.Box(low=-np.inf, high=np.inf, shape=shape, dtype=np.float32)
+    return spaces.Dict(parts)
 
   @property
-  def model_obs_shape(self):
-    """Shape passed to ``build_model`` for this env's configured ``obs_mode``.
+  def model_obs_shape(self) -> dict[str, tuple[int, ...]]:
+    """Per-component trailing shapes the model encoder expects.
 
-    Differs from :attr:`observation_space` for image modes: the env captures
-    images at the raw render size, but the loader resizes them to
-    ``config.model.encoder.image_size`` before they reach the model.
-    Returns a tuple for ``state``/``image`` and a dict
-    ``{"image": (H, W, 3), "proprio": (P,)}`` for ``image_proprio``.
+    Mirrors :attr:`observation_space` but overrides the image shape with
+    ``config.model.encoder.image_size`` — the loader resizes captured
+    frames to that side length before they reach the model.
     """
-    if self.obs_mode == "state":
-      shape = self.observation_space.shape
-      assert shape is not None, "state obs_mode should have a shaped Box observation space"
-      return tuple(shape)
-    else:
+    dims = self._component_dims()
+    if IMAGE in dims:
       image_size = int(self.config.model.encoder.image_size)
-      if self.obs_mode == "image":
-        return (image_size, image_size, 3)
-      if self.obs_mode == "image_proprio":
-        proprio_dim = 3 + 4 + self.n_joints
-        return {"image": (image_size, image_size, 3), "proprio": (proprio_dim,)}
-    raise ValueError(f"unknown obs_mode={self.obs_mode!r}")
+      dims[IMAGE] = (image_size, image_size, 3)
+    return dims
 
   @property
   def action_space(self) -> spaces.Box:  # type: ignore[override]
@@ -336,26 +357,33 @@ class PushingEnv(gym.Env):
     high = np.concatenate([_EE_POS_HIGH, np.full(4, 1.0, dtype=np.float32)])
     return spaces.Box(low=low, high=high, dtype=np.float32)
 
-  def policy_obs(self, full_obs: Observation) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
-    """Project the full obs dict to the modal observation the policy/model consumes."""
-    image_obs: ObservationImage = full_obs["image"]
-    if self.obs_mode == "image":
-      return np.asarray(image_obs.image, dtype=np.uint8)
+  def policy_obs(self, full_obs: Observation) -> dict[str, np.ndarray]:
+    """Project the full obs dict to the per-component dict the model consumes.
 
-    proprio = np.concatenate([
-      np.asarray(full_obs["ee_pos"], dtype=np.float32),
-      np.asarray(full_obs["ee_quat"], dtype=np.float32),
-      np.asarray(full_obs["arm_qpos"], dtype=np.float32),
-    ])
-
-    if self.obs_mode == "image_proprio":
-      return (np.asarray(image_obs.image, dtype=np.uint8), proprio)
-
-    return np.asarray(np.concatenate([
-      proprio[:7],  # ee_pos + ee_quat
-      np.asarray(full_obs["object_xy"], dtype=np.float32),
-      proprio[7:],  # arm_qpos
-    ]))
+    Always a dict keyed by component name (matches the buffer schema
+    and what :meth:`model_obs_shape` advertises), independent of how
+    many components ``obs_mode`` lists.
+    """
+    out: dict[str, np.ndarray] = {}
+    for c in self.obs_mode:
+      if c == IMAGE:
+        image_obs: ObservationImage = full_obs["image"]
+        out[c] = np.asarray(image_obs.image, dtype=np.uint8)
+      elif c == STATE:
+        out[c] = np.concatenate([
+          np.asarray(full_obs["object_xy"], dtype=np.float32),
+          np.asarray(full_obs["arm_qpos"],  dtype=np.float32),
+        ])
+      elif c == PROPRIO:
+        out[c] = np.asarray(full_obs["arm_qpos"], dtype=np.float32)
+      elif c == EE:
+        out[c] = np.concatenate([
+          np.asarray(full_obs["ee_pos"],  dtype=np.float32),
+          np.asarray(full_obs["ee_quat"], dtype=np.float32),
+        ])
+      else:
+        raise ValueError(f"unknown obs_mode component {c!r}")
+    return out
 
   def generate_scene(self) -> SceneConfig:
     """Generate a new random scene config."""
@@ -426,14 +454,18 @@ class PushingEnv(gym.Env):
     if self.renderer is None or self.data is None:
       return None
 
-    self.renderer.update_scene(self.data)
+    # Use the scene's main_camera (set up by SceneBuilder) so per-episode
+    # camera randomisation actually takes effect. Without an explicit camera
+    # argument mujoco.Renderer falls back to its free orbit camera, which
+    # ignores config.camera entirely.
+    self.renderer.update_scene(self.data, camera="main_camera")
     image = np.asarray(self.renderer.render())
 
     self.renderer.enable_segmentation_rendering()
-    self.renderer.update_scene(self.data)
+    self.renderer.update_scene(self.data, camera="main_camera")
     seg = self.renderer.render()   # (H, W, 2)
     self.renderer.disable_segmentation_rendering()
-    self.renderer.update_scene(self.data)
+    self.renderer.update_scene(self.data, camera="main_camera")
 
     return ObservationImage.from_seg(image, self._segmentation_masks(seg))
 
@@ -461,16 +493,11 @@ class PushingEnv(gym.Env):
 
   def _setup_seg_ids(self):
     """Resolve the geoms we care about to their IDs, once."""
-    names = ['goal_marker', 'target_object_geom']
-
-    # clutter is numbered from 0; stop at the first gap
-    i = 0
-    while True:
-        name = f'clutter_{i}_geom'
-        if mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name) == -1:
-            break
-        names.append(name)
-        i += 1
+    # goal_marker may be absent when the scene draws its own goal visual
+    # (e.g. the "real" preset's ring of clutter boxes); skip it if missing.
+    names = ['target_object_geom']
+    if mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, 'goal_marker') != -1:
+        names.insert(0, 'goal_marker')
 
     self._seg_geom_ids = {
         name: self.model.geom(name).id
@@ -500,6 +527,12 @@ class PushingEnv(gym.Env):
       m = is_geom & (ids == gid)
       masks[name] = m
       covered |= m
+
+    # Downstream observation builders expect a ``goal_marker`` mask even when
+    # the scene doesn't render an explicit one (e.g. the "real" preset draws
+    # its goal as part of the clutter ring).
+    if "goal_marker" not in masks:
+      masks["goal_marker"] = np.zeros(ids.shape, dtype=bool)
 
     arm_mask = is_geom & np.isin(ids, self._seg_arm_geom_ids)
     masks["arm"] = arm_mask

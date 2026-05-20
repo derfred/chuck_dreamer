@@ -23,32 +23,25 @@ Episode = dict[str, Any]
 
 
 def _coerce_to_observation(raw_obs: Any, focus_mask: Any = None) -> Observation:
-  """Wrap a buffer-side obs value (ndarray / dict / Observation) into an Observation.
+  """Wrap a buffer-side obs value (dict or Observation) into an Observation.
 
-  Infers the mode from the value's structure since the buffer doesn't
-  carry obs_mode metadata:
-    * already an :class:`Observation` → returned unchanged
-    * dict with ``"image"`` / ``"proprio"`` → ``image_proprio``
-    * ndarray with ``ndim == 4`` (assumed (T+1, H, W, C)) → ``image``
-    * any other ndarray → ``state``
+  Buffer episodes always carry obs as a component dict keyed by
+  component name. The mode is implied by the dict's keys, so this
+  function doesn't need a separate ``obs_mode`` argument.
 
   ``focus_mask`` (per-step ``(T+1, H, W)`` float32) rides alongside
-  image-having observations when supplied — it's silently ignored on
-  ``state`` mode since there's no spatial axis for it to weight.
+  observations that include an image component when supplied; passing
+  one without an image present raises.
   """
   if isinstance(raw_obs, Observation):
     if focus_mask is not None and raw_obs.focus_mask is None:
-      return Observation.from_buffer_value(raw_obs, raw_obs.mode, focus_mask=np.asarray(focus_mask, dtype=np.float32))
+      return Observation.from_components(raw_obs.components, focus_mask=focus_mask)
     return raw_obs
-  fm = None if focus_mask is None else np.asarray(focus_mask, dtype=np.float32)
-  if isinstance(raw_obs, dict):
-    img = np.asarray(raw_obs["image"])
-    pro = np.asarray(raw_obs["proprio"]).astype(np.float32, copy=False)
-    return Observation.image_proprio(img, pro, focus_mask=fm)
-  arr = np.asarray(raw_obs)
-  if arr.ndim == 4:
-    return Observation.image_only(arr, focus_mask=fm)
-  return Observation.state_vector(arr)
+  if not isinstance(raw_obs, dict):
+    raise ValueError(
+      f"buffer obs must be a dict keyed by component name; got {type(raw_obs).__name__}"
+    )
+  return Observation.from_components(raw_obs, focus_mask=focus_mask)
 
 
 class ReplayBuffer:
@@ -98,7 +91,7 @@ class ReplayBuffer:
     self._total_steps: int         = 0
     self._rng                      = np.random.default_rng(seed)
 
-    self._sim_processor       = processor if processor is not None else EpisodeProcessor("state")
+    self._sim_processor       = processor if processor is not None else EpisodeProcessor(("state",))
     self._default_num_workers = default_num_workers
     self._protected_tags      = frozenset(protected_tags)
     self._tag_weights: dict[str, float] = dict(tag_weights or {})
@@ -190,6 +183,8 @@ class ReplayBuffer:
     }
     if "goal_xy" in episode:
       out["goal_xy"] = episode["goal_xy"]
+    if "mat_centre" in episode:
+      out["mat_centre"] = episode["mat_centre"]
     # Tags carry through unchanged; missing → empty tuple so all callers
     # can treat ep["tags"] as iterable without a None check.
     out["tags"] = tuple(str(t) for t in episode.get("tags", ()))

@@ -1,37 +1,85 @@
-"""Polymorphic observation wrapper.
+"""Polymorphic multi-modal observation wrapper.
 
-The codebase supports three observation modes (``state``, ``image``,
-``image_proprio``) which previously diverged in shape — flat ndarray
-vs. dict-of-arrays — and forced ``isinstance(obs, dict)`` branches
-through the buffer, evaluator, CEM policy, and the model. This module
-provides one dataclass that carries whichever fields the mode populates
-and exposes the image-side transformations (resize, normalize) as
-methods.
+``obs_mode`` is a list of component names (a non-empty subset of
+``image``, ``state``, ``proprio``, ``ee``). Each component is encoded
+by its own branch (CNN for ``image``, MLP for the others); embeddings
+are concatenated and fused into a single ``embed_size`` vector. The
+decoder is symmetric — one reconstruction head per component, summed
+into the recon loss.
 
-The dataclass is intentionally generic over the leading axes *and* over
-the array library: fields can hold ``np.ndarray``, ``mx.array``, or
-``torch.Tensor``. Methods that need a specific library are explicit:
-:meth:`resize_image` and :meth:`normalize_image` require numpy (used at
-the loader boundary); :meth:`map_arrays` lifts everything through a
-caller-supplied function (used by backend ``coerce``); generic ops
-(:meth:`__getitem__`, :meth:`leading_shape`, :meth:`add_batch_axis`)
-work on any array library because they only touch shapes / indexing.
+Component vocabulary:
+  * ``image``   — raw RGB frame, processed by the CNN branch.
+  * ``state``   — ``object_xy ‖ joint_qpos`` (the privileged ground-truth
+                  scene state). End-effector pose deliberately lives in
+                  ``ee`` so a config can ablate them independently.
+  * ``proprio`` — ``joint_qpos`` only (what a proprioceptive sensor sees
+                  on the real arm).
+  * ``ee``      — ``ee_pos ‖ ee_quat`` (7-D end-effector pose).
 
-A ``focus_mask`` field carries an optional per-frame scalar weight used
-by the reconstruction loss to up-weight image regions of interest. It
-only makes sense for image modes.
+The :class:`Observation` dataclass carries a uniform
+``components: dict[str, ndarray]`` mapping. A single-mode config like
+``obs_mode: ["image"]`` produces a 1-key dict; multi-mode configs add
+more keys. ``focus_mask`` is a per-frame scalar image weight used by
+the reconstruction loss to up-weight image regions of interest — only
+populated when ``"image"`` is among the components.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Literal
+from typing import Any, Callable
 
 import cv2  # type: ignore[import-not-found]
 import numpy as np
 
 
-ObsMode = Literal["state", "image", "image_proprio"]
+# Component names. ``image`` is the only spatial component; the rest are
+# 1-D vectors. Keep this list in sync with the encoder/decoder branches
+# in the dreamer backends.
+ComponentName = str
+IMAGE = "image"
+STATE = "state"
+PROPRIO = "proprio"
+EE = "ee"
+VALID_COMPONENTS: frozenset[str] = frozenset({IMAGE, STATE, PROPRIO, EE})
+
+# Convenience: number of trailing axes that describe one frame of each
+# component. ``image`` is (H, W, C); others are flat vectors.
+_TRAILING_NDIM: dict[str, int] = {IMAGE: 3, STATE: 1, PROPRIO: 1, EE: 1}
+
+
+# An ``obs_mode`` value as it travels through the codebase: a tuple of
+# component names. The config-load layer normalizes string and list
+# inputs into this canonical form.
+ObsMode = tuple[ComponentName, ...]
+
+
+def normalize_obs_mode(value: Any) -> ObsMode:
+  """Coerce a config-shaped ``obs_mode`` into a canonical tuple.
+
+  Accepts a string (legacy single-mode form), a list/tuple of strings,
+  or an OmegaConf ``ListConfig``. Rejects empty inputs and unknown
+  component names so a typo trips at config load rather than at the
+  encoder. Duplicates are rejected too — two heads for the same
+  component would silently double-count its loss.
+  """
+  if isinstance(value, str):
+    items: list[str] = [value]
+  else:
+    try:
+      items = [str(v) for v in value]
+    except TypeError as exc:
+      raise ValueError(f"obs_mode must be a string or sequence of strings; got {value!r}") from exc
+  if not items:
+    raise ValueError("obs_mode must contain at least one component")
+  unknown = [c for c in items if c not in VALID_COMPONENTS]
+  if unknown:
+    raise ValueError(
+      f"unknown obs_mode component(s) {unknown!r}; expected subset of {sorted(VALID_COMPONENTS)!r}"
+    )
+  if len(set(items)) != len(items):
+    raise ValueError(f"obs_mode has duplicate components: {items!r}")
+  return tuple(items)
 
 
 def _as_array(x: Any, *, dtype=None) -> Any:
@@ -70,210 +118,205 @@ def _resize_stack(arr: np.ndarray, size: int, interpolation: int) -> np.ndarray:
 
 @dataclass(frozen=True, slots=True)
 class Observation:
-  """One mode-tagged observation (per-step, sequence, or batched).
+  """One observation across one or more components.
 
-  Exactly the fields the mode needs are non-None:
-    * ``state``        — flat float32 vector, modes: ``state``
-    * ``image``        — (..., H, W, 3) uint8 or float32, modes: ``image``, ``image_proprio``
-    * ``proprio``      — (..., P) float32,                modes: ``image_proprio``
-    * ``focus_mask``   — (...,) float32 (optional),       modes: image-having
+  ``components`` is a dict mapping component name → array. Arrays may be
+  numpy at the loader/buffer boundary or backend tensors
+  (mx.array / torch.Tensor) after :meth:`map_arrays` coerces them.
 
-  Fields hold whichever array type the caller put in (numpy at the
-  loader/buffer boundary, mx.array / torch.Tensor after :meth:`map_arrays`
-  coerces them to a backend). ``leading_shape`` returns the axes before
-  the per-frame trailing axes — what callers used to extract by hand
-  from ``obs.shape[:-1]`` or ``next(iter(obs.values())).shape[:K]``.
+  ``focus_mask`` (per-frame scalar weight, shape ``(..., H, W)``) is
+  only populated when ``"image"`` is among the components — it weights
+  image-pixel reconstruction error.
+
+  The leading axes (per-step / per-sequence / per-batch) are shared
+  across all components and the focus mask; their trailing per-frame
+  shapes differ by component (image: ``(H, W, 3)``; vectors: ``(D,)``).
   """
 
-  mode: ObsMode
-  state: Any = None
-  image: Any = None
-  proprio: Any = None
+  components: dict[str, Any]
   focus_mask: Any = None
-  # Number of trailing axes that describe one frame's content (1 for
-  # state/proprio, 3 for an image). The first ``ndim - trailing_ndim``
-  # axes are leading (steps / batch / time). Populated at construction.
-  _trailing_ndim: int = field(default=0, repr=False)
+  # Stored once at construction so generic ops don't have to look it up
+  # on every call. Each entry is the number of trailing axes for that
+  # component (1 for vectors, 3 for images).
+  _trailing_ndims: dict[str, int] = field(default_factory=dict, repr=False)
 
   # ------------------------------------------------------------------
   # Constructors
   # ------------------------------------------------------------------
 
   @classmethod
-  def state_vector(cls, vec) -> "Observation":
-    return cls(mode="state", state=_as_array(vec, dtype=np.float32), _trailing_ndim=1)
+  def from_components(
+    cls,
+    components: dict[str, Any],
+    *,
+    focus_mask: Any = None,
+  ) -> "Observation":
+    """Build an Observation from a dict of populated component arrays.
 
-  @classmethod
-  def image_only(cls, image, focus_mask=None) -> "Observation":
-    return cls(
-      mode="image",
-      image=_as_array(image),
-      focus_mask=None if focus_mask is None else _as_array(focus_mask, dtype=np.float32),
-      _trailing_ndim=3,
-    )
-
-  @classmethod
-  def image_proprio(cls, image, proprio, focus_mask=None) -> "Observation":
-    img = _as_array(image)
-    pro = _as_array(proprio, dtype=np.float32)
-    # Leading axes must match across leaves — proprio has 1 trailing axis,
-    # image has 3, so the prefixes are img.shape[:-3] and pro.shape[:-1].
-    img_lead = tuple(img.shape[:-3])
-    pro_lead = tuple(pro.shape[:-1])
-    if img_lead != pro_lead:
-      raise ValueError(
-        f"image and proprio leading shapes mismatch: image={img_lead} proprio={pro_lead}"
-      )
-    return cls(
-      mode="image_proprio",
-      image=img,
-      proprio=pro,
-      focus_mask=None if focus_mask is None else _as_array(focus_mask, dtype=np.float32),
-      _trailing_ndim=3,
-    )
+    Validates that every key is a known component name and that the
+    leading axes match across components. Vector components are cast to
+    float32 (matches buffer storage); the image component preserves its
+    incoming dtype so uint8 frames survive until the model normalizes
+    them.
+    """
+    if not components:
+      raise ValueError("from_components(): components dict is empty")
+    out: dict[str, Any] = {}
+    leads: dict[str, tuple[int, ...]] = {}
+    trailing: dict[str, int] = {}
+    for name, arr in components.items():
+      if name not in VALID_COMPONENTS:
+        raise ValueError(f"unknown component {name!r}; expected {sorted(VALID_COMPONENTS)!r}")
+      tn = _TRAILING_NDIM[name]
+      a  = _as_array(arr) if name == IMAGE else _as_array(arr, dtype=np.float32)
+      lead = tuple(a.shape[: a.ndim - tn])
+      out[name]      = a
+      leads[name]    = lead
+      trailing[name] = tn
+    # All components must share leading axes — that's what makes one
+    # Observation cover the same step/sequence/batch.
+    ref_name, ref_lead = next(iter(leads.items()))
+    for n, l in leads.items():
+      if l != ref_lead:
+        raise ValueError(
+          f"leading shapes mismatch across components: {ref_name}={ref_lead}, {n}={l}"
+        )
+    fm = None if focus_mask is None else _as_array(focus_mask, dtype=np.float32)
+    if fm is not None and IMAGE not in out:
+      raise ValueError("focus_mask passed but 'image' is not among the components")
+    return cls(components=out, focus_mask=fm, _trailing_ndims=trailing)
 
   @classmethod
   def from_buffer_value(
     cls,
     value,
-    mode: ObsMode,
+    obs_mode: Any,
     *,
     focus_mask=None,
   ) -> "Observation":
-    """Wrap the legacy buffer-side obs value (ndarray or dict) back into an Observation.
+    """Wrap a buffer-side obs value back into an Observation.
 
-    Used when ingesting episodes that arrive in the pre-wrapper schema
-    (``episode["obs"]`` is an ndarray for state/image, a dict for
-    image_proprio). Backend tensors (mx.array / torch.Tensor) pass
-    through unchanged so the same wrap call works at the buffer boundary
-    and at the model boundary (after backend coerce). Idempotent on
-    already-wrapped inputs: if ``value`` is an :class:`Observation`,
-    it's returned unchanged (a passed ``focus_mask`` overrides the
-    wrapper's own only when non-None).
+    Buffer values are always dicts keyed by component name (even for
+    single-component configs — uniform schema simplifies downstream
+    code). Idempotent on already-wrapped inputs: an :class:`Observation`
+    passes through; a passed ``focus_mask`` overrides only when non-None.
     """
     if isinstance(value, cls):
       if focus_mask is not None:
-        return replace(value, focus_mask=focus_mask)
+        return replace(value, focus_mask=_as_array(focus_mask, dtype=np.float32))
       return value
-    if mode == "state":
-      return cls.state_vector(value)
-    if mode == "image":
-      return cls.image_only(value, focus_mask=focus_mask)
-    if mode == "image_proprio":
-      if not (isinstance(value, dict) and "image" in value and "proprio" in value):
-        raise ValueError(
-          f"image_proprio expects a dict with 'image' and 'proprio' keys; got {type(value).__name__}"
-        )
-      return cls.image_proprio(value["image"], value["proprio"], focus_mask=focus_mask)
-    raise ValueError(f"unknown obs mode: {mode!r}")
+    mode = normalize_obs_mode(obs_mode)
+    if not isinstance(value, dict):
+      raise ValueError(
+        f"buffer value must be a dict keyed by component name; got {type(value).__name__}"
+      )
+    missing = [c for c in mode if c not in value]
+    if missing:
+      raise ValueError(f"buffer value missing components {missing!r} (mode={mode!r})")
+    # Restrict to the configured mode — extra keys (legacy "proprio"
+    # under a state-only mode, for example) are ignored.
+    selected = {c: value[c] for c in mode}
+    return cls.from_components(selected, focus_mask=focus_mask)
 
   @classmethod
   def stack(cls, observations: list["Observation"], axis: int = 0) -> "Observation":
-    """Stack a list of like-shaped Observations along a new leading axis.
+    """Stack like-shaped Observations along a new leading axis.
 
-    Every observation must share ``mode``. The new axis is inserted at
-    ``axis`` (default 0); per-field arrays are stacked independently.
-    Replaces the dict-or-array fan-out used by the buffer's sample loop.
+    Every observation must share the same component keys. The new axis
+    is inserted at ``axis`` (default 0); each component is stacked
+    independently; ``focus_mask`` follows the same rule.
     """
     if not observations:
       raise ValueError("stack() requires at least one Observation")
-    mode = observations[0].mode
+    ref_keys = set(observations[0].components.keys())
     for o in observations:
-      if o.mode != mode:
-        raise ValueError(f"stack() requires uniform mode; got {mode!r} and {o.mode!r}")
-
-    def stack_field(name: str):
-      vals = [getattr(o, name) for o in observations]
-      if vals[0] is None:
-        if any(v is not None for v in vals):
-          raise ValueError(f"stack(): field {name!r} mixed None and non-None across batch")
-        return None
-      return np.stack(vals, axis=axis)
-
+      if set(o.components.keys()) != ref_keys:
+        raise ValueError(
+          f"stack() requires uniform components; got {ref_keys!r} and {set(o.components.keys())!r}"
+        )
+    stacked: dict[str, Any] = {}
+    for name in observations[0].components:
+      stacked[name] = np.stack([o.components[name] for o in observations], axis=axis)
+    fms = [o.focus_mask for o in observations]
+    if fms[0] is None:
+      if any(fm is not None for fm in fms):
+        raise ValueError("stack(): focus_mask mixed None and non-None across batch")
+      fm: Any = None
+    else:
+      fm = np.stack(fms, axis=axis)
     return cls(
-      mode=mode,
-      state=stack_field("state"),
-      image=stack_field("image"),
-      proprio=stack_field("proprio"),
-      focus_mask=stack_field("focus_mask"),
-      _trailing_ndim=observations[0]._trailing_ndim,
+      components=stacked,
+      focus_mask=fm,
+      _trailing_ndims=dict(observations[0]._trailing_ndims),
     )
 
   # ------------------------------------------------------------------
-  # Image transformations (no-op when no image is present)
+  # Image transformations (no-ops when no image is present)
   # ------------------------------------------------------------------
 
   def resize_image(self, size: int) -> "Observation":
     """Resize the (leading..., H, W, 3) image stack so H = W = ``size``.
 
     Leaves a float32 image alone if it already matches ``size`` and
-    only iterates per-frame when a resize is needed. Pass-through for
-    ``state`` mode. When a ``focus_mask`` is present (shape
-    ``(leading..., H, W)``) it's resized too, with nearest-neighbor
-    interpolation so a bool mask stays bool-equivalent (0/1 only).
+    only iterates per-frame when a resize is needed. Pass-through when
+    ``"image"`` is not among the components. When a ``focus_mask`` is
+    present it's resized too, with nearest-neighbor interpolation so a
+    bool mask stays bool-equivalent (0/1 only).
     """
-    if self.image is None:
+    img = self.components.get(IMAGE)
+    if img is None:
       return self
-    img = self.image
     if img.shape[-3] == size and img.shape[-2] == size:
       return self
     out = _resize_stack(img, size, cv2.INTER_AREA)
+    new_components = {**self.components, IMAGE: out}
     fm = self.focus_mask
     if fm is not None:
       fm = _resize_stack(fm[..., None], size, cv2.INTER_NEAREST).squeeze(-1)
-    return replace(self, image=out, focus_mask=fm)
+    return replace(self, components=new_components, focus_mask=fm)
 
   def normalize_image(self) -> "Observation":
     """Map uint8 image → float32 in ``[-0.5, 0.5]``. Float images pass through."""
-    if self.image is None:
+    img = self.components.get(IMAGE)
+    if img is None:
       return self
-    if self.image.dtype == np.uint8:
-      img = self.image.astype(np.float32) / 255.0 - 0.5
-      return replace(self, image=img)
-    return replace(self, image=self.image.astype(np.float32, copy=False))
+    if img.dtype == np.uint8:
+      img = img.astype(np.float32) / 255.0 - 0.5
+    else:
+      img = img.astype(np.float32, copy=False)
+    return replace(self, components={**self.components, IMAGE: img})
 
   # ------------------------------------------------------------------
-  # Sequence / batch ops — the dict-vs-ndarray branching this replaces
+  # Sequence / batch ops
   # ------------------------------------------------------------------
 
   @property
   def leading_shape(self) -> tuple[int, ...]:
-    """Shape of the axes before the per-frame trailing axes."""
-    arr = self._any_array()
-    return tuple(arr.shape[: arr.ndim - self._trailing_ndim])
+    """Shape of the axes before the per-frame trailing axes.
 
-  def _any_array(self) -> np.ndarray:
-    for v in (self.state, self.image, self.proprio):
-      if v is not None:
-        return v  # type: ignore[no-any-return]
-    raise RuntimeError(f"Observation(mode={self.mode!r}) has no populated array")
+    Every component shares this prefix (verified at construction), so
+    we can read it off whichever is convenient — pick the first.
+    """
+    name, arr = next(iter(self.components.items()))
+    tn = self._trailing_ndims[name]
+    return tuple(arr.shape[: arr.ndim - tn])
 
   def __getitem__(self, idx) -> "Observation":
     """Index/slice along the leading axes uniformly across all fields."""
-    def take(arr):
-      return None if arr is None else arr[idx]
-    return replace(
-      self,
-      state=take(self.state),
-      image=take(self.image),
-      proprio=take(self.proprio),
-      focus_mask=take(self.focus_mask),
-    )
+    new_components = {n: a[idx] for n, a in self.components.items()}
+    fm = None if self.focus_mask is None else self.focus_mask[idx]
+    return replace(self, components=new_components, focus_mask=fm)
 
   def map_arrays(self, fn: Callable[[Any], Any]) -> "Observation":
-    """Apply ``fn`` to every populated field. Use this to coerce to a backend.
+    """Apply ``fn`` to every populated field.
 
-    Field metadata (mode, trailing_ndim) carries through unchanged. Used
-    by the backends' ``coerce()`` to lift a numpy-side ``Observation``
-    into one carrying mx.array / torch.Tensor leaves.
+    Used by the backends' ``coerce()`` to lift a numpy-side
+    :class:`Observation` into one carrying mx.array / torch.Tensor
+    leaves. The trailing-ndim metadata carries through unchanged.
     """
-    return replace(
-      self,
-      state=None if self.state is None else fn(self.state),
-      image=None if self.image is None else fn(self.image),
-      proprio=None if self.proprio is None else fn(self.proprio),
-      focus_mask=None if self.focus_mask is None else fn(self.focus_mask),
-    )
+    new_components = {n: fn(a) for n, a in self.components.items()}
+    fm = None if self.focus_mask is None else fn(self.focus_mask)
+    return replace(self, components=new_components, focus_mask=fm)
 
   def add_batch_axis(self) -> "Observation":
     """Prepend a length-1 axis to every populated field.
@@ -285,43 +328,26 @@ class Observation:
     return self[None]
 
   # ------------------------------------------------------------------
-  # Adapters to the legacy episode/buffer schema
+  # Adapters to the episode/buffer schema
   # ------------------------------------------------------------------
 
-  def to_buffer_value(self):
-    """Return the value stored under ``episode["obs"]`` today.
+  def to_buffer_value(self) -> dict[str, Any]:
+    """Return the value stored under ``episode["obs"]``.
 
-    ``state``/``image`` modes return a single ndarray; ``image_proprio``
-    returns a ``{"image", "proprio"}`` dict. Focus masks ride in a
-    separate ``Episode`` field — not part of ``obs``.
+    Always a dict keyed by component name — uniform schema independent
+    of how many components are present. Focus masks ride in a separate
+    ``Episode`` field, not in this dict.
     """
-    if self.mode == "state":
-      assert self.state is not None
-      return self.state
-    if self.mode == "image":
-      assert self.image is not None
-      return self.image
-    if self.mode == "image_proprio":
-      assert self.image is not None and self.proprio is not None
-      return {"image": self.image, "proprio": self.proprio}
-    raise ValueError(f"unknown obs mode: {self.mode!r}")
+    return dict(self.components)
 
-  def model_shape(self):
-    """Return the trailing-shape descriptor a model encoder expects.
+  def model_shape(self) -> dict[str, tuple[int, ...]]:
+    """Return a per-component trailing-shape descriptor.
 
-    Tuple for ``state``/``image``; dict for ``image_proprio``. Matches
-    what :attr:`PushingEnv.model_obs_shape` produces.
+    Always a dict; matches what :attr:`PushingEnv.model_obs_shape`
+    produces and what the model's multi-modal encoder consumes.
     """
-    if self.mode == "state":
-      assert self.state is not None
-      return tuple(self.state.shape[-1:])
-    if self.mode == "image":
-      assert self.image is not None
-      return tuple(self.image.shape[-3:])
-    if self.mode == "image_proprio":
-      assert self.image is not None and self.proprio is not None
-      return {
-        "image":   tuple(self.image.shape[-3:]),
-        "proprio": tuple(self.proprio.shape[-1:]),
-      }
-    raise ValueError(f"unknown obs mode: {self.mode!r}")
+    out: dict[str, tuple[int, ...]] = {}
+    for name, arr in self.components.items():
+      tn = self._trailing_ndims[name]
+      out[name] = tuple(arr.shape[arr.ndim - tn:])
+    return out

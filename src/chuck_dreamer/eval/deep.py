@@ -302,7 +302,8 @@ class DeepEvalRunner:
 
     fmt = str(self.config.logging.episodes.dump_format)
     writer = EpisodeWriter(str(output_dir), format=fmt)
-    obs_mode = str(self.config.env.obs_mode)
+    from ..training.observation import normalize_obs_mode
+    obs_mode = normalize_obs_mode(self.config.env.obs_mode)
     min_len  = burn_in + horizon
 
     written = 0

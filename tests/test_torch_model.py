@@ -1,7 +1,7 @@
 """Shape, contract, and persistence tests for the PyTorch backend.
 
 These exercise the torch-specific surface: NHWC↔NCHW transposes on the
-CNN encoder/decoder, image_proprio dict-shaped obs, device placement,
+CNN encoder/decoder, multi-modal dict-shaped obs, device placement,
 and the save/load round-trip including config metadata.
 """
 
@@ -22,10 +22,10 @@ from chuck_dreamer.dreamer.torch_model import (  # noqa: E402
   CNNEncoder,
   Critic,
   DreamerTorchModel,
-  ImageProprioDecoder,
-  ImageProprioEncoder,
   MLPDecoder,
   MLPEncoder,
+  MultiModalDecoder,
+  MultiModalEncoder,
   RewardHead,
   RSSM,
   feat,
@@ -86,15 +86,17 @@ def test_cnn_encoder_validates_unequal_lengths():
                embed_dim=10, image_size=16)
 
 
-def test_image_proprio_encoder_decoder_roundtrip_shapes():
+def test_multi_modal_encoder_decoder_roundtrip_shapes():
   strides = (2, 2)
   img = derive_image_size(strides)
   cnn_enc = CNNEncoder(in_channels=3, channels=(32, 64), kernels=(4, 4),
                        strides=strides, embed_dim=64, image_size=img)
   cnn_dec = CNNDecoder(feat_dim=80, channels=(32, 64), kernels=(4, 4),
                        strides=strides, out_channels=3, image_size=img)
-  enc = ImageProprioEncoder(cnn_enc, proprio_dim=13, proprio_hidden=(64,), embed_dim=64)
-  dec = ImageProprioDecoder(feat_dim=80, cnn=cnn_dec, proprio_hidden=(64,), proprio_dim=13)
+  mlp_enc = MLPEncoder(obs_dim=13, hidden=(64,), embed_dim=64)
+  mlp_dec = MLPDecoder(feat_dim=80, hidden=(64,), obs_dim=13)
+  enc = MultiModalEncoder({"image": cnn_enc, "proprio": mlp_enc}, embed_dim=64)
+  dec = MultiModalDecoder({"image": cnn_dec, "proprio": mlp_dec})
 
   obs = {"image": torch.zeros(2, 3, img, img, 3, dtype=torch.uint8),
          "proprio": torch.zeros(2, 3, 13)}
@@ -233,49 +235,52 @@ def test_aux_head_output_shape():
 
 def _state_cfg():
   cfg = load_config()
-  cfg.env.obs_mode = "state"
+  cfg.env.obs_mode = ["state"]
   cfg.hardware.device = "cpu"
   return cfg
 
 
 def test_dreamer_model_builds_from_default_config():
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape=(15,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (15,)}, action_dim=6)
   assert isinstance(model, DreamerTorchModel)
-  assert isinstance(model.encoder, MLPEncoder)
-  assert isinstance(model.decoder, MLPDecoder)
+  assert isinstance(model.encoder, MultiModalEncoder)
+  assert isinstance(model.decoder, MultiModalDecoder)
+  assert isinstance(model.encoder.branches["state"], MLPEncoder)
+  assert isinstance(model.decoder.heads["state"], MLPDecoder)
 
 
 def test_dreamer_model_builds_image_mode():
   cfg = load_config()
-  cfg.env.obs_mode = "image"
+  cfg.env.obs_mode = ["image"]
   cfg.hardware.device = "cpu"
   img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
-  model = build_model(cfg, obs_shape=(img, img, 3), action_dim=6)
-  assert model.obs_mode == "image"
-  assert isinstance(model.encoder, CNNEncoder)
-  assert isinstance(model.decoder, CNNDecoder)
+  model = build_model(cfg, obs_shape={"image": (img, img, 3)}, action_dim=6)
+  assert model.obs_mode == ("image",)
+  assert isinstance(model.encoder.branches["image"], CNNEncoder)
+  assert isinstance(model.decoder.heads["image"], CNNDecoder)
 
 
 def test_dreamer_model_builds_image_proprio_mode():
   cfg = load_config()
-  cfg.env.obs_mode = "image_proprio"
+  cfg.env.obs_mode = ["image", "proprio"]
   cfg.hardware.device = "cpu"
   img = derive_image_size(tuple(cfg.model.encoder.cnn_strides))
   model = build_model(cfg, obs_shape={"image": (img, img, 3), "proprio": (13,)}, action_dim=6)
-  assert model.obs_mode == "image_proprio"
+  assert model.obs_mode == ("image", "proprio")
   assert model.image_size == img
-  assert model.proprio_dim == 13
-  assert isinstance(model.encoder, ImageProprioEncoder)
-  assert isinstance(model.decoder, ImageProprioDecoder)
+  assert isinstance(model.encoder.branches["image"], CNNEncoder)
+  assert isinstance(model.encoder.branches["proprio"], MLPEncoder)
+  assert isinstance(model.decoder.heads["image"], CNNDecoder)
+  assert isinstance(model.decoder.heads["proprio"], MLPDecoder)
 
 
 def test_dreamer_model_end_to_end_forward_shapes():
   cfg = _state_cfg()
   B, T, obs_dim, action_dim = 2, 4, 15, 6
-  model = build_model(cfg, obs_shape=(obs_dim,), action_dim=action_dim)
+  model = build_model(cfg, obs_shape={"state": (obs_dim,)}, action_dim=action_dim)
 
-  obs = torch.zeros(B, T, obs_dim)
+  obs = {"state": torch.zeros(B, T, obs_dim)}
   actions = torch.zeros(B, T, action_dim)
 
   embeds = model.encoder(obs)
@@ -288,7 +293,8 @@ def test_dreamer_model_end_to_end_forward_shapes():
   feat_dim = cfg.model.rssm.stoch_size + cfg.model.rssm.deter_size
   f = feat(states[-1])
   assert f.shape == (B, feat_dim)
-  assert model.decoder(f).shape == (B, obs_dim)
+  out = model.decoder(f)
+  assert out["state"].shape == (B, obs_dim)
   assert model.reward_head(f).shape == (B,)
   action, mean, std = model.actor(f)
   assert action.shape == (B, action_dim)
@@ -297,10 +303,10 @@ def test_dreamer_model_end_to_end_forward_shapes():
 
 def test_dreamer_model_rejects_unsupported_obs_mode():
   cfg = load_config()
-  cfg.env.obs_mode = "depth"
+  cfg.env.obs_mode = ["depth"]
   cfg.hardware.device = "cpu"
   with pytest.raises(ValueError):
-    build_model(cfg, obs_shape=(64, 64, 3), action_dim=7)
+    build_model(cfg, obs_shape={"image": (64, 64, 3)}, action_dim=7)
 
 
 # ---------------------------------------------------------------------------
@@ -310,28 +316,28 @@ def test_dreamer_model_rejects_unsupported_obs_mode():
 
 def test_aux_head_disabled_by_default():
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   assert model.aux_head is None
 
 
 def test_aux_head_built_when_aux_scale_positive():
   cfg = _state_cfg()
   cfg.training.losses.aux_scale = 1.0
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   assert isinstance(model.aux_head, AuxHead)
   assert model.aux_head.target_dim == int(cfg.model.aux.target_dim)
 
 
 def test_wm_update_runs_and_advances_params():
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   # Snapshot the encoder's first linear layer's weight.
   first_linear = next(p for p in model._wm_bundle.encoder.parameters())
   before = first_linear.detach().clone()
 
   B, T = 2, 4
   batch = {
-    "obs":    torch.randn(B, T, 5),
+    "obs":    {"state": torch.randn(B, T, 5)},
     "action": torch.randn(B, T, 6),
     "reward": torch.randn(B, T),
   }
@@ -344,10 +350,10 @@ def test_wm_update_runs_and_advances_params():
 def test_wm_update_with_aux_head_runs():
   cfg = _state_cfg()
   cfg.training.losses.aux_scale = 1.0
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   B, T = 2, 3
   batch = {
-    "obs":        torch.randn(B, T, 5),
+    "obs":        {"state": torch.randn(B, T, 5)},
     "action":     torch.randn(B, T, 6),
     "reward":     torch.randn(B, T),
     "aux_target": torch.randn(B, T, int(cfg.model.aux.target_dim)),
@@ -362,43 +368,43 @@ def test_wm_update_with_aux_head_runs():
 
 def test_save_load_round_trip_matches_forward_output(tmp_path):
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   f = torch.randn(3, cfg.model.rssm.stoch_size + cfg.model.rssm.deter_size)
-  out_before = model.decoder(f).detach().clone()
+  out_before = model.decoder(f)["state"].detach().clone()
 
   path = str(tmp_path / "ckpt.safetensors")
   model.save(path)
 
-  model2 = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model2 = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   # Different random init: outputs should differ before loading.
-  assert not torch.allclose(model.decoder(f), model2.decoder(f))
+  assert not torch.allclose(model.decoder(f)["state"], model2.decoder(f)["state"])
   model2.load(path)
-  assert torch.allclose(out_before, model2.decoder(f))
+  assert torch.allclose(out_before, model2.decoder(f)["state"])
 
 
 def test_save_embeds_config_yaml(tmp_path):
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   path = str(tmp_path / "ckpt.safetensors")
   model.save(path)
   loaded_cfg = load_config_from_checkpoint(path)
   assert loaded_cfg is not None
-  assert loaded_cfg.env.obs_mode == "state"
+  assert list(loaded_cfg.env.obs_mode) == ["state"]
 
 
 def test_save_extra_metadata_round_trips(tmp_path):
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   path = str(tmp_path / "ckpt.safetensors")
   model.save(path, extra_metadata={"iteration": "42"})
-  model2 = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model2 = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   extra = model2.load(path)
   assert extra == {"iteration": "42"}
 
 
 def test_save_extra_metadata_rejects_reserved_key(tmp_path):
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   path = str(tmp_path / "ckpt.safetensors")
   with pytest.raises(ValueError):
     model.save(path, extra_metadata={"config_yaml": "x"})
@@ -407,11 +413,11 @@ def test_save_extra_metadata_rejects_reserved_key(tmp_path):
 def test_aux_head_round_trips_through_save_load(tmp_path):
   cfg = _state_cfg()
   cfg.training.losses.aux_scale = 1.0
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   path = str(tmp_path / "ckpt.safetensors")
   model.save(path)
 
-  model2 = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model2 = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   model2.load(path)
   f = torch.zeros(3, cfg.model.rssm.stoch_size + cfg.model.rssm.deter_size)
   assert torch.allclose(model.aux_head(f), model2.aux_head(f))
@@ -434,7 +440,7 @@ def test_resolve_device_rejects_mlx():
 
 def test_model_params_live_on_resolved_device():
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
   any_param = next(model._wm_bundle.parameters())
   assert any_param.device.type == model.device.type
 
@@ -443,7 +449,7 @@ def test_encode_accepts_numpy_input():
   """The encoder helper should handle numpy obs at the boundary — useful
   for callers like CEMPolicy that move between numpy and the model."""
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape=(5,), action_dim=6)
-  emb = model.encode(np.zeros((2, 3, 5), dtype=np.float32))
+  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  emb = model.encode({"state": np.zeros((2, 3, 5), dtype=np.float32)})
   assert emb.shape == (2, 3, cfg.model.encoder.embed_size)
   assert emb.device.type == model.device.type

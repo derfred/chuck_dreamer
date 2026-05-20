@@ -120,6 +120,13 @@ _REAL_LINE_Y_FAR   =  _REAL_LINE_LENGTH / 2.0
 _REAL_CIRCLE_RING_SEGMENTS = 64
 _REAL_CIRCLE_RING_WIDTH    = 0.003   # 3 mm ring thickness
 
+# Per-episode randomisation of the mat's placement on the table. The pattern
+# is rigidly translated within this box (centred on the nominal mat origin) to
+# stop the policy memorising absolute positions. The "along" axis runs with
+# the painted lines (y); the "across" axis is perpendicular to them (x).
+_REAL_MAT_OFFSET_ALONG  = 0.050   # ±50 mm along the lines (y)
+_REAL_MAT_OFFSET_ACROSS = 0.025   # ±25 mm across the lines (x)
+
 # RGBA tuple for the "red" target color used in easy/medium difficulties.
 _RED_RGBA = [0.85, 0.15, 0.15, 1.0]
 
@@ -413,13 +420,22 @@ class SceneGenerator:
 
       mesh_options = list(_MESH_LIBRARY.keys())
 
+      # Per-episode mat offset: rigidly translate the whole pattern within a
+      # box around the nominal centre. Across = x (perpendicular to lines),
+      # along = y (parallel to lines).
+      mat_offset_x = float(rng.uniform(-_REAL_MAT_OFFSET_ACROSS, _REAL_MAT_OFFSET_ACROSS))
+      mat_offset_y = float(rng.uniform(-_REAL_MAT_OFFSET_ALONG,  _REAL_MAT_OFFSET_ALONG))
+      mat_centre_x = _REAL_MAT_CENTRE_X + mat_offset_x
+      line_y_near  = _REAL_LINE_Y_NEAR  + mat_offset_y
+      line_y_far   = _REAL_LINE_Y_FAR   + mat_offset_y
+
       # Mat layout — pattern rotated 90°: lines run along the y-axis, separated
       # along x by D. The circle sits between the +y endpoints; the camera is
       # fixed on the same +y side so the operator's view always frames it.
       half_sep = _REAL_LINE_SEPARATION / 2.0
-      line_x_left   = _REAL_MAT_CENTRE_X - half_sep
-      line_x_right  = _REAL_MAT_CENTRE_X + half_sep
-      circle_centre = (_REAL_MAT_CENTRE_X, _REAL_LINE_Y_FAR)
+      line_x_left   = mat_centre_x - half_sep
+      line_x_right  = mat_centre_x + half_sep
+      circle_centre = (mat_centre_x, line_y_far)
 
       # Target: rhombicuboctahedron, placed somewhere between the lines and
       # within the arm's reachable annulus.
@@ -427,7 +443,7 @@ class SceneGenerator:
       margin = 0.02
       for _ in range(64):
         tx = float(rng.uniform(line_x_left + margin, line_x_right - margin))
-        ty = float(rng.uniform(_REAL_LINE_Y_NEAR + margin, _REAL_LINE_Y_FAR - margin))
+        ty = float(rng.uniform(line_y_near + margin, line_y_far - margin))
         if _ARM_MIN_REACH <= math.hypot(tx - robot_base_pos[0], ty) <= _ARM_MAX_REACH:
           break
       mesh_tag = str(rng.choice(mesh_options))
@@ -453,7 +469,7 @@ class SceneGenerator:
       # ring of N tangent box segments (unfilled — matches the painted ring on
       # the physical mat). All live in the clutter list so the builder renders
       # them with contype=0.
-      line_cy = (_REAL_LINE_Y_NEAR + _REAL_LINE_Y_FAR) / 2.0
+      line_cy = (line_y_near + line_y_far) / 2.0
       line_cz = table_top_z + _REAL_MARKING_HALF_HEIGHT
       line_half_length = _REAL_LINE_LENGTH / 2.0
       line_half_width  = _REAL_LINE_WIDTH / 2.0
@@ -465,7 +481,7 @@ class SceneGenerator:
             size=[line_half_width, line_half_length, _REAL_MARKING_HALF_HEIGHT],
             mass=0.001,
             friction=0.5,
-            pos=[_REAL_MAT_CENTRE_X + sign * half_sep, line_cy, line_cz],
+            pos=[mat_centre_x + sign * half_sep, line_cy, line_cz],
             orientation=0.0,
             color=list(_REAL_MARKING_COLOR),
         ))
@@ -509,7 +525,7 @@ class SceneGenerator:
           by + cam_radius * math.sin(cam_angle),
           cam_height,
       ]
-      look_target = [_REAL_MAT_CENTRE_X, 0.0, table_top_z]
+      look_target = [mat_centre_x, mat_offset_y, table_top_z]
       camera = CameraConfig(pos=cam_pos, look_at=look_target, fov=70.0)
 
       lighting = LightingConfig(direction=[0.0, -0.5, -1.0], intensity=0.8, ambient=0.3)
@@ -531,6 +547,7 @@ class SceneGenerator:
           max_steps=150,
           control_dt=0.1,
           draw_goal_marker=False,
+          mat_centre=[mat_centre_x, mat_offset_y],
       )
 
   # ------------------------------------------------------------------

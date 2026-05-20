@@ -54,7 +54,8 @@ class OnlineEvaluator:
   def __init__(self, config, model):
     self.config     = config
     self.model      = model
-    self._obs_mode  = str(config.env.obs_mode)
+    from ..training.observation import normalize_obs_mode
+    self._obs_mode  = normalize_obs_mode(config.env.obs_mode)
     self._processor = processor_for(config)
     self._sources: list[_EvalSource] = []
     for src in config.eval.source:

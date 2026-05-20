@@ -304,8 +304,10 @@ class TestPushingEnv:
   def test_observation_space_state_mode(self, env):
     cfg = _make_simple_config()
     env.reset(scene=cfg)
-    # state = ee_pos(3) + ee_quat(4) + object_xy(2) + arm_qpos(n_joints)
-    assert env.observation_space.shape == (3 + 4 + 2 + len(cfg.joint_names),)
+    # state = object_xy(2) ‖ arm_qpos(n_joints) under the new vocabulary.
+    space = env.observation_space
+    assert set(space.spaces.keys()) == {"state"}
+    assert space["state"].shape == (2 + len(cfg.joint_names),)
 
   def test_render_returns_image(self, env):
     cfg = _make_simple_config()

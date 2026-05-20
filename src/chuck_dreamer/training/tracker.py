@@ -70,11 +70,12 @@ class Tracker:
     root._episode_writer.write_episode(
       episode_data,
       metadata={
-        "config":  asdict(scene),
-        "seed":    self.config.seed,
-        "source":  "collect",
-        "outcome": outcome,
-        "goal_xy": scene.goal_pos,
+        "config":     asdict(scene),
+        "seed":       self.config.seed,
+        "source":     "collect",
+        "outcome":    outcome,
+        "goal_xy":    scene.goal_pos,
+        "mat_centre": scene.mat_centre,
         **data,
       },
       name_suffix=f"{name}{number:03d}",

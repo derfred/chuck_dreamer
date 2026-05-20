@@ -188,7 +188,7 @@ def run_split_rollout(
   *,
   burn_in:        int,
   horizon:        int | None = None,
-  obs_mode:       str,
+  obs_mode:       Any,
   decode:         bool = True,
   predict_reward: bool = True,
 ) -> RolloutOutputs | None:

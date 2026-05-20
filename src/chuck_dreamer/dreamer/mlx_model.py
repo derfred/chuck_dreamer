@@ -8,7 +8,7 @@ import numpy as np
 from mlx.utils import tree_flatten, tree_unflatten
 from omegaconf import OmegaConf
 
-from ..training.observation import Observation
+from ..training.observation import IMAGE, Observation, normalize_obs_mode
 from .world_model import Distribution, State
 
 # Key under which the OmegaConf-serialized training config is stored in the
@@ -247,52 +247,60 @@ class CNNDecoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# image_proprio: combine a CNN image branch with an MLP proprio branch
+# Multi-modal encoder / decoder
 # ---------------------------------------------------------------------------
 
 
-class ImageProprioEncoder(nn.Module):
-  """Concat CNN(image) and MLP(proprio) features, project to ``embed_dim``."""
+class MultiModalEncoder(nn.Module):
+  """Per-component branches; concatenate the embeddings and fuse to ``embed_dim``.
 
-  def __init__(
-    self,
-    cnn: CNNEncoder,
-    proprio_dim: int,
-    proprio_hidden: tuple[int, ...],
-    embed_dim: int,
-  ):
+  Mirrors the torch backend's :class:`MultiModalEncoder`. With one
+  component the fuse layer is the identity; with N>1 the per-component
+  embeddings are concatenated and projected back to ``embed_dim``
+  through a Linear + LayerNorm — same recipe the old
+  ``ImageProprioEncoder`` used for N=2.
+  """
+
+  def __init__(self, branches: dict[str, nn.Module], embed_dim: int):
     super().__init__()
-    self.cnn         = cnn
-    self.proprio_mlp = _mlp(proprio_dim, proprio_hidden, embed_dim)
-    self.fuse        = nn.Linear(2 * embed_dim, embed_dim)
-    self.fuse_norm   = nn.LayerNorm(embed_dim)
+    if not branches:
+      raise ValueError("MultiModalEncoder needs at least one branch")
+    self._names: tuple[str, ...] = tuple(branches.keys())
+    # MLX has no ModuleDict; assign each branch as a plain attribute so
+    # nn.Module's tree-walk picks them up under stable, deterministic
+    # names. We sanitize the public component name to a safe attr name.
+    self._attrs: dict[str, str] = {n: f"b_{n}" for n in self._names}
+    for name, attr in self._attrs.items():
+      setattr(self, attr, branches[name])
+    n = len(self._names)
+    if n == 1:
+      self.fuse: nn.Module      = nn.Identity()
+      self.fuse_norm: nn.Module = nn.Identity()
+    else:
+      self.fuse      = nn.Linear(n * embed_dim, embed_dim)
+      self.fuse_norm = nn.LayerNorm(embed_dim)
 
   def __call__(self, obs: dict) -> mx.array:
-    img_feat = self.cnn(obs["image"])
-    pro_feat = self.proprio_mlp(obs["proprio"])
-    fused    = self.fuse(mx.concatenate([img_feat, pro_feat], axis=-1))
-    return cast(mx.array, self.fuse_norm(fused))
+    feats = [getattr(self, self._attrs[name])(obs[name]) for name in self._names]
+    if len(feats) == 1:
+      return cast(mx.array, feats[0])
+    return cast(mx.array, self.fuse_norm(self.fuse(mx.concatenate(feats, axis=-1))))
 
 
-class ImageProprioDecoder(nn.Module):
-  """Two-headed decoder: CNN reconstructs the image, MLP the proprio vector."""
+class MultiModalDecoder(nn.Module):
+  """Per-component reconstruction head; returns a dict of reconstructions."""
 
-  def __init__(
-    self,
-    feat_dim: int,
-    cnn: CNNDecoder,
-    proprio_hidden: tuple[int, ...],
-    proprio_dim: int,
-  ):
+  def __init__(self, heads: dict[str, nn.Module]):
     super().__init__()
-    self.cnn = cnn
-    self.proprio_mlp = _mlp(feat_dim, proprio_hidden, proprio_dim)
+    if not heads:
+      raise ValueError("MultiModalDecoder needs at least one head")
+    self._names: tuple[str, ...] = tuple(heads.keys())
+    self._attrs: dict[str, str] = {n: f"h_{n}" for n in self._names}
+    for name, attr in self._attrs.items():
+      setattr(self, attr, heads[name])
 
   def __call__(self, feat_in: mx.array) -> dict:
-    return {
-      "image":   self.cnn(feat_in),
-      "proprio": self.proprio_mlp(feat_in),
-    }
+    return {name: getattr(self, self._attrs[name])(feat_in) for name in self._names}
 
 
 # ---------------------------------------------------------------------------
@@ -582,62 +590,52 @@ class DreamerMLXModel:
     self.stoch_dim  = int(config.model.rssm.stoch_size)
     self.deter_dim  = int(config.model.rssm.deter_size)
 
-    self.obs_mode = config.env.obs_mode
+    self.obs_mode = normalize_obs_mode(config.env.obs_mode)
+
+    if not isinstance(obs_shape, dict):
+      raise ValueError(
+        f"obs_shape must be a dict keyed by component name; got {type(obs_shape).__name__}"
+      )
+    missing = [c for c in self.obs_mode if c not in obs_shape]
+    if missing:
+      raise ValueError(f"obs_shape missing components {missing!r} (mode={self.obs_mode!r})")
 
     enc_hidden = tuple(config.model.encoder.mlp_hidden)
     dec_hidden = tuple(config.model.decoder.mlp_hidden)
     embed_size = int(config.model.encoder.embed_size)
 
-    if self.obs_mode == "state":
-      if not (isinstance(obs_shape, tuple) and len(obs_shape) == 1):
-        raise ValueError(f"state obs_mode expects 1-D obs_shape; got {obs_shape}")
-      obs_dim          = int(obs_shape[0])
-      self.encoder     = MLPEncoder(obs_dim, enc_hidden, embed_size)
-      self.decoder     = MLPDecoder(self.feat_dim, dec_hidden, obs_dim)
-      self.image_size  = None
-      self.proprio_dim = None
-
-    elif self.obs_mode in ("image", "image_proprio"):
+    if IMAGE in self.obs_mode:
       enc_channels    = tuple(config.model.encoder.cnn_channels)
       enc_kernels     = tuple(config.model.encoder.cnn_kernels)
       enc_strides     = tuple(config.model.encoder.cnn_strides)
       dec_channels    = tuple(config.model.decoder.cnn_channels)
       dec_kernels     = tuple(config.model.decoder.cnn_kernels)
       dec_strides     = tuple(config.model.decoder.cnn_strides)
-      image_size      = int(config.model.encoder.image_size)
-      self.image_size = image_size
-
-      if self.obs_mode == "image":
-        # obs_shape is the image shape (H, W, 3); 3-D ndarray.
-        if not (isinstance(obs_shape, tuple) and len(obs_shape) == 3):
-          raise ValueError(f"image obs_mode expects 3-D obs_shape; got {obs_shape}")
-        in_channels = int(obs_shape[2])
-        self.encoder = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
-                                  embed_dim=embed_size, image_size=image_size)
-        self.decoder = CNNDecoder(self.feat_dim, dec_channels, dec_kernels, dec_strides,
-                                  out_channels=in_channels, image_size=image_size)
-        self.proprio_dim = None
-
-      else:  # image_proprio
-        # obs_shape is a dict-like {"image": (H,W,3), "proprio": (P,)}.
-        if not (hasattr(obs_shape, "__getitem__") and "image" in obs_shape and "proprio" in obs_shape):
-          raise ValueError(
-            f"image_proprio obs_mode expects shape dict with 'image' and 'proprio' keys; got {obs_shape}"
-          )
-        img_shape        = tuple(obs_shape["image"])
-        pro_shape        = tuple(obs_shape["proprio"])
-        in_channels      = int(img_shape[2])
-        proprio_dim      = int(pro_shape[0])
-        self.proprio_dim = proprio_dim
-        cnn_enc          = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
-                                      embed_dim=embed_size, image_size=image_size)
-        cnn_dec          = CNNDecoder(self.feat_dim, dec_channels, dec_kernels, dec_strides,
-                                      out_channels=in_channels, image_size=image_size)
-        self.encoder     = ImageProprioEncoder(cnn_enc, proprio_dim, enc_hidden, embed_size)
-        self.decoder     = ImageProprioDecoder(self.feat_dim, cnn_dec, dec_hidden, proprio_dim)
-
+      self.image_size = int(config.model.encoder.image_size)
     else:
-      raise ValueError(f"unknown obs_mode={self.obs_mode!r}")
+      self.image_size = None
+
+    enc_branches: dict[str, nn.Module] = {}
+    dec_heads:    dict[str, nn.Module] = {}
+    for c in self.obs_mode:
+      shape = tuple(obs_shape[c])
+      if c == IMAGE:
+        if len(shape) != 3:
+          raise ValueError(f"image component expects (H, W, C) shape; got {shape}")
+        in_channels = int(shape[2])
+        enc_branches[c] = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
+                                     embed_dim=embed_size, image_size=self.image_size)
+        dec_heads[c] = CNNDecoder(self.feat_dim, dec_channels, dec_kernels, dec_strides,
+                                  out_channels=in_channels, image_size=self.image_size)
+      else:
+        if len(shape) != 1:
+          raise ValueError(f"vector component {c!r} expects 1-D shape; got {shape}")
+        vec_dim = int(shape[0])
+        enc_branches[c] = MLPEncoder(vec_dim, enc_hidden, embed_size)
+        dec_heads[c]    = MLPDecoder(self.feat_dim, dec_hidden, vec_dim)
+
+    self.encoder = MultiModalEncoder(enc_branches, embed_dim=embed_size)
+    self.decoder = MultiModalDecoder(dec_heads)
 
     self.rssm = RSSM(
       action_dim=action_dim,
@@ -731,27 +729,28 @@ class DreamerMLXModel:
     return cast(mx.array, mx.broadcast_to(x, shape))
 
   def _recon_loss(self, recon: Observation, target: Observation) -> mx.array:
-    """Reconstruction loss appropriate for the configured ``obs_mode``.
+    """Sum of per-component reconstruction losses.
 
-    ``recon`` and ``target`` are both :class:`Observation` instances in
-    the same mode (state / image / image_proprio). Image fields arrive
-    pre-normalized (``[-0.5, 0.5]``) so the decoder output and target
-    already share a scale. ``target.focus_mask``, when present, weights
-    image-pixel errors by ``1 + focus_scale * mask``.
+    Image components use pixelwise MSE with optional focus-mask
+    weighting (``1 + focus_scale * mask`` over the spatial axes).
+    Vector components use plain MSE summed over the feature axis.
+    Image fields arrive pre-normalized so the decoder output and target
+    already share a scale.
     """
-    if target.mode == "state":
-      return cast(mx.array, ((recon.state - target.state) ** 2).sum(-1).mean())
-    diff = (recon.image - target.image) ** 2
-    if target.focus_mask is not None:
-      # focus_mask is (B, T, H, W); add trailing axis to broadcast over channels.
-      diff = diff * (1 + self.config.training.losses.focus_scale * target.focus_mask[..., None])
-    img_loss = diff.sum(axis=(-3, -2, -1)).mean()
-    if target.mode == "image":
-      return cast(mx.array, img_loss)
-    if target.mode == "image_proprio":
-      pro_loss = ((recon.proprio - target.proprio) ** 2).sum(-1).mean()
-      return cast(mx.array, img_loss + pro_loss)
-    raise ValueError(f"unknown obs mode: {target.mode!r}")
+    total: mx.array | None = None
+    for name in target.components:
+      r = recon.components[name]
+      t = target.components[name]
+      if name == IMAGE:
+        diff = (r - t) ** 2
+        if target.focus_mask is not None:
+          diff = diff * (1 + self.config.training.losses.focus_scale * target.focus_mask[..., None])
+        loss = diff.sum(axis=(-3, -2, -1)).mean()
+      else:
+        loss = ((r - t) ** 2).sum(-1).mean()
+      total = loss if total is None else total + loss
+    assert total is not None
+    return cast(mx.array, total)
 
   def _wm_loss_fn(self, wm_modules, batch):
     # Wrap once: (B, T, ...) numpy/tensor from the buffer becomes an

@@ -1,36 +1,72 @@
 """PyTorch implementation of the Dreamer v1 world model.
 
-Mirrors :mod:`.mlx_model`: same module structure (encoder / decoder / RSSM
-/ reward / actor / critic / optional aux) and the same checkpoint schema
-embedded in safetensors metadata. The public surface implements the
+Mirrors :mod:`.mlx_model`: same module structure (encoder / decoder /
+RSSM / reward / actor / critic / optional aux) and the same on-disk
+checkpoint format. The public surface implements the
 :class:`~chuck_dreamer.dreamer.world_model.WorldModel` protocol so
 :func:`~chuck_dreamer.dreamer.world_model.rollout` composes against it
 unchanged.
 
-Cross-backend incompatibilities — these are known and intentional. The
-MLX and PyTorch checkpoints are NOT interchangeable. Items to resolve if
-cross-backend portability becomes required:
+On-disk format vs. torch's default ``state_dict``
+-------------------------------------------------
 
-  * Conv2d weight layout. PyTorch's nn.Conv2d weight is
-    ``(C_out, C_in, kH, kW)``; MLX's is ``(C_out, kH, kW, C_in)``. Same for
-    ConvTranspose2d. A loader would need to permute conv weights on
-    cross-backend reads.
-  * Image tensor layout. PyTorch convs are NCHW natively; MLX is NHWC.
-    This backend transposes at the encoder input and decoder output so
-    the public surface stays NHWC, matching the MLX backend and the
-    replay buffer. Trajectories produced by either backend have
-    identical shapes.
-  * GRU implementation. MLX uses ``nn.GRU`` driven with ``(B, 1, D)``
-    inputs; this backend uses ``nn.GRUCell`` which takes ``(B, D)``
-    directly. Weights map across (W_ih, W_hh, b_ih, b_hh) but the
-    parameter names differ.
-  * Parameter initialization. Default inits differ between mlx.nn and
-    torch.nn — randomness in weight scale propagates to the first few
-    training steps. Long-run training is unaffected.
-  * Save format. Both use ``.safetensors``, but the key prefixes
-    (``wm.rssm.gru.weight_ih`` vs ``wm.rssm.gru.Wx``) come from the
-    framework's own state_dict / tree_flatten output. Cross-backend
-    loaders would need a key translation table.
+:meth:`DreamerTorchModel.save` does NOT write a plain torch state_dict.
+It writes the MLX-format flat key dict (see :mod:`.mlx_model`) so the
+two backends share one ``.safetensors`` schema. A torch-saved
+checkpoint loads under MLX and vice versa. The deviations from what
+``self._wm_bundle.state_dict()`` would produce:
+
+  * **Sequential children get an extra ``layers`` segment.** MLX's
+    ``nn.Sequential`` exposes children under ``layers.N``; torch
+    exposes them as ``N``. We insert ``layers`` on save and strip it
+    on load. e.g. torch ``convs.0.weight`` ↔ disk
+    ``convs.layers.0.weight``.
+
+  * **``MultiModalEncoder.branches`` / ``MultiModalDecoder.heads`` are
+    flattened.** Torch wraps the per-component sub-modules in an
+    ``nn.ModuleDict`` (`encoder.branches.<name>`); MLX has no
+    ModuleDict and stores them as plain attributes named ``b_<name>``
+    / ``h_<name>``. The ModuleDict level is collapsed on disk.
+
+  * **``_ChannelLayerNorm`` is unwrapped.** This module is a torch-only
+    NCHW→NHWC→LN→NHWC→NCHW shim around ``nn.LayerNorm`` that the MLX
+    backend does not need (its convs are NHWC native). We hoist the
+    inner ``nn.LayerNorm`` weights onto the wrapper's path so the leaf
+    matches MLX's bare ``nn.LayerNorm`` on the channel axis.
+
+  * **Conv weights are permuted.** torch ``Conv2d`` weights are
+    ``(C_out, C_in, kH, kW)`` and ``ConvTranspose2d`` weights are
+    ``(C_in, C_out, kH, kW)``; both backends store NHWC-style
+    ``(C_out, kH, kW, C_in)`` on disk. Bias tensors are unchanged.
+
+  * **GRU is repacked.** torch ``nn.GRUCell`` carries four parameter
+    tensors ``{weight_ih, weight_hh, bias_ih, bias_hh}``. MLX
+    ``nn.GRU`` carries ``{Wx, Wh, b, bhn}``: ``Wx=weight_ih``,
+    ``Wh=weight_hh``, and the (r, z) biases are folded into a single
+    ``b`` because the MLX forward has no hidden-side bias on those
+    gates. We sum on save (``b[r] = bias_ih[r] + bias_hh[r]``, same
+    for z) and on load put the entire sum into ``bias_ih`` with
+    ``bias_hh`` zeroed for those rows. The forward pass is invariant
+    to this split.
+
+  * **Image tensors are NHWC at every public/disk boundary.** The
+    torch convs run NCHW internally, but the encoder transposes back
+    to NHWC before the projection (and the decoder reshapes from NHWC
+    after the projection) so ``proj.weight`` is bit-for-bit
+    interchangeable across backends. Without that extra transpose the
+    flat projection slot would mean (c, h, w) on torch but (h, w, c)
+    on MLX, and shared weights would diverge.
+
+  * **Optimizer state is not written.** The MLX backend persists Adam
+    state under ``opt_*`` prefixes; torch's optimizer state has no
+    matching tree layout, so we omit it. Resuming a torch training run
+    from a checkpoint reinitializes the optimizer.
+
+Translation lives in :meth:`DreamerTorchModel._iter_mlx_state` (save)
+and :meth:`DreamerTorchModel._apply_mlx_state` (load), with the
+module-walk rules and the GRU/conv tensor reshapes factored into the
+``_iter_mlx_children``, ``_torch_grucell_to_mlx``, and
+``_mlx_to_torch_grucell`` helpers below.
 """
 
 from __future__ import annotations
@@ -46,7 +82,7 @@ from omegaconf import OmegaConf
 from safetensors.torch import load_file as _st_load_file
 from safetensors.torch import save_file as _st_save_file
 
-from ..training.observation import Observation
+from ..training.observation import IMAGE, Observation, normalize_obs_mode
 from .world_model import Distribution, State
 
 # Same key as the MLX backend so the YAML round-trip stays consistent
@@ -239,6 +275,12 @@ class CNNEncoder(nn.Module):
     x = x.reshape(-1, H, W, C)
     x = x.permute(0, 3, 1, 2).contiguous()           # NHWC -> NCHW
     x = self.convs(x)
+    # Flatten in NHWC order before the projection so the linear sees the
+    # same channel layout as the MLX backend (which never leaves NHWC).
+    # Without this, ``proj.weight`` columns would map to a different
+    # (c, h, w) ordering across backends and the same on-disk weights
+    # would produce different embeddings.
+    x = x.permute(0, 2, 3, 1).contiguous()           # NCHW -> NHWC
     x = x.reshape(x.shape[0], -1)
     x = self.proj_norm(self.proj(x))
     return cast(torch.Tensor, x.reshape(*lead, -1))
@@ -296,7 +338,12 @@ class CNNDecoder(nn.Module):
   def forward(self, feat_in: torch.Tensor) -> torch.Tensor:
     lead = feat_in.shape[:-1]
     x = self.proj(feat_in)
-    x = x.reshape(-1, self._init_channels, self._init_spatial, self._init_spatial)  # NCHW
+    # Match the MLX backend's reshape ordering: interpret the projection
+    # output as NHWC and permute into NCHW for the deconv stack. This
+    # keeps ``proj.weight`` rows tied to the same (h, w, c) ordering on
+    # both backends so the same on-disk weights produce the same image.
+    x = x.reshape(-1, self._init_spatial, self._init_spatial, self._init_channels)  # NHWC
+    x = x.permute(0, 3, 1, 2).contiguous()                                            # NHWC -> NCHW
     x = self.deconvs(x)
     # NCHW -> NHWC for the public boundary.
     x = x.permute(0, 2, 3, 1).contiguous()
@@ -305,52 +352,56 @@ class CNNDecoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# image_proprio: combine a CNN image branch with an MLP proprio branch
+# Multi-modal encoder / decoder
 # ---------------------------------------------------------------------------
 
 
-class ImageProprioEncoder(nn.Module):
-  """Concat CNN(image) and MLP(proprio) features, project to ``embed_dim``."""
+class MultiModalEncoder(nn.Module):
+  """Per-component branches; concatenate the embeddings and fuse to ``embed_dim``.
 
-  def __init__(
-    self,
-    cnn: CNNEncoder,
-    proprio_dim: int,
-    proprio_hidden: tuple[int, ...],
-    embed_dim: int,
-  ):
+  Each component name maps to a sub-module that takes that component's
+  array and returns an ``(..., embed_dim)`` tensor. With a single
+  component the fuse layer is the identity (no extra Linear); with N>1
+  components a ``Linear(N*embed_dim → embed_dim) + LayerNorm`` mixes
+  them — same recipe the old ``ImageProprioEncoder`` used for N=2.
+  """
+
+  def __init__(self, branches: dict[str, nn.Module], embed_dim: int):
     super().__init__()
-    self.cnn         = cnn
-    self.proprio_mlp = _mlp(proprio_dim, proprio_hidden, embed_dim)
-    self.fuse        = nn.Linear(2 * embed_dim, embed_dim)
-    self.fuse_norm   = nn.LayerNorm(embed_dim)
+    if not branches:
+      raise ValueError("MultiModalEncoder needs at least one branch")
+    # Sorted by config order, but Python 3.7+ dicts preserve insertion
+    # order — preserve the order the caller passed so the fuse layer's
+    # input slots are deterministic across runs.
+    self._names: tuple[str, ...] = tuple(branches.keys())
+    self.branches = nn.ModuleDict(branches)
+    n = len(self._names)
+    if n == 1:
+      self.fuse: nn.Module     = nn.Identity()
+      self.fuse_norm: nn.Module = nn.Identity()
+    else:
+      self.fuse      = nn.Linear(n * embed_dim, embed_dim)
+      self.fuse_norm = nn.LayerNorm(embed_dim)
 
   def forward(self, obs: dict) -> torch.Tensor:
-    img_feat = self.cnn(obs["image"])
-    pro_feat = self.proprio_mlp(obs["proprio"])
-    fused    = self.fuse(torch.cat([img_feat, pro_feat], dim=-1))
-    return cast(torch.Tensor, self.fuse_norm(fused))
+    feats = [self.branches[name](obs[name]) for name in self._names]
+    if len(feats) == 1:
+      return cast(torch.Tensor, feats[0])
+    return cast(torch.Tensor, self.fuse_norm(self.fuse(torch.cat(feats, dim=-1))))
 
 
-class ImageProprioDecoder(nn.Module):
-  """Two-headed decoder: CNN reconstructs the image, MLP the proprio vector."""
+class MultiModalDecoder(nn.Module):
+  """Per-component reconstruction head; returns a dict of reconstructions."""
 
-  def __init__(
-    self,
-    feat_dim: int,
-    cnn: CNNDecoder,
-    proprio_hidden: tuple[int, ...],
-    proprio_dim: int,
-  ):
+  def __init__(self, heads: dict[str, nn.Module]):
     super().__init__()
-    self.cnn = cnn
-    self.proprio_mlp = _mlp(feat_dim, proprio_hidden, proprio_dim)
+    if not heads:
+      raise ValueError("MultiModalDecoder needs at least one head")
+    self._names: tuple[str, ...] = tuple(heads.keys())
+    self.heads = nn.ModuleDict(heads)
 
   def forward(self, feat_in: torch.Tensor) -> dict:
-    return {
-      "image":   self.cnn(feat_in),
-      "proprio": self.proprio_mlp(feat_in),
-    }
+    return {name: self.heads[name](feat_in) for name in self._names}
 
 
 # ---------------------------------------------------------------------------
@@ -602,61 +653,53 @@ class DreamerTorchModel:
 
     self.device = resolve_device(config.hardware.device)
 
-    obs_mode = config.env.obs_mode
-    self.obs_mode = obs_mode
+    self.obs_mode = normalize_obs_mode(config.env.obs_mode)
+
+    if not isinstance(obs_shape, dict):
+      raise ValueError(
+        f"obs_shape must be a dict keyed by component name; got {type(obs_shape).__name__}"
+      )
+    missing = [c for c in self.obs_mode if c not in obs_shape]
+    if missing:
+      raise ValueError(f"obs_shape missing components {missing!r} (mode={self.obs_mode!r})")
 
     enc_hidden = tuple(config.model.encoder.mlp_hidden)
     dec_hidden = tuple(config.model.decoder.mlp_hidden)
     embed_size = int(config.model.encoder.embed_size)
 
-    if obs_mode == "state":
-      if not (isinstance(obs_shape, tuple) and len(obs_shape) == 1):
-        raise ValueError(f"state obs_mode expects 1-D obs_shape; got {obs_shape}")
-      obs_dim          = int(obs_shape[0])
-      self.encoder     = MLPEncoder(obs_dim, enc_hidden, embed_size)
-      self.decoder     = MLPDecoder(self.feat_dim, dec_hidden, obs_dim)
-      self.image_size  = None
-      self.proprio_dim = None
-
-    elif obs_mode in ("image", "image_proprio"):
+    # CNN params only consulted when an image component is present.
+    if IMAGE in self.obs_mode:
       enc_channels    = tuple(config.model.encoder.cnn_channels)
       enc_kernels     = tuple(config.model.encoder.cnn_kernels)
       enc_strides     = tuple(config.model.encoder.cnn_strides)
       dec_channels    = tuple(config.model.decoder.cnn_channels)
       dec_kernels     = tuple(config.model.decoder.cnn_kernels)
       dec_strides     = tuple(config.model.decoder.cnn_strides)
-      image_size      = int(config.model.encoder.image_size)
-      self.image_size = image_size
-
-      if obs_mode == "image":
-        if not (isinstance(obs_shape, tuple) and len(obs_shape) == 3):
-          raise ValueError(f"image obs_mode expects 3-D obs_shape; got {obs_shape}")
-        in_channels = int(obs_shape[2])
-        self.encoder = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
-                                  embed_dim=embed_size, image_size=image_size)
-        self.decoder = CNNDecoder(self.feat_dim, dec_channels, dec_kernels, dec_strides,
-                                  out_channels=in_channels, image_size=image_size)
-        self.proprio_dim = None
-
-      else:  # image_proprio
-        if not (hasattr(obs_shape, "__getitem__") and "image" in obs_shape and "proprio" in obs_shape):
-          raise ValueError(
-            f"image_proprio obs_mode expects shape dict with 'image' and 'proprio' keys; got {obs_shape}"
-          )
-        img_shape        = tuple(obs_shape["image"])
-        pro_shape        = tuple(obs_shape["proprio"])
-        in_channels      = int(img_shape[2])
-        proprio_dim      = int(pro_shape[0])
-        self.proprio_dim = proprio_dim
-        cnn_enc          = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
-                                      embed_dim=embed_size, image_size=image_size)
-        cnn_dec          = CNNDecoder(self.feat_dim, dec_channels, dec_kernels, dec_strides,
-                                      out_channels=in_channels, image_size=image_size)
-        self.encoder     = ImageProprioEncoder(cnn_enc, proprio_dim, enc_hidden, embed_size)
-        self.decoder     = ImageProprioDecoder(self.feat_dim, cnn_dec, dec_hidden, proprio_dim)
-
+      self.image_size = int(config.model.encoder.image_size)
     else:
-      raise ValueError(f"unknown obs_mode={obs_mode!r}")
+      self.image_size = None
+
+    enc_branches: dict[str, nn.Module] = {}
+    dec_heads:    dict[str, nn.Module] = {}
+    for c in self.obs_mode:
+      shape = tuple(obs_shape[c])
+      if c == IMAGE:
+        if len(shape) != 3:
+          raise ValueError(f"image component expects (H, W, C) shape; got {shape}")
+        in_channels = int(shape[2])
+        enc_branches[c] = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
+                                     embed_dim=embed_size, image_size=self.image_size)
+        dec_heads[c] = CNNDecoder(self.feat_dim, dec_channels, dec_kernels, dec_strides,
+                                  out_channels=in_channels, image_size=self.image_size)
+      else:
+        if len(shape) != 1:
+          raise ValueError(f"vector component {c!r} expects 1-D shape; got {shape}")
+        vec_dim = int(shape[0])
+        enc_branches[c] = MLPEncoder(vec_dim, enc_hidden, embed_size)
+        dec_heads[c]    = MLPDecoder(self.feat_dim, dec_hidden, vec_dim)
+
+    self.encoder = MultiModalEncoder(enc_branches, embed_dim=embed_size)
+    self.decoder = MultiModalDecoder(dec_heads)
 
     self.rssm = RSSM(
       action_dim=action_dim,
@@ -767,22 +810,28 @@ class DreamerTorchModel:
   # ---------------------------------------------------------------------
 
   def _recon_loss(self, recon: Observation, target: Observation) -> torch.Tensor:
-    # ``recon`` and ``target`` are both Observations in the same mode.
-    # Image fields arrive pre-normalized (``[-0.5, 0.5]``) so the decoder
-    # output and target share a scale. ``target.focus_mask`` (B, T, H, W)
-    # multiplies image-pixel errors by ``1 + focus_scale * mask``.
-    if target.mode == "state":
-      return cast(torch.Tensor, ((recon.state - target.state) ** 2).sum(-1).mean())
-    diff = (recon.image - target.image) ** 2
-    if target.focus_mask is not None:
-      diff = diff * (1 + self.config.training.losses.focus_scale * target.focus_mask[..., None])
-    img_loss = diff.sum(dim=(-3, -2, -1)).mean()
-    if target.mode == "image":
-      return cast(torch.Tensor, img_loss)
-    if target.mode == "image_proprio":
-      pro_loss = ((recon.proprio - target.proprio) ** 2).sum(-1).mean()
-      return cast(torch.Tensor, img_loss + pro_loss)
-    raise ValueError(f"unknown obs mode: {target.mode!r}")
+    """Sum of per-component reconstruction losses.
+
+    Image components use pixelwise MSE with optional focus-mask
+    weighting (``1 + focus_scale * mask`` over the spatial axes).
+    Vector components use plain MSE summed over the feature axis.
+    Both backends produce float reconstructions matching the encoder's
+    pre-normalized image range.
+    """
+    total: torch.Tensor | None = None
+    for name in target.components:
+      r = recon.components[name]
+      t = target.components[name]
+      if name == IMAGE:
+        diff = (r - t) ** 2
+        if target.focus_mask is not None:
+          diff = diff * (1 + self.config.training.losses.focus_scale * target.focus_mask[..., None])
+        loss = diff.sum(dim=(-3, -2, -1)).mean()
+      else:
+        loss = ((r - t) ** 2).sum(-1).mean()
+      total = loss if total is None else total + loss
+    assert total is not None  # from_components rejects empty dicts
+    return cast(torch.Tensor, total)
 
   def _move_batch(self, batch: dict) -> dict:
     """Move every leaf in ``batch`` to ``self.device``. Image leaves stay
@@ -885,42 +934,125 @@ class DreamerTorchModel:
     return aux["post_states"]
 
   # ---------------------------------------------------------------------
-  # Persistence
+  # Persistence — MLX-compatible on-disk format
   # ---------------------------------------------------------------------
+  #
+  # See the module docstring for the full translation table. The two
+  # helpers below are the single source of truth for the mapping; both
+  # save/load and any future format-debugging tool go through them.
 
-  def _named_param_dict(self) -> dict[str, torch.Tensor]:
-    """Flat ``{prefix.name: tensor}`` snapshot of all trainable params.
+  def _iter_mlx_state(self) -> dict[str, torch.Tensor]:
+    """Snapshot all trainable params as MLX-format flat keys.
 
-    Keys mirror the MLX backend's prefixes (``wm.*``, ``actor.*``,
-    ``critic.*``) but the trailing portion is the torch state_dict path,
-    e.g. ``wm.rssm.gru.weight_ih`` rather than ``wm.rssm.gru.Wx``.
+    Walks the torch module tree top-down, translating each segment to
+    its MLX equivalent and permuting/splitting per-leaf-module as
+    needed. Returns a flat ``{mlx_key: cpu_tensor}`` dict ready for
+    safetensors.
     """
     out: dict[str, torch.Tensor] = {}
     for prefix, module in (("wm", self._wm_bundle),
                            ("actor",  self.actor),
                            ("critic", self.critic)):
-      for k, v in module.state_dict().items():
-        out[f"{prefix}.{k}"] = v.detach().cpu().contiguous()
+      self._collect_mlx_state(prefix, module, out)
     return out
 
-  def _load_named_params(self, weights: dict[str, torch.Tensor]) -> None:
-    def take(prefix: str) -> dict[str, torch.Tensor]:
-      plen = len(prefix) + 1
-      return {k[plen:]: v for k, v in weights.items() if k.startswith(prefix + ".")}
+  def _collect_mlx_state(
+    self, prefix: str, module: nn.Module, out: dict[str, torch.Tensor],
+  ) -> None:
+    # Direct parameters on this module.
+    for name, p in module.named_parameters(recurse=False):
+      key = f"{prefix}.{name}"
+      out[key] = p.detach().cpu().contiguous()
+    # Then descend into children. For each child, compute its MLX path
+    # segment(s) and dispatch by leaf type.
+    for child_name, child in _iter_mlx_children(module):
+      qualified = f"{prefix}.{child_name}" if child_name else prefix
+      if isinstance(child, nn.Conv2d):
+        out[f"{qualified}.weight"] = child.weight.detach().cpu().permute(0, 2, 3, 1).contiguous()
+        if child.bias is not None:
+          out[f"{qualified}.bias"] = child.bias.detach().cpu().contiguous()
+      elif isinstance(child, nn.ConvTranspose2d):
+        out[f"{qualified}.weight"] = child.weight.detach().cpu().permute(1, 2, 3, 0).contiguous()
+        if child.bias is not None:
+          out[f"{qualified}.bias"] = child.bias.detach().cpu().contiguous()
+      elif isinstance(child, nn.GRUCell):
+        Wx, Wh, b, bhn = _torch_grucell_to_mlx(child)
+        out[f"{qualified}.Wx"]  = Wx
+        out[f"{qualified}.Wh"]  = Wh
+        out[f"{qualified}.b"]   = b
+        out[f"{qualified}.bhn"] = bhn
+      elif isinstance(child, _ChannelLayerNorm):
+        # The wrapper has a single sub-LayerNorm; MLX stores it bare so
+        # we hoist the inner weights to the wrapper's path.
+        ln = child.norm
+        out[f"{qualified}.weight"] = ln.weight.detach().cpu().contiguous()
+        out[f"{qualified}.bias"]   = ln.bias.detach().cpu().contiguous()
+      else:
+        self._collect_mlx_state(qualified, child, out)
 
-    self._wm_bundle.load_state_dict(take("wm"))
-    self.actor.load_state_dict(take("actor"))
-    self.critic.load_state_dict(take("critic"))
+  def _apply_mlx_state(self, weights: dict[str, torch.Tensor]) -> None:
+    """Inverse of :meth:`_iter_mlx_state` — populate torch modules from
+    an MLX-format flat dict.
+    """
+    for prefix, module in (("wm", self._wm_bundle),
+                           ("actor",  self.actor),
+                           ("critic", self.critic)):
+      self._scatter_mlx_state(prefix, module, weights)
     self._wm_bundle.to(self.device)
     self.actor.to(self.device)
     self.critic.to(self.device)
 
+  def _scatter_mlx_state(
+    self, prefix: str, module: nn.Module, weights: dict[str, torch.Tensor],
+  ) -> None:
+    with torch.no_grad():
+      for name, p in module.named_parameters(recurse=False):
+        src = weights[f"{prefix}.{name}"]
+        p.copy_(src.to(p.device, dtype=p.dtype))
+      for child_name, child in _iter_mlx_children(module):
+        qualified = f"{prefix}.{child_name}" if child_name else prefix
+        if isinstance(child, nn.Conv2d):
+          w = weights[f"{qualified}.weight"].permute(0, 3, 1, 2).contiguous()
+          child.weight.copy_(w.to(child.weight.device, dtype=child.weight.dtype))
+          if child.bias is not None:
+            child.bias.copy_(
+              weights[f"{qualified}.bias"].to(child.bias.device, dtype=child.bias.dtype)
+            )
+        elif isinstance(child, nn.ConvTranspose2d):
+          w = weights[f"{qualified}.weight"].permute(3, 0, 1, 2).contiguous()
+          child.weight.copy_(w.to(child.weight.device, dtype=child.weight.dtype))
+          if child.bias is not None:
+            child.bias.copy_(
+              weights[f"{qualified}.bias"].to(child.bias.device, dtype=child.bias.dtype)
+            )
+        elif isinstance(child, nn.GRUCell):
+          _mlx_to_torch_grucell(
+            child,
+            Wx  = weights[f"{qualified}.Wx"],
+            Wh  = weights[f"{qualified}.Wh"],
+            b   = weights[f"{qualified}.b"],
+            bhn = weights[f"{qualified}.bhn"],
+          )
+        elif isinstance(child, _ChannelLayerNorm):
+          ln = child.norm
+          ln.weight.copy_(
+            weights[f"{qualified}.weight"].to(ln.weight.device, dtype=ln.weight.dtype)
+          )
+          ln.bias.copy_(
+            weights[f"{qualified}.bias"].to(ln.bias.device, dtype=ln.bias.dtype)
+          )
+        else:
+          self._scatter_mlx_state(qualified, child, weights)
+
   def save(self, path: str, extra_metadata: dict[str, str] | None = None) -> None:
     """Persist weights to a safetensors file with the training config in
-    metadata. Optimizer state is NOT included.
+    metadata.
+
+    The on-disk key layout matches the MLX backend (see module docstring);
+    optimizer state is NOT included.
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    weights = self._named_param_dict()
+    weights = self._iter_mlx_state()
     metadata = {CONFIG_METADATA_KEY: OmegaConf.to_yaml(self.config, resolve=True)}
     if extra_metadata:
       if CONFIG_METADATA_KEY in extra_metadata:
@@ -929,12 +1061,114 @@ class DreamerTorchModel:
     _st_save_file(weights, path, metadata=metadata)
 
   def load(self, path: str) -> dict[str, str]:
-    """Load weights written by :meth:`save`. Returns the caller-supplied
-    ``extra_metadata`` dict that was passed at save time.
+    """Load weights written by :meth:`save` (or by the MLX backend).
+    Returns the caller-supplied ``extra_metadata`` dict that was passed
+    at save time.
     """
     from safetensors import safe_open
     weights: dict[str, torch.Tensor] = _st_load_file(path)
     with safe_open(path, framework="pt") as f:
       meta = f.metadata() or {}
-    self._load_named_params(weights)
+    self._apply_mlx_state(weights)
     return {k: v for k, v in meta.items() if k != CONFIG_METADATA_KEY}
+
+
+# ---------------------------------------------------------------------------
+# MLX-format translation helpers (module-level so they can be tested
+# independently of model state).
+# ---------------------------------------------------------------------------
+
+
+def _iter_mlx_children(module: nn.Module):
+  """Yield ``(mlx_segment, child_module)`` pairs for the MLX-layout walk.
+
+  Three cases diverge from ``module.named_children()``:
+
+    * ``nn.Sequential`` wraps its numeric children under a ``layers``
+      attribute in MLX, so we emit ``layers.<i>`` instead of ``<i>``.
+    * ``MultiModalEncoder.branches`` (``nn.ModuleDict``) entries are
+      individual ``b_<name>`` attributes on the MLX twin — there's no
+      enclosing dict, so we skip the dict level and rename the entries.
+      Ditto ``MultiModalDecoder.heads`` → ``h_<name>``.
+  """
+  if isinstance(module, nn.Sequential):
+    for name, child in module.named_children():
+      yield f"layers.{name}", child
+    return
+  if isinstance(module, MultiModalEncoder):
+    for name, child in module.named_children():
+      if name == "branches":
+        for branch_name, branch in child.named_children():
+          yield f"b_{branch_name}", branch
+      else:
+        yield name, child
+    return
+  if isinstance(module, MultiModalDecoder):
+    for name, child in module.named_children():
+      if name == "heads":
+        for head_name, head in child.named_children():
+          yield f"h_{head_name}", head
+      else:
+        yield name, child
+    return
+  for name, child in module.named_children():
+    yield name, child
+
+
+def _torch_grucell_to_mlx(
+  gru: nn.GRUCell,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+  """Convert a torch ``GRUCell`` state_dict to MLX ``GRU`` tensors.
+
+  Both backends share the (r, z, n) gate ordering. The MLX layer carries
+  a single combined bias ``b`` for the (r, z) gates because its forward
+  adds the hidden projection without a hidden-side bias on those gates;
+  for the n gate it carries a separate ``bhn`` applied inside the
+  ``r * (W_hn h + bhn)`` term. The conversions:
+
+    Wx  = weight_ih                       # (3H, in)
+    Wh  = weight_hh                       # (3H, H)
+    b[r] = bias_ih[r] + bias_hh[r]
+    b[z] = bias_ih[z] + bias_hh[z]
+    b[n] = bias_ih[n]
+    bhn  = bias_hh[n]                     # (H,)
+  """
+  H        = gru.hidden_size
+  b_ih     = gru.bias_ih.detach().cpu()
+  b_hh     = gru.bias_hh.detach().cpu()
+  b_rz     = b_ih[: 2 * H] + b_hh[: 2 * H]
+  b_n_ih   = b_ih[2 * H :]
+  b_n_hh   = b_hh[2 * H :]
+  b        = torch.cat([b_rz, b_n_ih], dim=0).contiguous()
+  return (
+    gru.weight_ih.detach().cpu().contiguous(),
+    gru.weight_hh.detach().cpu().contiguous(),
+    b,
+    b_n_hh.contiguous(),
+  )
+
+
+def _mlx_to_torch_grucell(
+  gru: nn.GRUCell,
+  *, Wx: torch.Tensor, Wh: torch.Tensor, b: torch.Tensor, bhn: torch.Tensor,
+) -> None:
+  """Inverse of :func:`_torch_grucell_to_mlx`.
+
+  The split of the (r, z) bias between ``bias_ih`` and ``bias_hh`` is
+  ambiguous — MLX only stores the sum. We park the entire sum in
+  ``bias_ih`` and zero out the matching ``bias_hh`` rows; the GRU
+  forward pass is invariant to this choice.
+  """
+  H   = gru.hidden_size
+  dev = gru.weight_ih.device
+  dt  = gru.weight_ih.dtype
+  with torch.no_grad():
+    gru.weight_ih.copy_(Wx.to(dev, dtype=dt))
+    gru.weight_hh.copy_(Wh.to(gru.weight_hh.device, dtype=gru.weight_hh.dtype))
+    b_ih = torch.zeros_like(gru.bias_ih)
+    b_hh = torch.zeros_like(gru.bias_hh)
+    b_ih[: 2 * H] = b[: 2 * H].to(b_ih.device, dtype=b_ih.dtype)
+    b_ih[2 * H :] = b[2 * H :].to(b_ih.device, dtype=b_ih.dtype)
+    b_hh[2 * H :] = bhn.to(b_hh.device, dtype=b_hh.dtype)
+    gru.bias_ih.copy_(b_ih)
+    gru.bias_hh.copy_(b_hh)

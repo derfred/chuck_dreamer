@@ -2,22 +2,30 @@
 
 :class:`~chuck_dreamer.training.episode_dataset.Episode` carries raw
 dicts of arrays straight from the writer format. The processor here
-projects them onto the modal observation chosen by ``config.env.obs_mode``
-and aligns with the buffer's ``(T+1 obs, T action)`` invariant.
+projects them onto the configured set of observation components and
+aligns with the buffer's ``(T+1 obs, T action)`` invariant.
 
-A single :class:`EpisodeProcessor` parameterized by ``obs_mode`` replaces
-the three per-mode processor classes that used to live here. Per-mode
-transformations (resize, normalize, proprio concat) are owned by
-:class:`~chuck_dreamer.training.observation.Observation`.
+Components are looked up by name and built independently — see
+``_COMPONENT_BUILDERS`` for the per-component sources. ``image`` runs
+through resize + normalize; the vector components are concatenations
+of raw recorded fields.
 """
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import numpy as np
 
-from .observation import ObsMode, Observation
+from .observation import (
+  EE,
+  IMAGE,
+  PROPRIO,
+  STATE,
+  ObsMode,
+  Observation,
+  normalize_obs_mode,
+)
 
 
 RawEpisode = dict[str, Any]
@@ -79,8 +87,8 @@ def _pack(obs: Observation, raw: RawEpisode, act_mode: str) -> Episode:
   sliced to length T.
 
   ``focus_mask`` (when present on ``obs``) rides in the episode dict as
-  a sibling key — kept separate from ``obs`` so legacy consumers that
-  read ``ep["obs"]`` as a plain ndarray/dict stay backwards-compatible.
+  a sibling key — kept separate from ``obs`` so the buffer's storage
+  schema for the obs dict matches the model's encoder input one-to-one.
   """
   N = obs.leading_shape[0]
   if N < 2:
@@ -102,6 +110,8 @@ def _pack(obs: Observation, raw: RawEpisode, act_mode: str) -> Episode:
     ep["focus_mask"] = obs.focus_mask
   if "goal_xy" in raw:
     ep["goal_xy"] = np.asarray(raw["goal_xy"], dtype=np.float32)
+  if "mat_centre" in raw:
+    ep["mat_centre"] = np.asarray(raw["mat_centre"], dtype=np.float32)
   if "tags" in raw:
     ep["tags"] = tuple(str(t) for t in raw["tags"])
   return ep
@@ -128,68 +138,91 @@ def _union_focus_mask(raw: RawEpisode, sources: tuple[str, ...]) -> np.ndarray |
   return union.astype(np.float32)
 
 
+# Per-component vector builders. ``image`` is handled separately because
+# it needs the image_size argument for resize. Keep the field
+# composition here as the single source of truth.
+def _build_state(raw: RawEpisode) -> np.ndarray:
+  object_xy  = np.asarray(raw["object_xy"],  dtype=np.float32)
+  joint_qpos = np.asarray(raw["joint_qpos"], dtype=np.float32)
+  return np.concatenate([object_xy, joint_qpos], axis=1)
+
+
+def _build_proprio(raw: RawEpisode) -> np.ndarray:
+  return np.asarray(raw["joint_qpos"], dtype=np.float32)
+
+
+def _build_ee(raw: RawEpisode) -> np.ndarray:
+  ee_pos  = np.asarray(raw["ee_pos"],  dtype=np.float32)
+  ee_quat = np.asarray(raw["ee_quat"], dtype=np.float32)
+  return np.concatenate([ee_pos, ee_quat], axis=1)
+
+
+_VECTOR_BUILDERS: dict[str, Callable[[RawEpisode], np.ndarray]] = {
+  STATE:   _build_state,
+  PROPRIO: _build_proprio,
+  EE:      _build_ee,
+}
+
+
 def _build_observation(
   raw: RawEpisode,
   obs_mode: ObsMode,
   image_size: int | None,
   focus_mask_sources: tuple[str, ...] = (),
 ) -> Observation:
-  """Project a raw recorded episode onto the configured observation mode.
+  """Project a raw recorded episode onto the configured components.
 
-  The transformations (resize, normalize, proprio concat) all live as
-  methods on :class:`Observation` — this function just composes them.
+  Walks the component list, gathers each one from ``raw``, and assembles
+  a multi-modal :class:`Observation`. The image branch additionally
+  resizes and normalizes the captured frames; vector branches are pure
+  concatenations of float32 fields.
   """
-  if obs_mode == "state":
-    ee_pos     = np.asarray(raw["ee_pos"],     dtype=np.float32)
-    ee_quat    = np.asarray(raw["ee_quat"],    dtype=np.float32)
-    object_xy  = np.asarray(raw["object_xy"],  dtype=np.float32)
-    joint_qpos = np.asarray(raw["joint_qpos"], dtype=np.float32)
-    return Observation.state_vector(
-      np.concatenate([ee_pos, ee_quat, object_xy, joint_qpos], axis=1),
-    )
+  components: dict[str, Any] = {}
+  fmask: np.ndarray | None = None
+  needs_image = IMAGE in obs_mode
+  if needs_image:
+    if image_size is None:
+      raise ValueError(f"obs_mode={obs_mode!r} includes 'image' but image_size is None")
+    components[IMAGE] = np.asarray(raw["image"], dtype=np.uint8)
+    fmask = _union_focus_mask(raw, focus_mask_sources)
 
-  if image_size is None:
-    raise ValueError(f"obs_mode={obs_mode!r} requires an image_size")
-  images = np.asarray(raw["image"], dtype=np.uint8)
-  fmask  = _union_focus_mask(raw, focus_mask_sources)
+  for name in obs_mode:
+    if name == IMAGE:
+      continue
+    builder = _VECTOR_BUILDERS.get(name)
+    if builder is None:
+      raise ValueError(f"unknown obs_mode component {name!r}")
+    components[name] = builder(raw)
 
-  if obs_mode == "image":
-    obs = Observation.image_only(images, focus_mask=fmask)
-    return obs.resize_image(image_size).normalize_image()
-
-  if obs_mode == "image_proprio":
-    ee_pos     = np.asarray(raw["ee_pos"],     dtype=np.float32)
-    ee_quat    = np.asarray(raw["ee_quat"],    dtype=np.float32)
-    joint_qpos = np.asarray(raw["joint_qpos"], dtype=np.float32)
-    proprio    = np.concatenate([ee_pos, ee_quat, joint_qpos], axis=1)
-    obs = Observation.image_proprio(images, proprio, focus_mask=fmask)
-    return obs.resize_image(image_size).normalize_image()
-
-  raise ValueError(f"unknown obs_mode={obs_mode!r}")
+  obs = Observation.from_components(components, focus_mask=fmask)
+  if needs_image:
+    assert image_size is not None
+    obs = obs.resize_image(image_size).normalize_image()
+  return obs
 
 
 class EpisodeProcessor:
-  """Project raw sim episodes onto a configured observation mode.
+  """Project raw sim episodes onto a configured set of obs components.
 
-  One processor handles all three obs modes — ``state``, ``image``,
-  ``image_proprio``. ``image_size`` is required for image modes and
-  ignored for ``state``. ``focus_mask_sources`` names raw segmentation
-  keys (e.g. ``"segmentation_target"``) whose union becomes the per-step
-  focus mask attached to the observation; empty disables it.
+  ``obs_mode`` is the canonical tuple of component names. ``image_size``
+  is required whenever ``"image"`` is present and ignored otherwise.
+  ``focus_mask_sources`` names raw segmentation keys (e.g.
+  ``"segmentation_target"``) whose union becomes the per-step focus
+  mask attached to the observation; empty disables it.
 
   ``act_mode`` (``"joint"`` or ``"ee"``) picks which action stream to
-  read off the recording. Recordings may carry both; the training config
-  decides which view the world model sees.
+  read off the recording. Recordings may carry both; the training
+  config decides which view the world model sees.
   """
 
   def __init__(
     self,
-    obs_mode: ObsMode,
+    obs_mode: Any,
     image_size: int | None = None,
     focus_mask_sources: tuple[str, ...] = (),
     act_mode: str = "ee",
   ):
-    self.obs_mode = obs_mode
+    self.obs_mode = normalize_obs_mode(obs_mode)
     self.image_size = None if image_size is None else int(image_size)
     self.focus_mask_sources = tuple(focus_mask_sources)
     self.act_mode = str(act_mode)
@@ -202,23 +235,22 @@ class EpisodeProcessor:
 def processor_for(config) -> EpisodeProcessor:
   """Build the processor matching ``config.env.obs_mode``.
 
-  For image modes ``config.model.encoder.image_size`` (computed by the
-  ``derive_image_size`` OmegaConf resolver from the encoder strides) is
-  the side length captured frames are resized to. ``focus_mask_sources``
-  is pulled from ``training.losses.focus_masks`` and only applied to
-  image-having modes. ``act_mode`` is read from ``config.env.act_mode``
-  and selects which action stream the processor reads from each recording.
+  When ``"image"`` is among the components, ``config.model.encoder.image_size``
+  (computed by the ``derive_image_size`` OmegaConf resolver from the
+  encoder strides) is the side length captured frames are resized to.
+  ``focus_mask_sources`` is pulled from ``training.losses.focus_masks``
+  and only applied when an image component is present.
   """
-  obs_mode = str(config.env.obs_mode)
+  obs_mode = normalize_obs_mode(config.env.obs_mode)
   act_mode = str(config.env.act_mode)
-  if obs_mode == "state":
-    return EpisodeProcessor("state", act_mode=act_mode)
-  if obs_mode in ("image", "image_proprio"):
+  image_size = None
+  focus_sources: tuple[str, ...] = ()
+  if IMAGE in obs_mode:
+    image_size = int(config.model.encoder.image_size)
     focus_sources = tuple(config.training.losses.get("focus_masks", []) or [])
-    return EpisodeProcessor(
-      "image" if obs_mode == "image" else "image_proprio",
-      image_size=int(config.model.encoder.image_size),
-      focus_mask_sources=focus_sources,
-      act_mode=act_mode,
-    )
-  raise ValueError(f"Unknown obs_mode: {obs_mode!r}")
+  return EpisodeProcessor(
+    obs_mode,
+    image_size=image_size,
+    focus_mask_sources=focus_sources,
+    act_mode=act_mode,
+  )

@@ -34,11 +34,13 @@ def _make_episode(
   obs_shape: tuple[int, ...] = (4,),
   action_dim: int = 2,
   tags: tuple[str, ...] = (),
-) -> dict[str, np.ndarray]:
-  """Build an episode where obs[t, 0] = episode_id * 1000 + t.
+) -> dict:
+  """Build an episode where obs["state"][t, 0] = episode_id * 1000 + t.
 
   This encoding lets tests verify that sampled sequences stay inside a
-  single episode (thousands digit constant, remainder contiguous).
+  single episode (thousands digit constant, remainder contiguous). The
+  buffer's wire format is a dict keyed by component name; ``state`` is
+  the only component populated here.
   """
   T = length
   obs = np.zeros((T + 1, *obs_shape), dtype=np.float32)
@@ -48,8 +50,8 @@ def _make_episode(
   reward = np.arange(T, dtype=np.float32)
   done = np.zeros((T,), dtype=bool)
   done[-1] = True
-  ep: dict[str, np.ndarray] = {
-    "obs": obs, "action": action, "reward": reward, "done": done,
+  ep: dict = {
+    "obs": {"state": obs}, "action": action, "reward": reward, "done": done,
     "step_info": _make_step_info(episode_id, T),
   }
   if tags:
@@ -68,7 +70,7 @@ def test_sampled_sequences_stay_in_single_episode():
     buf.add_episode(_make_episode(ep_id, length=30))
 
   batch = buf.sample(batch_size=16, seq_len=10)
-  obs = np.asarray(batch["obs"])  # (B, T, obs_dim)
+  obs = np.asarray(batch["obs"]["state"])  # (B, T, obs_dim)
 
   for b in range(obs.shape[0]):
     seq = obs[b, :, 0]
@@ -95,12 +97,12 @@ def test_sample_shapes_and_dtypes():
 
   B, T = 50, 50
   batch = buf.sample(batch_size=B, seq_len=T)
-  assert batch["obs"].shape == (B, T, *obs_shape)
+  assert batch["obs"]["state"].shape == (B, T, *obs_shape)
   assert batch["action"].shape == (B, T, action_dim)
   assert batch["reward"].shape == (B, T)
   assert batch["done"].shape == (B, T)
 
-  assert batch["obs"].dtype == np.float32
+  assert batch["obs"]["state"].dtype == np.float32
   assert batch["action"].dtype == np.float32
   assert batch["reward"].dtype == np.float32
   assert batch["done"].dtype == np.bool_
@@ -122,7 +124,7 @@ def test_capacity_triggers_episode_eviction():
 
   # Oldest episodes should be gone: no sample should draw from episode 0..5.
   batch = buf.sample(batch_size=64, seq_len=10)
-  obs = np.asarray(batch["obs"])
+  obs = np.asarray(batch["obs"]["state"])
   min_ep_id = int(np.floor(obs[:, 0, 0].min() / 1000))
   assert min_ep_id >= 15
 
@@ -185,7 +187,7 @@ def test_determinism_with_seed():
   buf_b = build(42)
   ba = buf_a.sample(batch_size=8, seq_len=10)
   bb = buf_b.sample(batch_size=8, seq_len=10)
-  np.testing.assert_array_equal(np.asarray(ba["obs"]), np.asarray(bb["obs"]))
+  np.testing.assert_array_equal(np.asarray(ba["obs"]["state"]), np.asarray(bb["obs"]["state"]))
   np.testing.assert_array_equal(np.asarray(ba["action"]), np.asarray(bb["action"]))
 
 
@@ -209,7 +211,7 @@ def test_save_and_load_round_trip(tmp_path):
 
   # Every episode is byte-identical.
   for orig, new in zip(buf._episodes, restored._episodes):
-    np.testing.assert_array_equal(orig["obs"].state, new["obs"].state)
+    np.testing.assert_array_equal(orig["obs"].components["state"], new["obs"].components["state"])
     for key in ("action", "reward", "done"):
       np.testing.assert_array_equal(orig[key], new[key])
     for col in ("object_xy", "ee_pos"):
@@ -265,7 +267,7 @@ def test_episode_sampling_is_length_proportional():
   buf.add_episode(_make_episode(1, length=1000))
 
   batch = buf.sample(batch_size=2000, seq_len=10)
-  obs = np.asarray(batch["obs"])
+  obs = np.asarray(batch["obs"]["state"])
   ep_ids = np.floor(obs[:, 0, 0] / 1000).astype(int)
   long_count = int((ep_ids == 1).sum())
   short_count = int((ep_ids == 0).sum())
@@ -321,10 +323,10 @@ def test_dict_obs_round_trips_through_buffer():
 
   ep = buf._episodes[0]
   obs = ep["obs"]
-  assert obs.mode == "image_proprio"
-  assert obs.image.dtype == np.uint8
-  assert obs.image.shape == (21, 8, 8, 3)
-  assert obs.proprio.shape == (21, 13)
+  assert set(obs.components.keys()) == {"image", "proprio"}
+  assert obs.components["image"].dtype == np.uint8
+  assert obs.components["image"].shape == (21, 8, 8, 3)
+  assert obs.components["proprio"].shape == (21, 13)
 
 
 def test_dict_obs_sample_yields_dict_batch_with_correct_shapes():
@@ -525,7 +527,7 @@ def test_tag_weights_multiply_sample_weight():
   trials = 4000
   for _ in range(trials):
     batch = buf.sample(batch_size=1, seq_len=10)
-    obs = np.asarray(batch["obs"])
+    obs = np.asarray(batch["obs"]["state"])
     ep_id = int(np.floor(obs[0, 0, 0] / 1000))
     if ep_id == 0:
       hits += 1

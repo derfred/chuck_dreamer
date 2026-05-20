@@ -183,16 +183,28 @@ class CEMPolicyAdapter:
 # ---------------------------------------------------------------------------
 
 
-def _project_obs_for_model(obs: dict, obs_mode: str) -> Any:
-  """Turn the runner's flat obs dict into what the trained model wants.
+def _project_obs_for_model(obs: dict, obs_mode: Any) -> dict:
+  """Turn the runner's flat obs dict into the per-component dict the model wants.
 
-  Only ``image`` mode is supported on the real arm: ``state`` and
-  ``image_proprio`` both need EE pose / object pose fields that this
-  runner doesn't compute (no IK, no object detector wired up).
+  The runner provides ``image`` and ``arm_qpos`` only — no EE pose
+  (no IK is run here), no object pose (no detector wired up), so
+  ``state`` and ``ee`` checkpoints cannot run on the real arm yet.
+  ``proprio`` works because it's just ``joint_qpos`` (= ``arm_qpos``).
   """
-  if obs_mode == "image":
-    return np.asarray(obs["image"], dtype=np.uint8)
-  raise ValueError(
-    f"obs_mode={obs_mode!r} is not supported on the real arm: "
-    "only image-mode checkpoints can run here for now."
-  )
+  from ...training.observation import EE, IMAGE, PROPRIO, STATE, normalize_obs_mode
+
+  mode = normalize_obs_mode(obs_mode)
+  out: dict[str, np.ndarray] = {}
+  for c in mode:
+    if c == IMAGE:
+      out[c] = np.asarray(obs["image"], dtype=np.uint8)
+    elif c == PROPRIO:
+      out[c] = np.asarray(obs["arm_qpos"], dtype=np.float32)
+    elif c in (STATE, EE):
+      raise ValueError(
+        f"obs_mode component {c!r} is not supported on the real arm: "
+        f"the runner does not compute object_xy / ee_pos / ee_quat."
+      )
+    else:
+      raise ValueError(f"unknown obs_mode component {c!r}")
+  return out

@@ -69,6 +69,7 @@ def load_config(
     cfg.seed = int(np.random.default_rng().integers(0, 2**31))
   _normalize_warmup_source(cfg)
   _normalize_eval_source(cfg)
+  _normalize_obs_mode(cfg)
   return cfg
 
 
@@ -129,6 +130,20 @@ def _normalize_warmup_source(cfg: DictConfig) -> None:
   )
   del data_cfg.warmup_format
   del data_cfg.warmup_num_episodes
+
+
+def _normalize_obs_mode(cfg: DictConfig) -> None:
+  """Normalize ``env.obs_mode`` into a canonical list of component names.
+
+  Accepts a string (legacy single-mode form) or a list of strings, and
+  rewrites both to a list under ``cfg.env.obs_mode``. Delegates the
+  vocabulary check to :func:`Observation.normalize_obs_mode` — typos
+  trip here rather than at the encoder.
+  """
+  from .training.observation import normalize_obs_mode
+
+  raw = cfg.env.obs_mode
+  cfg.env.obs_mode = list(normalize_obs_mode(raw))
 
 
 def _normalize_eval_source(cfg: DictConfig) -> None:

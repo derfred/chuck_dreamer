@@ -123,8 +123,8 @@ class CEMPolicy:
     its native tensor type via ``coerce``."""
     mode = getattr(self.model, "obs_mode", None)
     if mode is None:
-      # Backend lacks an obs_mode attribute — fall back to the legacy
-      # shape sniff so older test models still work.
+      # Backend lacks an obs_mode attribute — fall back to a literal
+      # dict-walk so older test models still work.
       if isinstance(obs, dict):
         return {k: np.asarray(v)[None] for k, v in obs.items()}
       return np.asarray(obs)[None]

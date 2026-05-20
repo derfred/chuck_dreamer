@@ -68,7 +68,9 @@ def _step_info_columns(N: int) -> dict:
 
 def test_pack_enforces_buffer_invariants():
   N = 10
-  obs = Observation.state_vector(np.arange(N * 4, dtype=np.float32).reshape(N, 4))
+  obs = Observation.from_components(
+    {"state": np.arange(N * 4, dtype=np.float32).reshape(N, 4)},
+  )
   raw = {
     "joint_action": np.arange(N * 2, dtype=np.float32).reshape(N, 2),
     "reward": np.arange(N, dtype=np.float32),
@@ -76,7 +78,7 @@ def test_pack_enforces_buffer_invariants():
   }
   ep = _pack(obs, raw, "joint")
 
-  assert ep["obs"].shape == (N, 4)
+  assert ep["obs"]["state"].shape == (N, 4)
   assert ep["action"].shape == (N - 1, 2)
   assert ep["reward"].shape == (N - 1,)
   assert ep["done"].shape == (N - 1,)
@@ -90,7 +92,7 @@ def test_pack_enforces_buffer_invariants():
 def test_pack_rejects_single_step_episode():
   with pytest.raises(ValueError):
     _pack(
-      Observation.state_vector(np.zeros((1, 3), dtype=np.float32)),
+      Observation.from_components({"state": np.zeros((1, 3), dtype=np.float32)}),
       {"joint_action": np.zeros((1, 2), dtype=np.float32),
        "reward": np.zeros((1,)),
        **_step_info_columns(1)},
@@ -115,13 +117,13 @@ def test_state_vector_processor_concatenates_state_fields():
     "ee_quat": np.full((N, 4), 3.0, dtype=np.float32),
     "object_xy": np.full((N, 2), 4.0, dtype=np.float32),
   }
-  ep = EpisodeProcessor("state", act_mode="joint")(raw)
+  ep = EpisodeProcessor(("state",), act_mode="joint")(raw)
 
-  assert ep["obs"].shape == (N, 15)
-  np.testing.assert_array_equal(ep["obs"][0, 0:3], [2.0, 2.0, 2.0])
-  np.testing.assert_array_equal(ep["obs"][0, 3:7], [3.0, 3.0, 3.0, 3.0])
-  np.testing.assert_array_equal(ep["obs"][0, 7:9], [4.0, 4.0])
-  np.testing.assert_array_equal(ep["obs"][0, 9:15], [1.0] * 6)
+  # state = object_xy(2) ‖ joint_qpos(6) = 8. EE fields live in the
+  # separate ``ee`` component now.
+  assert ep["obs"]["state"].shape == (N, 8)
+  np.testing.assert_array_equal(ep["obs"]["state"][0, 0:2], [4.0, 4.0])
+  np.testing.assert_array_equal(ep["obs"]["state"][0, 2:8], [1.0] * 6)
 
 
 def test_image_processor_returns_normalized_float32():
@@ -136,12 +138,12 @@ def test_image_processor_returns_normalized_float32():
     "ee_quat": np.zeros((N, 4), dtype=np.float32),
     "object_xy": np.zeros((N, 2), dtype=np.float32),
   }
-  ep = EpisodeProcessor("image", image_size=8, act_mode="joint")(raw)
-  assert ep["obs"].shape == (N, 8, 8, 3)
-  assert ep["obs"].dtype == np.float32
+  ep = EpisodeProcessor(("image",), image_size=8, act_mode="joint")(raw)
+  assert ep["obs"]["image"].shape == (N, 8, 8, 3)
+  assert ep["obs"]["image"].dtype == np.float32
   # Each timestep's uint8 fill ``t`` maps to ``t/255 - 0.5``.
   for t in range(N):
-    np.testing.assert_allclose(ep["obs"][t].mean(), t / 255.0 - 0.5, atol=1e-6)
+    np.testing.assert_allclose(ep["obs"]["image"][t].mean(), t / 255.0 - 0.5, atol=1e-6)
 
 
 def test_image_processor_attaches_focus_mask_when_sources_present():
@@ -290,7 +292,7 @@ def test_replay_buffer_loads_hdf5_directory(tmp_path):
 
   buf = ReplayBuffer(
     capacity_steps=10_000, min_episode_len=5, seed=0,
-    processor=EpisodeProcessor("state", act_mode="joint"),
+    processor=EpisodeProcessor(("state",), act_mode="joint"),
   )
   n = buf.load_sim_episodes(tmp_path, format="hdf5")
 
@@ -299,12 +301,13 @@ def test_replay_buffer_loads_hdf5_directory(tmp_path):
   # 20 raw steps → 20 obs + 19 actions per episode.
   assert len(buf) == 2 * 19
   ep = buf._episodes[0]
-  assert ep["obs"].state.shape == (20, 15)
+  # state = object_xy(2) ‖ joint_qpos(6) = 8 under the new vocabulary.
+  assert ep["obs"].components["state"].shape == (20, 8)
   assert ep["action"].shape == (20 - 1, 3)
   assert bool(ep["done"][-1])
 
   batch = buf.sample(batch_size=4, seq_len=10)
-  assert batch["obs"].shape == (4, 10, 15)
+  assert batch["obs"]["state"].shape == (4, 10, 8)
 
 
 # ---------------------------------------------------------------------------
@@ -318,20 +321,21 @@ def test_replay_buffer_loads_rerun_directory(tmp_path):
 
   buf = ReplayBuffer(
     capacity_steps=10_000, min_episode_len=5,
-    processor=EpisodeProcessor("image", image_size=16, act_mode="joint"),
+    processor=EpisodeProcessor(("image",), image_size=16, act_mode="joint"),
     seed=0,
   )
   n = buf.load_sim_episodes(tmp_path, format="rerun")
 
   assert n == 2
   ep = buf._episodes[0]
-  assert ep["obs"].image.shape == (20, 16, 16, 3)
+  img = ep["obs"].components["image"]
+  assert img.shape == (20, 16, 16, 3)
   assert ep["action"].shape == (19, 3)
   # Image[t] is filled with constant ``t`` uint8 → ``t/255 - 0.5`` after
   # the processor normalizes. The ordering check survives normalization
   # since the mapping is monotonic.
   for t in range(20):
-    np.testing.assert_allclose(float(ep["obs"].image[t].mean()), t / 255.0 - 0.5, atol=1e-6)
+    np.testing.assert_allclose(float(img[t].mean()), t / 255.0 - 0.5, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -552,39 +556,48 @@ def _state_only_raw(N: int, img_hw: tuple[int, int]) -> dict:
 
 def test_image_processor_resizes_to_target_size():
   raw = _state_only_raw(N=4, img_hw=(32, 32))
-  ep = EpisodeProcessor("image", image_size=8, act_mode="joint")(raw)
-  assert ep["obs"].shape == (4, 8, 8, 3)
-  assert ep["obs"].dtype == np.float32
+  ep = EpisodeProcessor(("image",), image_size=8, act_mode="joint")(raw)
+  assert ep["obs"]["image"].shape == (4, 8, 8, 3)
+  assert ep["obs"]["image"].dtype == np.float32
 
 
 def test_image_processor_passthrough_when_already_target_size():
   raw = _state_only_raw(N=3, img_hw=(8, 8))
-  ep = EpisodeProcessor("image", image_size=8, act_mode="joint")(raw)
-  assert ep["obs"].shape == (3, 8, 8, 3)
+  ep = EpisodeProcessor(("image",), image_size=8, act_mode="joint")(raw)
+  assert ep["obs"]["image"].shape == (3, 8, 8, 3)
   # When sizes match the resize is a no-op; values are then normalized.
   for t in range(3):
-    np.testing.assert_allclose(ep["obs"][t].mean(), t / 255.0 - 0.5, atol=1e-6)
+    np.testing.assert_allclose(ep["obs"]["image"][t].mean(), t / 255.0 - 0.5, atol=1e-6)
 
 
 def test_image_proprio_processor_returns_dict_obs():
   raw = _state_only_raw(N=5, img_hw=(16, 16))
-  ep = EpisodeProcessor("image_proprio", image_size=8, act_mode="joint")(raw)
+  ep = EpisodeProcessor(("image", "proprio"), image_size=8, act_mode="joint")(raw)
 
   assert isinstance(ep["obs"], dict)
   assert set(ep["obs"].keys()) == {"image", "proprio"}
   assert ep["obs"]["image"].shape == (5, 8, 8, 3)
   assert ep["obs"]["image"].dtype == np.float32
-  # proprio = ee_pos (3) + ee_quat (4) + joint_qpos (6) = 13.
-  assert ep["obs"]["proprio"].shape == (5, 13)
+  # proprio = joint_qpos (6) under the new vocabulary; ee fields live
+  # in a separate ``ee`` component.
+  assert ep["obs"]["proprio"].shape == (5, 6)
   assert ep["obs"]["proprio"].dtype == np.float32
 
 
 def test_image_proprio_processor_excludes_object_xy_from_proprio():
   raw = _state_only_raw(N=3, img_hw=(8, 8))
   raw["object_xy"] = np.full((3, 2), 999.0, dtype=np.float32)
-  ep = EpisodeProcessor("image_proprio", image_size=8, act_mode="joint")(raw)
+  ep = EpisodeProcessor(("image", "proprio"), image_size=8, act_mode="joint")(raw)
   # proprio is body-internal, so object_xy must not bleed in.
   assert not np.any(np.isclose(ep["obs"]["proprio"], 999.0))
+
+
+def test_ee_processor_concatenates_ee_pos_and_quat():
+  raw = _state_only_raw(N=4, img_hw=(8, 8))
+  ep = EpisodeProcessor(("ee",), act_mode="joint")(raw)
+  assert ep["obs"]["ee"].shape == (4, 7)
+  np.testing.assert_allclose(ep["obs"]["ee"][:, :3], 0.25)
+  np.testing.assert_allclose(ep["obs"]["ee"][:, 3], 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -594,36 +607,36 @@ def test_image_proprio_processor_excludes_object_xy_from_proprio():
 
 def test_processor_for_state_mode_returns_state_processor():
   cfg = load_config()
-  cfg.env.obs_mode = "state"
+  cfg.env.obs_mode = ["state"]
   p = processor_for(cfg)
   assert isinstance(p, EpisodeProcessor)
-  assert p.obs_mode == "state"
+  assert p.obs_mode == ("state",)
   assert p.image_size is None
 
 
 def test_processor_for_image_mode_uses_derived_size():
   cfg = load_config()
-  cfg.env.obs_mode = "image"
+  cfg.env.obs_mode = ["image"]
   cfg.model.encoder.cnn_strides = [2, 2, 2]   # 3 layers -> image_size = 32
   p = processor_for(cfg)
   assert isinstance(p, EpisodeProcessor)
-  assert p.obs_mode == "image"
+  assert p.obs_mode == ("image",)
   assert p.image_size == derive_image_size((2, 2, 2))
 
 
 def test_processor_for_image_proprio_uses_derived_size():
   cfg = load_config()
-  cfg.env.obs_mode = "image_proprio"
+  cfg.env.obs_mode = ["image", "proprio"]
   cfg.model.encoder.cnn_strides = [2, 2]      # 2 layers -> image_size = 16
   p = processor_for(cfg)
   assert isinstance(p, EpisodeProcessor)
-  assert p.obs_mode == "image_proprio"
+  assert p.obs_mode == ("image", "proprio")
   assert p.image_size == derive_image_size((2, 2))
 
 
 def test_processor_for_rejects_unknown_obs_mode():
   cfg = load_config()
-  cfg.env.obs_mode = "depth"
+  cfg.env.obs_mode = ["depth"]
   with pytest.raises(ValueError):
     processor_for(cfg)
 

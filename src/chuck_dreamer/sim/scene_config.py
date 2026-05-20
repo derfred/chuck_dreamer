@@ -70,6 +70,12 @@ class SceneConfig:
     # the mat clutter (the white circle outline).
     draw_goal_marker: bool = True
 
+    # Centre of the calibration mat pattern on the table (xy). Only the
+    # "real" preset populates this — it gets randomised per episode within
+    # a small box, and downstream analysis needs the actual sampled value
+    # to disentangle absolute target/goal positions from mat-relative ones.
+    mat_centre: list[float] | None = None
+
     @property
     def joint_initial_qpos(self) -> list[float] | None:
         if self.robot_initial_qpos is not None:

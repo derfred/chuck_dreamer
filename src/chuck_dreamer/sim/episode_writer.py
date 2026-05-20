@@ -210,13 +210,13 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
             goal        (T, H, W)       bool
             arm         (T, H, W)       bool      — optional, union of robot-arm geoms
             background  (T, H, W)       bool      — optional
-            clutter     (T, K, H, W)    bool      — optional, K = scene clutter count
         metadata/
             config      scalar string (JSON)
             seed        scalar int64
             source      scalar string
             outcome     scalar string
             goal_xy     (2,) float32
+            mat_centre  (2,) float32     — optional, populated by the "real" preset
 
     Files may carry one or both action streams. The on-disk recording is
     action-space-agnostic; :class:`EpisodeProcessor` picks which view to
@@ -316,6 +316,11 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
                     meta_grp.create_dataset(
                         "goal_xy",
                         data=np.asarray(goal_xy, dtype=np.float32))
+                mat_centre = metadata.get("mat_centre")
+                if mat_centre is not None:
+                    meta_grp.create_dataset(
+                        "mat_centre",
+                        data=np.asarray(mat_centre, dtype=np.float32))
                 tags = metadata.get("tags")
                 if tags:
                     meta_grp.create_dataset(
@@ -332,22 +337,33 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
         name_suffix: str,
     ) -> Path:
         ep_path = self._path_for(EVAL_EPISODE_FILENAME_PREFIX, name_suffix)
-        obs             = np.asarray(episode["obs"],             dtype=np.float32)
-        recon_posterior = np.asarray(episode["recon_posterior"], dtype=np.float32)
-        recon_prior     = np.asarray(episode["recon_prior"],     dtype=np.float32)
+        obs             = episode["obs"]
+        recon_posterior = episode["recon_posterior"]
+        recon_prior     = episode["recon_prior"]
         with h5py.File(ep_path, "w") as f:
-            f.create_dataset("obs",             data=obs)
-            f.create_dataset("recon_posterior", data=recon_posterior,
-                             compression="gzip", compression_opts=4)
-            f.create_dataset("recon_prior",     data=recon_prior,
-                             compression="gzip", compression_opts=4)
-            if recon_posterior.ndim == 4:
-                f.create_dataset("diff_posterior",
-                                 data=_pixel_diff(obs, recon_posterior).astype(np.float32),
-                                 compression="gzip", compression_opts=4)
-                f.create_dataset("diff_prior",
-                                 data=_pixel_diff(obs, recon_prior).astype(np.float32),
-                                 compression="gzip", compression_opts=4)
+            # Obs and reconstructions are per-component dicts: write each
+            # component as its own dataset under ``obs/<name>``,
+            # ``recon_posterior/<name>``, ``recon_prior/<name>``. Image
+            # components additionally get a per-pixel diff dataset.
+            obs_grp     = f.create_group("obs")
+            rpost_grp   = f.create_group("recon_posterior")
+            rprior_grp  = f.create_group("recon_prior")
+            for name, arr in obs.items():
+                obs_arr   = np.asarray(arr,                  dtype=np.float32)
+                rpost_arr = np.asarray(recon_posterior[name], dtype=np.float32)
+                rprior_arr = np.asarray(recon_prior[name],   dtype=np.float32)
+                obs_grp.create_dataset(name, data=obs_arr)
+                rpost_grp.create_dataset(name, data=rpost_arr,
+                                         compression="gzip", compression_opts=4)
+                rprior_grp.create_dataset(name, data=rprior_arr,
+                                          compression="gzip", compression_opts=4)
+                if obs_arr.ndim == 4:  # image component
+                    f.create_dataset(f"diff_posterior/{name}",
+                                     data=_pixel_diff(obs_arr, rpost_arr).astype(np.float32),
+                                     compression="gzip", compression_opts=4)
+                    f.create_dataset(f"diff_prior/{name}",
+                                     data=_pixel_diff(obs_arr, rprior_arr).astype(np.float32),
+                                     compression="gzip", compression_opts=4)
             f.create_dataset("h_posterior", data=np.asarray(episode["h_posterior"], dtype=np.float32))
             f.create_dataset("s_posterior", data=np.asarray(episode["s_posterior"], dtype=np.float32))
             f.create_dataset("h_prior",     data=np.asarray(episode["h_prior"],     dtype=np.float32))
@@ -424,6 +440,9 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         if metadata is not None and metadata.get("goal_xy") is not None:
             goal = np.asarray(metadata["goal_xy"], dtype=np.float32)
             props["goal_xy"] = f"[{float(goal[0])}, {float(goal[1])}]"
+        if metadata is not None and metadata.get("mat_centre") is not None:
+            mat = np.asarray(metadata["mat_centre"], dtype=np.float32)
+            props["mat_centre"] = f"[{float(mat[0])}, {float(mat[1])}]"
         if metadata is not None and metadata.get("tags"):
             # Tags ride as a comma-joined string since Rerun metadata props are
             # dict[str, str]. The reader splits on commas to recover the tuple.
@@ -442,7 +461,6 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         seg_goal       = episode.get("segmentation_goal")
         seg_arm        = episode.get("segmentation_arm")
         seg_background = episode.get("segmentation_background")
-        seg_clutter    = episode.get("segmentation_clutter")  # (T, K, H, W) or None
 
         for i in range(T):
             rec.set_time("step", sequence=i)
@@ -469,14 +487,6 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             if seg_background is not None:
                 rec.log("camera/seg/background",
                         rr.SegmentationImage(np.asarray(seg_background[i], dtype=np.uint8)))
-            if seg_clutter is not None:
-                # Aggregate clutter mask (union over K pieces).
-                clutter_union = np.any(seg_clutter[i], axis=0)
-                rec.log("camera/seg/clutter",
-                        rr.SegmentationImage(clutter_union.astype(np.uint8)))
-                for k in range(seg_clutter.shape[1]):
-                    rec.log(f"camera/seg/clutter_{k}",
-                            rr.SegmentationImage(np.asarray(seg_clutter[i, k], dtype=np.uint8)))
 
         rec.save(str(ep_path))
         return ep_path
@@ -499,31 +509,45 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         ))
 
         obs             = episode["obs"]
-        recon_posterior = np.asarray(episode["recon_posterior"], dtype=np.float32)
-        recon_prior     = np.asarray(episode["recon_prior"],     dtype=np.float32)
+        recon_posterior = episode["recon_posterior"]
+        recon_prior     = episode["recon_prior"]
         h_posterior     = np.asarray(episode["h_posterior"],     dtype=np.float32)
         s_posterior     = np.asarray(episode["s_posterior"],     dtype=np.float32)
         h_prior         = np.asarray(episode["h_prior"],         dtype=np.float32)
         s_prior         = np.asarray(episode["s_prior"],         dtype=np.float32)
 
-        is_image = recon_posterior.ndim == 4   # (T, H, W, C)
-        T        = recon_posterior.shape[0]
+        # Materialize each component as float32 ndarrays up front so the
+        # per-step loop stays tight. Image components are logged with the
+        # de-normalize + diff dance; vector components fan out into
+        # per-dim Scalars on the ``<name>/`` entity prefix.
+        component_arrays: dict[str, dict[str, np.ndarray]] = {}
+        for name, arr in obs.items():
+            component_arrays[name] = {
+                "obs":             np.asarray(arr,                  dtype=np.float32),
+                "recon_posterior": np.asarray(recon_posterior[name], dtype=np.float32),
+                "recon_prior":     np.asarray(recon_prior[name],     dtype=np.float32),
+            }
+        T = next(iter(component_arrays.values()))["obs"].shape[0]
 
         for i in range(T):
             rec.set_time("step", sequence=i)
 
-            if is_image:
-                rec.log("obs",             rr.Image(_coerce_image_for_log(obs[i])))
-                rec.log("recon/posterior", rr.Image(_denormalize_recon_image(recon_posterior[i])))
-                rec.log("recon/prior",     rr.Image(_denormalize_recon_image(recon_prior[i])))
-                rec.log("recon/diff_posterior",
-                        rr.Image(_diff_to_uint8(_pixel_diff(obs[i], recon_posterior[i]))))
-                rec.log("recon/diff_prior",
-                        rr.Image(_diff_to_uint8(_pixel_diff(obs[i], recon_prior[i]))))
-            else:
-                rec.log("obs",             rr.Scalars(np.asarray(obs[i], dtype=np.float32).tolist()))
-                rec.log("recon/posterior", rr.Scalars(recon_posterior[i].tolist()))
-                rec.log("recon/prior",     rr.Scalars(recon_prior[i].tolist()))
+            for name, arrays in component_arrays.items():
+                obs_i    = arrays["obs"][i]
+                rpost_i  = arrays["recon_posterior"][i]
+                rprior_i = arrays["recon_prior"][i]
+                if obs_i.ndim == 3:  # image: (H, W, C)
+                    rec.log(f"{name}/obs",             rr.Image(_coerce_image_for_log(obs_i)))
+                    rec.log(f"{name}/recon/posterior", rr.Image(_denormalize_recon_image(rpost_i)))
+                    rec.log(f"{name}/recon/prior",     rr.Image(_denormalize_recon_image(rprior_i)))
+                    rec.log(f"{name}/recon/diff_posterior",
+                            rr.Image(_diff_to_uint8(_pixel_diff(obs_i, rpost_i))))
+                    rec.log(f"{name}/recon/diff_prior",
+                            rr.Image(_diff_to_uint8(_pixel_diff(obs_i, rprior_i))))
+                else:
+                    rec.log(f"{name}/obs",             rr.Scalars(obs_i.tolist()))
+                    rec.log(f"{name}/recon/posterior", rr.Scalars(rpost_i.tolist()))
+                    rec.log(f"{name}/recon/prior",     rr.Scalars(rprior_i.tolist()))
 
             rec.log("latent/h",       rr.Scalars(h_posterior[i].tolist()))
             rec.log("latent/s",       rr.Scalars(s_posterior[i].tolist()))
