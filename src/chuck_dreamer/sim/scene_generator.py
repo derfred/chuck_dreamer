@@ -113,7 +113,7 @@ _REAL_MARKING_HALF_HEIGHT = 0.0005
 # y = +L/2; the circle sits at (_REAL_MAT_CENTRE_X, +L/2).
 _REAL_MAT_CENTRE_X = -0.35
 _REAL_LINE_Y_NEAR  = -_REAL_LINE_LENGTH / 2.0
-_REAL_LINE_Y_FAR   =  _REAL_LINE_LENGTH / 2.0
+_REAL_LINE_Y_FAR   = _REAL_LINE_LENGTH / 2.0
 
 # Circle is drawn as an unfilled outline (a ring of N tangent box segments).
 # Width is the radial thickness of the painted ring on the real mat.
