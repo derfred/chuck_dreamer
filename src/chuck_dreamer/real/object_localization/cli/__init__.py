@@ -1,14 +1,12 @@
 """Click entry points for the object-localization pipeline."""
 from .annotate_mat import annotate_mat_cmd
 from .calibrate_intrinsics import calibrate_intrinsics_cmd
-from .pick_checkerboard_frames import pick_checkerboard_frames_cmd
 from .test_calibration import test_calibration_cmd
 from .test_object_pose import test_object_pose_cmd
 
 __all__ = [
   "annotate_mat_cmd",
   "calibrate_intrinsics_cmd",
-  "pick_checkerboard_frames_cmd",
   "test_calibration_cmd",
   "test_object_pose_cmd",
 ]

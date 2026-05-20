@@ -1,0 +1,2025 @@
+{
+  "image_size": [
+    1920,
+    1080
+  ],
+  "K": [
+    [
+      712.6924301520336,
+      0.0,
+      999.754301469944
+    ],
+    [
+      0.0,
+      702.5914072020269,
+      615.0043478297596
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "dist": [
+    0.09320699048363636,
+    -0.1483715793685174,
+    -0.011495860079149232,
+    0.0009771472952286153,
+    0.04631074313911974
+  ],
+  "rms_px": 0.7401624258892198,
+  "n_frames_used": 218,
+  "source_datasets": [
+    "chorfiyoussef/calibr_2_20260520_144536",
+    "chorfiyoussef/calibr_1_20260520_142626",
+    "chorfiyoussef/calibr_20260520_142256",
+    "chorfiyoussef/task_2_1805_3",
+    "chorfiyoussef/task_2_1805_2",
+    "chorfiyoussef/task_2_1805_1",
+    "chorfiyoussef/task_1_1805_6",
+    "chorfiyoussef/task_1_1805_5",
+    "chorfiyoussef/task_1_1805_4",
+    "chorfiyoussef/task_1_1805_3",
+    "chorfiyoussef/task_1_1805_2"
+  ],
+  "per_dataset_view_counts": {
+    "chorfiyoussef/calibr_2_20260520_144536": 24,
+    "chorfiyoussef/calibr_1_20260520_142626": 4,
+    "chorfiyoussef/calibr_20260520_142256": 0,
+    "chorfiyoussef/task_2_1805_3": 0,
+    "chorfiyoussef/task_2_1805_2": 51,
+    "chorfiyoussef/task_2_1805_1": 0,
+    "chorfiyoussef/task_1_1805_6": 63,
+    "chorfiyoussef/task_1_1805_5": 76,
+    "chorfiyoussef/task_1_1805_4": 0,
+    "chorfiyoussef/task_1_1805_3": 0,
+    "chorfiyoussef/task_1_1805_2": 0
+  },
+  "per_view_rms_px": [
+    0.6799247860908508,
+    0.7752456665039062,
+    0.7515085339546204,
+    0.7516295909881592,
+    0.7780714631080627,
+    0.6696963310241699,
+    1.052570104598999,
+    0.7533881068229675,
+    0.7780736684799194,
+    0.6696963310241699,
+    1.0487749576568604,
+    0.6782482266426086,
+    0.7563474774360657,
+    0.7762304544448853,
+    0.41702088713645935,
+    0.7568872570991516,
+    0.7762337923049927,
+    0.6782482266426086,
+    0.9037706255912781,
+    0.4458979368209839,
+    0.7513542175292969,
+    0.7787797451019287,
+    0.48647236824035645,
+    0.6826150417327881,
+    0.7513542175292969,
+    0.7787797451019287,
+    0.6826146841049194,
+    0.6321513056755066,
+    0.7789710760116577,
+    0.6758660674095154,
+    0.5884266495704651,
+    0.778972327709198,
+    0.6758660674095154,
+    0.6698789596557617,
+    0.7825384736061096,
+    0.9218412637710571,
+    0.7825407981872559,
+    0.6698789596557617,
+    0.7549547553062439,
+    0.6762080192565918,
+    0.7749271988868713,
+    0.8983933925628662,
+    0.7549547553062439,
+    0.6762062311172485,
+    0.7749297022819519,
+    0.7551094889640808,
+    0.49601972103118896,
+    0.6365597248077393,
+    0.7740956544876099,
+    0.676571786403656,
+    0.7422030568122864,
+    0.7551090121269226,
+    0.7740956544876099,
+    0.676571786403656,
+    0.8582462072372437,
+    0.7716642022132874,
+    0.6789236068725586,
+    0.6840101480484009,
+    0.6789236068725586,
+    0.7318229079246521,
+    0.7716546654701233,
+    0.7572422027587891,
+    0.7798722386360168,
+    0.6791818737983704,
+    0.7826296091079712,
+    0.6791821718215942,
+    0.7798718214035034,
+    0.4941646158695221,
+    0.7572422027587891,
+    0.7741686105728149,
+    0.6767765283584595,
+    0.9048262238502502,
+    0.7741686105728149,
+    0.6767765283584595,
+    0.5795137882232666,
+    0.7598655819892883,
+    0.7762837409973145,
+    0.5334497094154358,
+    0.75987708568573,
+    0.7762839198112488,
+    0.6737666726112366,
+    0.6225731372833252,
+    0.6737633943557739,
+    0.7589067220687866,
+    0.773840069770813,
+    0.6850727796554565,
+    0.7186232209205627,
+    0.7589067220687866,
+    0.7738488912582397,
+    0.6850722432136536,
+    0.7748799324035645,
+    0.6737111806869507,
+    0.3664536476135254,
+    0.7748855948448181,
+    0.673714280128479,
+    0.49134930968284607,
+    0.7556296586990356,
+    0.761162519454956,
+    0.6728328466415405,
+    1.202154517173767,
+    0.7556339502334595,
+    0.7611632347106934,
+    0.6728328466415405,
+    1.5403480529785156,
+    0.7592184543609619,
+    0.7684265971183777,
+    0.6771899461746216,
+    0.8080670237541199,
+    0.7592184543609619,
+    0.7684252262115479,
+    0.6771899461746216,
+    0.7560263872146606,
+    0.6782336235046387,
+    0.7560263872146606,
+    0.6782345771789551,
+    0.762634813785553,
+    0.673670768737793,
+    0.7732004523277283,
+    0.762634813785553,
+    0.673670768737793,
+    0.7612460255622864,
+    0.681257963180542,
+    0.7612473964691162,
+    0.681257963180542,
+    0.6865610480308533,
+    0.7830315828323364,
+    0.7692763805389404,
+    0.686562180519104,
+    0.7830330729484558,
+    0.7626136541366577,
+    0.6806957125663757,
+    0.7841407060623169,
+    0.7841414213180542,
+    0.6806957125663757,
+    0.7626132369041443,
+    0.7565418481826782,
+    0.7778782844543457,
+    0.6795248985290527,
+    0.7565418481826782,
+    0.7778779864311218,
+    0.6795237064361572,
+    0.7712500691413879,
+    0.6776323318481445,
+    0.6776323318481445,
+    0.7712505459785461,
+    0.7769054770469666,
+    0.6781314015388489,
+    0.6781323552131653,
+    0.7769054770469666,
+    0.6814907789230347,
+    0.7812564969062805,
+    0.6814914345741272,
+    0.781255304813385,
+    0.7710021138191223,
+    0.7633273601531982,
+    0.6769862174987793,
+    0.7633273601531982,
+    0.6769880056381226,
+    0.7710021138191223,
+    0.7854766845703125,
+    0.7662915587425232,
+    0.6777175068855286,
+    0.7854762673377991,
+    0.7662915587425232,
+    0.6777175068855286,
+    0.7634180784225464,
+    0.7841182947158813,
+    0.6810907125473022,
+    0.7634212970733643,
+    0.6810925006866455,
+    0.7841201424598694,
+    0.6734097003936768,
+    0.6734088659286499,
+    0.7631919384002686,
+    0.6839864253997803,
+    0.7631902098655701,
+    0.6839868426322937,
+    0.7579671144485474,
+    0.7802625894546509,
+    0.6801924109458923,
+    0.6801924109458923,
+    0.75797039270401,
+    0.7802625298500061,
+    0.6823371648788452,
+    0.6823371648788452,
+    0.7648318409919739,
+    0.7812746167182922,
+    0.6776538491249084,
+    0.7812759280204773,
+    0.6776571273803711,
+    0.7648318409919739,
+    0.6810508370399475,
+    0.7741864919662476,
+    0.6810508370399475,
+    0.7741804122924805,
+    0.672926127910614,
+    0.7752877473831177,
+    0.672926127910614,
+    0.7752841711044312,
+    0.6850296258926392,
+    0.7739921808242798,
+    0.7672394514083862,
+    0.7672394514083862,
+    0.6850312948226929,
+    0.773987889289856,
+    0.6782886385917664,
+    0.7672880291938782,
+    0.7672869563102722,
+    0.6782886385917664,
+    0.7672008872032166,
+    0.6797773838043213,
+    0.7675191164016724,
+    0.7672008872032166,
+    0.7675201296806335,
+    0.6797773838043213,
+    0.6879406571388245,
+    0.7600343227386475,
+    0.77311772108078
+  ],
+  "rms_threshold_px": 0.3,
+  "view_provenance": [
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 245,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 220,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 251,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 252,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 221,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 246,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 256,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 253,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 222,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 247,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 385,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 248,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 254,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 223,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 513,
+      "bucket": [
+        3,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 255,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 224,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 249,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_1_20260520_142626",
+      "frame_idx": 599,
+      "bucket": [
+        2,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 642,
+      "bucket": [
+        2,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 256,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 225,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 770,
+      "bucket": [
+        2,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 250,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 257,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 226,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 251,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 898,
+      "bucket": [
+        2,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 227,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 252,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 1027,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 228,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 253,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 254,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 229,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_1_20260520_142626",
+      "frame_idx": 1199,
+      "bucket": [
+        2,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 230,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 255,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 262,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 256,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 231,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 1541,
+      "bucket": [
+        2,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 263,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 257,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 232,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 264,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 1669,
+      "bucket": [
+        2,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 1798,
+      "bucket": [
+        2,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 233,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 258,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_1_20260520_142626",
+      "frame_idx": 1679,
+      "bucket": [
+        3,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 265,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 234,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 259,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_1_20260520_142626",
+      "frame_idx": 1799,
+      "bucket": [
+        2,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 235,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 260,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 1918,
+      "bucket": [
+        3,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 261,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 2038,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 236,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 268,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 237,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 262,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 2158,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 263,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 238,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 2278,
+      "bucket": [
+        3,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 269,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 239,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 264,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 2398,
+      "bucket": [
+        3,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 240,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 265,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 2518,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 272,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 241,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 2638,
+      "bucket": [
+        3,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 273,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 242,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 267,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 2758,
+      "bucket": [
+        3,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 266,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 274,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 243,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 268,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 2878,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 275,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 244,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 269,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 245,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 270,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 3118,
+      "bucket": [
+        3,
+        3
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 246,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 271,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 3238,
+      "bucket": [
+        3,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 278,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 247,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 272,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 3358,
+      "bucket": [
+        3,
+        2
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 279,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 248,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 273,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 3478,
+      "bucket": [
+        4,
+        0
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 280,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 249,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 274,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/calibr_2_20260520_144536",
+      "frame_idx": 3598,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 281,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 250,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 275,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 282,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 276,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 283,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 277,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 284,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 278,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 253,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 285,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 279,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 286,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 280,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 287,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 281,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 282,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 257,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 289,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 283,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 258,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 290,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 284,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 259,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 260,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 285,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 291,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 292,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 261,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 286,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 293,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 262,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 287,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 263,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 288,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 289,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 264,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 265,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 290,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 291,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 266,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 292,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 267,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 293,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 268,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 269,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 300,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 294,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 301,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 295,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 270,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 271,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 302,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 296,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 272,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 303,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 297,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 304,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 273,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 298,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 305,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 299,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 274,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 300,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 301,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 308,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 302,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 309,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 303,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 310,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 279,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 304,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 305,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 311,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 280,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 306,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 307,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 314,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 283,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 308,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 284,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 309,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 315,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 310,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 285,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 311,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 286,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 312,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 287,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 313,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 288,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 314,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 289,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 320,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 321,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 315,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 290,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 316,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 322,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 323,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 317,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 324,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 318,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 293,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 325,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 294,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 319,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "frame_idx": 320,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "frame_idx": 326,
+      "bucket": [
+        3,
+        1
+      ]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "frame_idx": 295,
+      "bucket": [
+        3,
+        1
+      ]
+    }
+  ]
+}

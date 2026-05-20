@@ -33,6 +33,7 @@ from chuck_dreamer.config import load_config
 
 from ..dataset import episode_bounds_from_meta, get_frame
 from ..runtime import init_from_config
+from ..scene_bg import ensure_scene_bg
 from ..types import CameraCalibration
 from .common import override_option
 
@@ -52,14 +53,25 @@ _MAX_H    = 720
                    "Default: object_left,object_mid,object_right from config.")
 @click.option("--frame", "frame_idx", default=0, type=int,
               help="Frame index within each episode to test (default 0).")
-@click.option("--segmenter", type=click.Choice(["color", "sam2"]), default="color",
-              help="Segmentation backend (default: color heuristic).")
+@click.option("--segmenter", type=click.Choice(["bg", "color", "sam2"]), default="bg",
+              help="Segmentation backend. 'bg' builds a per-pixel reference "
+                   "from the empty-mat episode and segments by background "
+                   "subtraction (recommended). 'color' uses a brightness "
+                   "floodfill from the click. 'sam2' uses the SAM2 image "
+                   "predictor if installed.")
+@click.option("--rebuild-bg", is_flag=True, default=False,
+              help="Force recompute of the scene background (default: reuse "
+                   "cached scene_bg.npz if present).")
+@click.option("--bg-samples", default=16, type=int,
+              help="Frames sampled from the empty episode to build the "
+                   "background model (default 16).")
 @click.option("--n-yaw-inits", default=None, type=int,
               help="Override object_localization.object.n_yaw_inits.")
 @override_option
 @click.pass_context
 def test_object_pose_cmd(ctx, dataset_id: str, episode_csv: str | None,
                          frame_idx: int, segmenter: str,
+                         rebuild_bg: bool, bg_samples: int,
                          n_yaw_inits: int | None,
                          overrides: tuple[str, ...]) -> None:
   """Click each object frame; print recovered world (x, y) and draw the
@@ -99,6 +111,17 @@ def test_object_pose_cmd(ctx, dataset_id: str, episode_csv: str | None,
     est_cfg["n_yaw_inits"] = int(n_yaw_inits)
   est_cfg.setdefault("sam2_checkpoint", ol_cfg.sam2_checkpoint)
 
+  scene_bg = None
+  if segmenter == "bg":
+    click.echo(f"  preparing scene background from episode "
+               f"{ol_cfg.episode_empty} ({bg_samples} samples) ...")
+    scene_bg = ensure_scene_bg(
+      cache_root, dataset_id, ol_cfg.camera_key,
+      ol_cfg.episode_empty, n_samples=bg_samples, rebuild=rebuild_bg,
+    )
+    click.echo(f"  scene background ready (n_frames={scene_bg.n_frames}, "
+               f"shape={scene_bg.median.shape})")
+
   click.echo(f"  loading mesh from {mesh_path} ...")
   t = time.perf_counter()
   estimator = ObjectPoseEstimator(
@@ -107,6 +130,7 @@ def test_object_pose_cmd(ctx, dataset_id: str, episode_csv: str | None,
     config      = est_cfg,
     device      = ol_cfg.device,
     use_sam2    = (segmenter == "sam2"),
+    scene_bg    = scene_bg,
   )
   click.echo(f"  estimator ready in {time.perf_counter()-t:.1f}s  "
              f"(segmenter={segmenter}, n_yaw_inits={estimator.n_yaw_inits})")
@@ -129,7 +153,8 @@ def test_object_pose_cmd(ctx, dataset_id: str, episode_csv: str | None,
     global_idx = ep_fr + max(0, min(ep_to - ep_fr - 1, int(frame_idx)))
     rgb = get_frame(ds, global_idx, ol_cfg.camera_key)
 
-    prompt = _click_object(rgb, dataset_id, ep, global_idx)
+    from ..prompts import click_object
+    prompt = click_object(rgb, banner=f"{dataset_id}  ep={ep} (global {global_idx})")
     if prompt is None:
       click.echo("  no click captured; skipping episode.")
       continue
@@ -149,7 +174,8 @@ def test_object_pose_cmd(ctx, dataset_id: str, episode_csv: str | None,
     click.echo(f"    xyz_mm    = ({pose.xyz_mm[0]:+8.2f}, {pose.xyz_mm[1]:+8.2f}, "
                f"{pose.xyz_mm[2]:+8.2f})")
     click.echo(f"    rest_face = {pose.resting_face_class}")
-    click.echo(f"    yaw_deg   = {np.degrees(pose.yaw_rad):+.1f}")
+    click.echo(f"    yaw_deg   = {np.degrees(pose.yaw_rad):+.1f}  "
+               f"tilt_deg = {np.degrees(pose.tilt_rad):.2f}")
     click.echo(f"    residual  = {pose.reprojection_error_px:.2f}px  "
                f"confidence={pose.confidence:.2f}")
 
@@ -157,61 +183,6 @@ def test_object_pose_cmd(ctx, dataset_id: str, episode_csv: str | None,
       rgb, prompt, pose, estimator, ep, global_idx, dataset_id,
       segmenter=segmenter,
     )
-
-
-def _click_object(rgb: np.ndarray, dataset_id: str, ep: int, global_idx: int
-                  ) -> tuple[int, int] | None:
-  """Pop a window, return the first left-click as (u, v) in image pixels."""
-  import cv2
-
-  H, W = rgb.shape[:2]
-  scale = min(_MAX_W / W, _MAX_H / H, 1.0)
-  win_w = int(W * scale)
-  canvas_h = int(H * scale)
-  win_h = _BANNER_H + canvas_h + _FOOTER_H
-
-  state: dict = {"click": None, "done": False}
-
-  def on_mouse(event, x, y, _flags, _ud):
-    if event != cv2.EVENT_LBUTTONDOWN:
-      return
-    if y < _BANNER_H or y >= _BANNER_H + canvas_h:
-      return
-    u = (x) / scale
-    v = (y - _BANNER_H) / scale
-    if not (0 <= u < W and 0 <= v < H):
-      return
-    state["click"] = (int(round(u)), int(round(v)))
-    state["done"]  = True
-
-  cv2.namedWindow(_WIN_NAME, cv2.WINDOW_AUTOSIZE)
-  cv2.setMouseCallback(_WIN_NAME, on_mouse)
-  bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-  if scale != 1.0:
-    bgr = cv2.resize(bgr, (win_w, canvas_h), interpolation=cv2.INTER_AREA)
-
-  try:
-    while not state["done"]:
-      canvas = np.zeros((win_h, win_w, 3), dtype=np.uint8)
-      canvas[:_BANNER_H, :] = (32, 32, 32)
-      canvas[_BANNER_H + canvas_h:, :] = (48, 48, 48)
-      canvas[_BANNER_H:_BANNER_H + canvas_h, :, :] = bgr
-      cv2.putText(canvas,
-                  f"{dataset_id}  ep={ep} (global {global_idx})",
-                  (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                  (230, 230, 230), 1, cv2.LINE_AA)
-      cv2.putText(canvas, "click anywhere on the object  |  q skip",
-                  (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                  (180, 220, 255), 1, cv2.LINE_AA)
-      cv2.imshow(_WIN_NAME, canvas)
-      key = cv2.waitKey(16) & 0xFFFF
-      if key in (ord('q'), ord('Q'), 27):
-        state["done"] = True
-        break
-  finally:
-    cv2.destroyWindow(_WIN_NAME)
-    cv2.waitKey(1)
-  return state["click"]
 
 
 def _show_pose(rgb: np.ndarray, prompt: tuple[int, int], pose, estimator,

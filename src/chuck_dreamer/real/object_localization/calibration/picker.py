@@ -1,18 +1,22 @@
 """Interactive cv2 picker for checkerboard calibration frames.
 
 Loops over one dataset at a time. The user navigates the
-checkerboard episode with the keyboard, drags a bounding box around
-the checkerboard with the mouse, and presses Enter to add (frame, bbox)
-to the dataset's picks. Picks survive a relaunch via picks.json so
+checkerboard episode with the keyboard, presses ``s`` to draw a
+bounding box around the checkerboard via ``cv2.selectROI`` (a
+built-in OpenCV widget), and presses Enter to add (frame, bbox) to
+the dataset's picks. Picks survive a relaunch via picks.json so
 incremental selection is possible.
+
+The ROI drawing is delegated to ``cv2.selectROI`` because the
+homemade in-canvas mouse-drag handler had platform-dependent issues
+on macOS where MOUSEMOVE events weren't consistently delivered.
 
 Controls (visible in the banner):
 
   ←  / →        frame -1 / +1
   n  / p        frame +10 / -10
-  Shift+→/←     frame +100 / -100
   Home / End    jump to episode start / end
-  mouse drag    draw a bounding box around the checkerboard
+  s             draw bbox via cv2.selectROI (drag a rectangle, then Enter)
   c             clear the current bbox without committing
   Enter         add (current frame, current bbox) as a pick
   Backspace     remove pick at current frame, if any
@@ -121,48 +125,40 @@ def pick_frames(
     return img
 
   state: dict = {
-    "drag_start": None,         # (u, v) in image coords
-    "drag_cur":   None,
-    "bbox":       None,         # (x0, y0, x1, y1) in image coords
-    "dirty":      True,
-    "quit":       False,
-    "advance":    False,
+    "bbox":    None,            # (x0, y0, x1, y1) in image coords
+    "dirty":   True,
+    "quit":    False,
+    "advance": False,
   }
-
-  def _win_to_img(x: int, y: int) -> tuple[int, int]:
-    u = x / scale
-    v = (y - _BANNER_H) / scale
-    return int(round(u)), int(round(v))
 
   def _img_to_win(u: int, v: int) -> tuple[int, int]:
     return int(round(u * scale)), int(round(v * scale + _BANNER_H))
 
-  def on_mouse(event, x, y, _flags, _ud):
-    if y < _BANNER_H or y >= _BANNER_H + canvas_h:
-      return
-    if event == cv2.EVENT_LBUTTONDOWN:
-      state["drag_start"] = _win_to_img(x, y)
-      state["drag_cur"]   = state["drag_start"]
-      state["dirty"]      = True
-    elif event == cv2.EVENT_MOUSEMOVE and state["drag_start"] is not None:
-      state["drag_cur"] = _win_to_img(x, y)
-      state["dirty"]    = True
-    elif event == cv2.EVENT_LBUTTONUP and state["drag_start"] is not None:
-      end = _win_to_img(x, y)
-      u0, v0 = state["drag_start"]
-      u1, v1 = end
-      x0, x1 = sorted((u0, u1))
-      y0, y1 = sorted((v0, v1))
-      x0 = max(0, x0); y0 = max(0, y0)
-      x1 = min(Wimg, x1); y1 = min(Himg, y1)
-      if x1 - x0 >= 8 and y1 - y0 >= 8:
-        state["bbox"] = (x0, y0, x1, y1)
-      state["drag_start"] = None
-      state["drag_cur"]   = None
-      state["dirty"]      = True
+  def _select_roi() -> tuple[int, int, int, int] | None:
+    """Open cv2.selectROI on the current frame (full-resolution) and
+    return ``(x0, y0, x1, y1)`` in image coords, or None on cancel.
+
+    selectROI opens its own sub-window. It blocks until the user
+    presses Enter/Space (accept) or 'c' (cancel) or closes the window.
+    """
+    img = _frame(cursor)
+    if img is None:
+      return None
+    # Display in BGR so colors look right. selectROI returns (x, y, w, h).
+    bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    # showCrosshair=True puts cross-hairs in the box; fromCenter=False
+    # makes the first click anchor a corner (more intuitive than
+    # centroid-based).
+    roi = cv2.selectROI("select bbox (drag, then Enter / Space to accept, c to cancel)",
+                        bgr, showCrosshair=True, fromCenter=False)
+    cv2.destroyWindow("select bbox (drag, then Enter / Space to accept, c to cancel)")
+    cv2.waitKey(1)
+    x, y, w, h = (int(v) for v in roi)
+    if w < 8 or h < 8:
+      return None
+    return (x, y, x + w, y + h)
 
   cv2.namedWindow(_WIN_NAME, cv2.WINDOW_AUTOSIZE)
-  cv2.setMouseCallback(_WIN_NAME, on_mouse)
 
   # First-frame decode pump: draw a "loading" placeholder, force the
   # window to show, then block on the (slow) first decode. After that
@@ -193,6 +189,14 @@ def pick_frames(
 
       key = cv2.waitKey(16) & 0xFFFF
       if key == 0xFFFF:
+        continue
+      # ROI selection is handled here (not in _handle_key) because it
+      # needs access to the current-frame decoder.
+      if key in (ord('s'), ord('S')):
+        roi = _select_roi()
+        if roi is not None:
+          state["bbox"] = roi
+        state["dirty"] = True
         continue
       handled, new_cursor = _handle_key(key, cursor, fr, to, picks_by_frame, state)
       if not handled:
@@ -293,12 +297,8 @@ def _render(*, frame: np.ndarray | None, Wimg: int, Himg: int, scale: float,
     cv2.putText(canvas, "PICK", (x0 + 4, y0 + 18),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2, cv2.LINE_AA)
 
-  # Live drag rectangle
-  if state["drag_start"] is not None and state["drag_cur"] is not None:
-    s_x, s_y = img_to_win(*state["drag_start"])
-    c_x, c_y = img_to_win(*state["drag_cur"])
-    cv2.rectangle(canvas, (s_x, s_y), (c_x, c_y), (0, 200, 255), 2)
-  elif state["bbox"] is not None:
+  # Pending bbox (drawn via cv2.selectROI, awaiting Enter)
+  if state["bbox"] is not None:
     x0, y0 = img_to_win(state["bbox"][0], state["bbox"][1])
     x1, y1 = img_to_win(state["bbox"][2], state["bbox"][3])
     cv2.rectangle(canvas, (x0, y0), (x1, y1), (0, 200, 255), 2)
@@ -310,12 +310,14 @@ def _render(*, frame: np.ndarray | None, Wimg: int, Himg: int, scale: float,
   title = f"{dataset_id}  |  frame {frame_idx}  ({frame_idx - fr + 1}/{to - fr})  |  picks: {n_picks}"
   cv2.putText(canvas, title, (10, 24),
               cv2.FONT_HERSHEY_SIMPLEX, 0.65, (230, 230, 230), 1, cv2.LINE_AA)
-  status = "PICK SAVED HERE" if pick_here else ("BBOX READY" if state["bbox"] else "draw a bbox around the checkerboard, then Enter")
+  status = ("PICK SAVED HERE" if pick_here else
+            ("BBOX READY (press Enter to commit)" if state["bbox"] else
+             "press 's' to draw a bbox, then Enter to commit"))
   cv2.putText(canvas, status, (10, 50),
               cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 200, 255), 1, cv2.LINE_AA)
 
   # Footer / controls
-  controls = "<-/->  +/-1   n/p  +/-10   Enter add   Bksp remove   c clear bbox   Tab next dataset   q quit"
+  controls = "<-/->  +/-1   n/p  +/-10   s draw-bbox   Enter add   Bksp remove   c clear bbox   Tab next dataset   q quit"
   cv2.putText(canvas, controls, (10, win_h - 8),
               cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
 

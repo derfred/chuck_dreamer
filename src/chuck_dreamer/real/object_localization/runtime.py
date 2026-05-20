@@ -43,6 +43,8 @@ class ObjectLocalizationConfig:
   intrinsics_rms_threshold_px: float
   intrinsics_coverage_grid:   tuple[int, int]
   intrinsics_distortion_model: int   # 0, 2, or 5 (see configs/default.yaml)
+  intrinsics_fix_aspect_ratio:    bool
+  intrinsics_fix_principal_point: bool
 
   extrinsics_rms_threshold_px: float
   extrinsics_annotation_frame: int
@@ -145,6 +147,8 @@ def _parse(raw: dict[str, Any]) -> ObjectLocalizationConfig:
     intrinsics_rms_threshold_px  = float(intrinsics.get("rms_threshold_px", 0.3)),
     intrinsics_coverage_grid     = coverage,
     intrinsics_distortion_model  = _parse_distortion_model(intrinsics.get("distortion_model", 5)),
+    intrinsics_fix_aspect_ratio    = bool(intrinsics.get("fix_aspect_ratio", False)),
+    intrinsics_fix_principal_point = bool(intrinsics.get("fix_principal_point", False)),
 
     extrinsics_rms_threshold_px  = float(extrinsics.get("rms_threshold_px", 1.0)),
     extrinsics_annotation_frame  = int(extrinsics.get("annotation_frame", 0)),

@@ -356,13 +356,36 @@ def calibrate_intrinsics_pooled(
   img_points = [d.corners for d in detections]
 
   calib_flags = _distortion_flags(cv2, ol_cfg.intrinsics_distortion_model)
+  if ol_cfg.intrinsics_fix_aspect_ratio:
+    calib_flags |= cv2.CALIB_FIX_ASPECT_RATIO
+  if ol_cfg.intrinsics_fix_principal_point:
+    calib_flags |= cv2.CALIB_FIX_PRINCIPAL_POINT
   logger.info("[pool] running cv2.calibrateCamera on %d views "
-              "(distortion_model=%d coefficients)...",
-              len(detections), ol_cfg.intrinsics_distortion_model)
+              "(distortion_model=%d coefficients, fix_aspect_ratio=%s, "
+              "fix_principal_point=%s)...",
+              len(detections), ol_cfg.intrinsics_distortion_model,
+              ol_cfg.intrinsics_fix_aspect_ratio,
+              ol_cfg.intrinsics_fix_principal_point)
   t_cal = time.perf_counter()
   criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
+  K_init: np.ndarray | None = None
+  dist_init: np.ndarray | None = None
+  if (ol_cfg.intrinsics_fix_aspect_ratio
+      or ol_cfg.intrinsics_fix_principal_point):
+    # CALIB_FIX_* requires K to be initialized with the desired values
+    # (OpenCV holds whatever's in K at the corresponding positions).
+    # Seed with a sane guess: fx=fy=image_width (~50° FOV) and the
+    # principal point at the image center.
+    W, H = image_size
+    K_init = np.array([
+      [float(W), 0.0,      W / 2.0],
+      [0.0,      float(W), H / 2.0],
+      [0.0,      0.0,      1.0],
+    ], dtype=np.float64)
+    dist_init = np.zeros(5, dtype=np.float64)
+    calib_flags |= cv2.CALIB_USE_INTRINSIC_GUESS
   rms_px, K, dist, rvecs, tvecs = cv2.calibrateCamera(
-    obj_points, img_points, image_size, None, None,
+    obj_points, img_points, image_size, K_init, dist_init,
     flags=calib_flags, criteria=criteria,
   )
   logger.info("[pool]   calibrateCamera done in %.1fs (rms=%.3fpx).",

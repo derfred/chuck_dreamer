@@ -304,6 +304,11 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
             object_uv = episode.get("object_uv")
             if object_uv is not None:
                 f.create_dataset("object_uv", data=np.asarray(object_uv, dtype=np.float32))
+            object_gap = episode.get("object_gap_too_long")
+            if object_gap is not None:
+                f.create_dataset(
+                    "object_gap_too_long",
+                    data=np.asarray(object_gap, dtype=np.bool_))
 
             self._write_segmentation_hdf5(f, episode)
 
@@ -470,6 +475,11 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
           np.asarray(object_uv_raw, dtype=np.float32)
           if object_uv_raw is not None else None
         )
+        object_gap_raw = episode.get("object_gap_too_long")
+        object_gap = (
+          np.asarray(object_gap_raw, dtype=np.bool_)
+          if object_gap_raw is not None else None
+        )
 
         seg_target     = episode.get("segmentation_target")
         seg_goal       = episode.get("segmentation_goal")
@@ -490,6 +500,8 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             rec.log("object_xy",    rr.Scalars(object_xy[i].tolist()))
             if object_uv is not None:
                 rec.log("object_uv",  rr.Scalars(object_uv[i].tolist()))
+            if object_gap is not None:
+                rec.log("object_gap_too_long", rr.Scalars(int(object_gap[i])))
 
             if seg_target is not None:
                 rec.log("camera/seg/target",

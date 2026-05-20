@@ -1,0 +1,42 @@
+{
+  "K": [
+    [
+      953.3939589183917,
+      0.0,
+      1012.5278286145038
+    ],
+    [
+      0.0,
+      3852.6670878463565,
+      576.0749056717523
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "dist": [
+    0.010673250909621885,
+    -0.6643014348275967,
+    -0.00401629245135461,
+    0.021969490430608887,
+    0.0
+  ],
+  "image_size": [
+    1920,
+    1080
+  ],
+  "intrinsic_rms_px": 1.0542469754481691,
+  "n_views": 480,
+  "source_datasets": [
+    "chorfiyoussef/task_2_1805_1",
+    "chorfiyoussef/task_2_1805_2",
+    "chorfiyoussef/task_2_1805_3",
+    "chorfiyoussef/task_1_1805_2",
+    "chorfiyoussef/task_1_1805_3",
+    "chorfiyoussef/task_1_1805_4",
+    "chorfiyoussef/task_1_1805_5",
+    "chorfiyoussef/task_1_1805_6"
+  ]
+}

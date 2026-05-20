@@ -173,22 +173,27 @@ class OnlineEvaluator:
         src_posterior.append(posterior_err)
         src_prior.append(prior_err)
 
+        # Per-episode rows live under a separate ``eval/per_episode/*``
+        # namespace so the headline ``recon/*`` series stays one point
+        # per eval phase. Without this, each phase wrote ~30 closely
+        # spaced rows followed by a long gap, which makes the dashboard
+        # smoother go haywire and the trend illegible.
         log_dict: dict[str, Any] = {
-          "episode_index":         global_idx,
-          "source_dir":            src.label,
-          "source":                episode.stem,
-          "recon/posterior_mean":  float(posterior_err.mean()),
-          "recon/prior_mean":      float(prior_err.mean()),
-          "recon/posterior_final": float(posterior_err[-1]),
-          "recon/prior_final":     float(prior_err[-1]),
-          "horizon":               int(prior_err.shape[0]),
+          "eval/per_episode/episode_index":         global_idx,
+          "eval/per_episode/source_dir":            src.label,
+          "eval/per_episode/source":                episode.stem,
+          "eval/per_episode/recon/posterior_mean":  float(posterior_err.mean()),
+          "eval/per_episode/recon/prior_mean":      float(prior_err.mean()),
+          "eval/per_episode/recon/posterior_final": float(posterior_err[-1]),
+          "eval/per_episode/recon/prior_final":     float(prior_err[-1]),
+          "eval/per_episode/horizon":               int(prior_err.shape[0]),
         }
 
         if result.reward_prior is not None:
           rew_err_prior = reward_abs_error(result.reward_prior, result.reward)
           reward_prior_curves.append(rew_err_prior)
-          log_dict["reward/prior_mae_mean"]  = float(rew_err_prior.mean())
-          log_dict["reward/prior_mae_final"] = float(rew_err_prior[-1])
+          log_dict["eval/per_episode/reward/prior_mae_mean"]  = float(rew_err_prior.mean())
+          log_dict["eval/per_episode/reward/prior_mae_final"] = float(rew_err_prior[-1])
 
         if burn_in > 0:
           zero_pred = zero_dynamics_prediction(result.full_target_obs, burn_in - 1)
@@ -196,7 +201,7 @@ class OnlineEvaluator:
           zero_open = full_err[burn_in:]
           if zero_open.size > 0:
             zero_dyn_curves.append(zero_open)
-            log_dict["recon/zero_dyn_mean"] = float(zero_open.mean())
+            log_dict["eval/per_episode/recon/zero_dyn_mean"] = float(zero_open.mean())
 
         eval_tracker.log(log_dict)
 
@@ -217,15 +222,19 @@ class OnlineEvaluator:
         global_idx += 1
 
       if src_posterior and len(active) > 1:
+        # Per-source aggregates ride under a source-specific prefix so
+        # multiple sources don't overwrite each other (or the headline
+        # phase summary) at the same step. Keys look like e.g.
+        # ``eval/by_source/eval_real/recon/posterior_mean``.
         src_post_curve  = stack_curves(src_posterior)
         src_prior_curve = stack_curves(src_prior)
+        prefix = f"eval/by_source/{src.label}"
         eval_tracker.log({
-          "source_dir":            src.label,
-          "num_episodes":          len(src_posterior),
-          "recon/posterior_mean":  float(np.nanmean(src_post_curve)),
-          "recon/prior_mean":      float(np.nanmean(src_prior_curve)),
-          "recon/posterior_final": float(np.nanmean(src_post_curve[:, -1])),
-          "recon/prior_final":     float(np.nanmean(src_prior_curve[:, -1])),
+          f"{prefix}/num_episodes":          len(src_posterior),
+          f"{prefix}/recon/posterior_mean":  float(np.nanmean(src_post_curve)),
+          f"{prefix}/recon/prior_mean":      float(np.nanmean(src_prior_curve)),
+          f"{prefix}/recon/posterior_final": float(np.nanmean(src_post_curve[:, -1])),
+          f"{prefix}/recon/prior_final":     float(np.nanmean(src_prior_curve[:, -1])),
         })
 
     if ep_count == 0:

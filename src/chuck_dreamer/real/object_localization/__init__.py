@@ -7,7 +7,15 @@ Three deliverables (see ``object_localization_spec.md``):
   3. ``ObjectPoseEstimator`` — per-frame object pose estimation.
 """
 from .estimator import ObjectPose, ObjectPoseEstimator
+from .prompts import (
+  click_object,
+  load_prompt,
+  prompt_or_click,
+  save_prompt,
+  sidecar_path,
+)
 from .runtime import ObjectLocalizationConfig, active, init_from_config
+from .smoother import SmoothedFrame, SmoothedTrajectoryEstimator
 from .types import (
   CalibrationMissingError,
   CameraCalibration,
@@ -29,6 +37,8 @@ __all__ = [
   "ObjectPose",
   "ObjectPoseEstimator",
   "ObjectLocalizationConfig",
+  "SmoothedFrame",
+  "SmoothedTrajectoryEstimator",
   "active",
   "init_from_config",
   "CalibrationMissingError",
@@ -36,6 +46,11 @@ __all__ = [
   "Extrinsics",
   "Intrinsics",
   "MatDetection",
+  "click_object",
+  "load_prompt",
+  "prompt_or_click",
+  "save_prompt",
+  "sidecar_path",
   "dataset_cache_dir",
   "dataset_slug",
   "load_calibration",

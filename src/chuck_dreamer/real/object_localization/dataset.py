@@ -58,6 +58,20 @@ def episode_bounds_from_meta(dataset_id: str, episode_idx: int) -> tuple[int, in
   return int(row["dataset_from_index"]), int(row["dataset_to_index"])
 
 
+def all_episode_bounds_from_meta(dataset_id: str
+                                 ) -> list[tuple[int, tuple[int, int]]]:
+  """Return ``[(episode_idx, (from, to)), ...]`` for every episode in the
+  dataset, sourced from cached parquet metadata only.
+  """
+  from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # type: ignore
+  meta = LeRobotDatasetMetadata(dataset_id)
+  out: list[tuple[int, tuple[int, int]]] = []
+  for row in meta.episodes:
+    out.append((int(row["episode_index"]),
+                (int(row["dataset_from_index"]), int(row["dataset_to_index"]))))
+  return out
+
+
 def get_frame(ds: Any, frame_idx: int, camera_key: str) -> np.ndarray:
   """Pull frame ``frame_idx`` and return it as ``HxWx3 uint8`` RGB."""
   sample = ds[frame_idx]

@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+  from .scene_bg import SceneBackground
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +52,16 @@ def segment_image(
   rgb: np.ndarray,
   prompt: tuple[int, int] | list[tuple[int, int]],
   use_sam2: bool, checkpoint: str, device: str,
+  scene_bg: "SceneBackground | None" = None,
 ) -> np.ndarray | None:
-  """Single-frame segmentation. Returns a ``HxW bool`` mask or ``None``."""
+  """Single-frame segmentation. Returns a ``HxW bool`` mask or ``None``.
+
+  Backend selection (in order of preference):
+
+    1. SAM2, if ``use_sam2`` is set and importable.
+    2. Background subtraction, if a ``scene_bg`` reference is provided.
+    3. Color floodfill from the click (the original fallback).
+  """
   if use_sam2:
     sam = _get_sam2(checkpoint, device)
     pred = sam.image_predictor
@@ -63,6 +74,12 @@ def segment_image(
         return _largest_component(np.asarray(masks[0], dtype=bool))
       except Exception as e:
         logger.warning("SAM2 image predict failed (%s); using fallback.", e)
+  if scene_bg is not None:
+    mask = _bg_mask(rgb, prompt, scene_bg)
+    if mask is not None:
+      return mask
+    logger.warning("background-subtraction segmenter returned no component "
+                   "at the click; falling back to color floodfill.")
   return _fallback_mask(rgb, prompt)
 
 
@@ -70,6 +87,7 @@ def segment_video(
   frames: list[np.ndarray],
   first_frame_prompt: tuple[int, int] | list[tuple[int, int]],
   use_sam2: bool, checkpoint: str, device: str,
+  scene_bg: "SceneBackground | None" = None,
 ) -> list[np.ndarray | None]:
   """Propagate a mask through an episode. Returns per-frame masks."""
   if use_sam2:
@@ -82,7 +100,12 @@ def segment_video(
         logger.warning("SAM2 video predict failed (%s); falling back per-frame.", e)
   out: list[np.ndarray | None] = []
   for f in frames:
-    out.append(_fallback_mask(f, first_frame_prompt))
+    mask = None
+    if scene_bg is not None:
+      mask = _bg_mask(f, first_frame_prompt, scene_bg)
+    if mask is None:
+      mask = _fallback_mask(f, first_frame_prompt)
+    out.append(mask)
   return out
 
 
@@ -121,6 +144,52 @@ def _largest_component(mask: np.ndarray) -> np.ndarray | None:
   areas = stats[1:, cv2.CC_STAT_AREA]
   best = int(np.argmax(areas)) + 1
   return labels == best
+
+
+def _bg_mask(rgb: np.ndarray,
+              prompt: tuple[int, int] | list[tuple[int, int]],
+              scene_bg: "SceneBackground") -> np.ndarray | None:
+  """Background-subtraction segmentation, anchored at the click pixel.
+
+  Builds a global foreground mask via the scene model's per-pixel
+  median/std, then returns the connected component that contains the
+  click. Robust against shadows, the arm, and stray foreground blobs
+  elsewhere in the frame — the click picks the one we want.
+  """
+  import cv2
+  pts = _prompt_to_array(prompt)
+  u0 = int(round(pts[0, 0]))
+  v0 = int(round(pts[0, 1]))
+  H, W = rgb.shape[:2]
+  u0 = max(0, min(W - 1, u0))
+  v0 = max(0, min(H - 1, v0))
+
+  fg = scene_bg.foreground_mask(rgb)
+  if not fg.any():
+    return None
+
+  # Connected components on the foreground mask; pick the one the click
+  # lands in. If the click misses, fall back to the largest component
+  # within a small radius — typical when the click clipped the edge.
+  m = fg.astype(np.uint8)
+  num, labels, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+  if num <= 1:
+    return None
+
+  chosen = int(labels[v0, u0])
+  if chosen == 0:
+    # Search a small window around the click for the nearest foreground.
+    R = 30
+    y0 = max(0, v0 - R); y1 = min(H, v0 + R + 1)
+    x0 = max(0, u0 - R); x1 = min(W, u0 + R + 1)
+    window = labels[y0:y1, x0:x1]
+    cand = window[window != 0]
+    if cand.size == 0:
+      return None
+    chosen = int(np.bincount(cand).argmax())
+  if chosen == 0:
+    return None
+  return labels == chosen
 
 
 def _fallback_mask(rgb: np.ndarray, prompt: tuple[int, int] | list[tuple[int, int]]

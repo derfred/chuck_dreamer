@@ -22,7 +22,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Optional
 
 import numpy as np
 
@@ -36,10 +36,39 @@ from .render import (
 from .segment import segment_image, segment_video
 from .types import CameraCalibration
 
+if TYPE_CHECKING:
+  from .scene_bg import SceneBackground
+
 logger = logging.getLogger(__name__)
 
 
 _RestingFaceClass = Literal["square", "triangle"]
+
+
+# 6-DOF refinement parameter vector: [x, y, dz, droll, dpitch, dyaw]
+#                                     mm mm mm   rad    rad   rad
+#
+# `x_scale` makes the LM step proportional to each scale, so a step of
+# 1 unit in the rescaled space corresponds to ~1 mm or ~0.01 rad
+# (~0.6°). Without this, LM rescales by the diagonal of J^T J and the
+# angular DOFs end up with effectively-zero step (because rasterized
+# residuals have no gradient under sub-pixel angular changes).
+_PARAM_SCALE_6DOF = np.array([1.0, 1.0, 1.0, 0.01, 0.01, 0.01])
+
+# Finite-difference step for the trf method. Multiplied by `x_scale`
+# under the hood, so 0.5 here = 0.5 mm for positional DOFs and
+# 0.005 rad (~0.3°) for angular DOFs — enough to move silhouette
+# pixels by at least one pixel in most viewing geometries.
+_DIFF_STEP_6DOF   = 0.5
+
+# Soft bounds so the optimizer can't wander into a different rest
+# class. ±20 mm in z, ±15° in tilt, full freedom in yaw + xy. (yaw
+# bounds are wider than 2π so they're effectively unbounded but TRF
+# still needs finite values.)
+_PARAM_BOUNDS_6DOF = (
+  np.array([-np.inf, -np.inf, -20.0, -0.26, -0.26, -10.0]),
+  np.array([ np.inf,  np.inf,  20.0,  0.26,  0.26,  10.0]),
+)
 
 
 @dataclass
@@ -77,10 +106,12 @@ class ObjectPoseEstimator:
     config: dict | None = None,
     device: str = "cuda",
     use_sam2: bool | None = None,
+    scene_bg: "SceneBackground | None" = None,
   ) -> None:
     self.calibration = calibration
     self.mesh        = load_mesh(Path(mesh_path))
     self.device      = device
+    self.scene_bg    = scene_bg
 
     config = dict(config or {})
     self.sam2_checkpoint = str(config.get("sam2_checkpoint", "facebook/sam2-hiera-large"))
@@ -122,7 +153,8 @@ class ObjectPoseEstimator:
     else:
       effective_prompt = prompt
     mask = segment_image(image, effective_prompt, self.use_sam2,
-                         self.sam2_checkpoint, self.device)
+                         self.sam2_checkpoint, self.device,
+                         scene_bg=self.scene_bg)
     if mask is None:
       return None
     return self._fit_pose(image, mask, prev_pose)
@@ -140,7 +172,8 @@ class ObjectPoseEstimator:
       raise ValueError("estimate_episode(): first_frame_prompt is required.")
 
     masks = segment_video(frame_list, first_frame_prompt, self.use_sam2,
-                          self.sam2_checkpoint, self.device)
+                          self.sam2_checkpoint, self.device,
+                          scene_bg=self.scene_bg)
 
     out: list[ObjectPose | None] = []
     prev: ObjectPose | None = None
@@ -168,18 +201,32 @@ class ObjectPoseEstimator:
       rest = self._episode.resting
       yaw  = prev_pose.yaw_rad
       xy   = prev_pose.xy_mm.copy()
+      # Warm-start the 6-DOF state from the previous frame.
+      dz0  = float(prev_pose.xyz_mm[2] - rest.z_mm)
+      rpy0 = (0.0, 0.0, yaw)  # roll, pitch carry no episode-level memory yet
     else:
       rest, yaw, xy = self._search_rest_class(image, mask, xy0)
       if rest is None:
         return None
       self._episode.resting = rest
+      dz0  = 0.0
+      rpy0 = (0.0, 0.0, yaw)
 
-    xy_ref, yaw_ref, sil_rms = self._refine_silhouette(mask, rest, xy, yaw)
-    xy_ed, yaw_ed, edge_rms = self._refine_edges(image, mask, rest, xy_ref, yaw_ref)
+    # Coarse refinement: silhouette in 6-DOF, seeded from the rest
+    # hypothesis (or the previous frame in warm-start). The rest-class
+    # search above was already 3-DOF; this run lets the optimizer
+    # recover small tilts + height offsets the rest hypothesis can't.
+    xy_ref, dz_ref, rpy_ref, sil_rms = self._refine_silhouette_6dof(
+      mask, rest, xy, dz0, rpy0)
+    # Fine refinement: edges in 6-DOF, seeded from silhouette result.
+    xy_ed, dz_ed, rpy_ed, edge_rms = self._refine_edges_6dof(
+      image, mask, rest, xy_ref, dz_ref, rpy_ref)
 
-    return _make_pose(self.mesh, rest, xy_ed, yaw_ed,
-                      residual_px=edge_rms if edge_rms is not None else sil_rms,
-                      mask=mask, camera=self.camera)
+    return _make_pose(
+      self.mesh, rest, xy_ed, dz_ed, rpy_ed,
+      residual_px=edge_rms if edge_rms is not None else sil_rms,
+      mask=mask, camera=self.camera,
+    )
 
   def _search_rest_class(self, image: np.ndarray, mask: np.ndarray,
                           xy_seed: np.ndarray) -> tuple[_RestHypothesis | None, float, np.ndarray]:
@@ -196,6 +243,108 @@ class ObjectPoseEstimator:
       return None, 0.0, xy_seed
     _, rest, yaw, xy = best
     return rest, yaw, xy
+
+  def _refine_silhouette_6dof(self, mask: np.ndarray, rest: _RestHypothesis,
+                               xy0: np.ndarray, dz0: float,
+                               rpy0: tuple[float, float, float]
+                               ) -> tuple[np.ndarray, float,
+                                          tuple[float, float, float],
+                                          float | None]:
+    """6-DOF silhouette refinement. Params: (x, y, dz, droll, dpitch, dyaw).
+
+    `dz`, `droll`, `dpitch` are deltas from the rest hypothesis. Uses
+    ``method='trf'`` with ``x_scale`` so the per-coordinate LM step
+    size is comparable across mm (positional) and rad (angular) DOFs,
+    and ``diff_step`` so finite-difference probes are large enough to
+    actually move silhouette pixels (otherwise the rasterized residual
+    has zero gradient with respect to sub-pixel parameter changes).
+    """
+    from scipy.optimize import least_squares
+
+    obs_contour = _mask_contour(mask)
+    if obs_contour is None or len(obs_contour) < 5:
+      return xy0, dz0, rpy0, None
+    obs_dt = _distance_transform(mask, self.camera.image_size)
+
+    def residual(params: np.ndarray) -> np.ndarray:
+      x, y, dz, droll, dpitch, dyaw = params
+      ren_mask, ren_contour = self._render_silhouette_6dof(
+        rest, np.array([x, y]), dz, (droll, dpitch, dyaw))
+      if ren_contour is None or len(ren_contour) < 5:
+        return np.full(64, 1e3, dtype=np.float64)
+      ren_dt = _distance_transform_from_contour(ren_contour, self.camera.image_size)
+      d_obs_to_ren = ren_dt[obs_contour[:, 1].astype(int), obs_contour[:, 0].astype(int)]
+      d_ren_to_obs = obs_dt[ren_contour[:, 1].astype(int), ren_contour[:, 0].astype(int)]
+      return np.concatenate([d_obs_to_ren, d_ren_to_obs]).astype(np.float64)
+
+    x0 = np.array([xy0[0], xy0[1], dz0, rpy0[0], rpy0[1], rpy0[2]],
+                  dtype=np.float64)
+    try:
+      sol = least_squares(residual, x0, method="trf",
+                          x_scale=_PARAM_SCALE_6DOF,
+                          diff_step=_DIFF_STEP_6DOF,
+                          bounds=_PARAM_BOUNDS_6DOF,
+                          max_nfev=self.chamfer_max_iter * 2,
+                          xtol=1e-6, ftol=1e-6)
+    except Exception as e:
+      logger.warning("silhouette 6dof refinement failed: %s", e)
+      return xy0, dz0, rpy0, None
+    logger.debug("silhouette 6dof: nfev=%d status=%d cost=%.3f x=%s",
+                  sol.nfev, sol.status, float(sol.cost), sol.x)
+    res_norm = float(np.sqrt(np.mean(sol.fun ** 2))) if sol.fun.size else None
+    return (np.asarray(sol.x[:2]), float(sol.x[2]),
+            (float(sol.x[3]), float(sol.x[4]), float(sol.x[5])),
+            res_norm)
+
+  def _refine_edges_6dof(self, image: np.ndarray, mask: np.ndarray,
+                          rest: _RestHypothesis,
+                          xy0: np.ndarray, dz0: float,
+                          rpy0: tuple[float, float, float]
+                          ) -> tuple[np.ndarray, float,
+                                     tuple[float, float, float],
+                                     float | None]:
+    """6-DOF edge refinement; same shape as _refine_silhouette_6dof."""
+    import cv2
+    from scipy.optimize import least_squares
+
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, self.canny_low, self.canny_high)
+    edge_dt = cv2.distanceTransform((edges == 0).astype(np.uint8), cv2.DIST_L2, 3)
+
+    W, H = self.camera.image_size
+
+    def residual(params: np.ndarray) -> np.ndarray:
+      x, y, dz, droll, dpitch, dyaw = params
+      edges_proj = self._render_edges_6dof(
+        rest, np.array([x, y]), dz, (droll, dpitch, dyaw))
+      if not edges_proj:
+        return np.full(64, 1e3, dtype=np.float64)
+      sample_pts: list[np.ndarray] = []
+      for p0, p1 in edges_proj:
+        n = max(2, int(np.linalg.norm(p1 - p0) / 4.0))
+        ts = np.linspace(0.0, 1.0, n)
+        seg = p0[None, :] * (1 - ts[:, None]) + p1[None, :] * ts[:, None]
+        sample_pts.append(seg)
+      pts = np.concatenate(sample_pts, axis=0)
+      u = np.clip(np.round(pts[:, 0]).astype(int), 0, W - 1)
+      v = np.clip(np.round(pts[:, 1]).astype(int), 0, H - 1)
+      return edge_dt[v, u].astype(np.float64)
+
+    x0 = np.array([xy0[0], xy0[1], dz0, rpy0[0], rpy0[1], rpy0[2]],
+                  dtype=np.float64)
+    try:
+      sol = least_squares(residual, x0, method="trf",
+                          x_scale=_PARAM_SCALE_6DOF,
+                          diff_step=_DIFF_STEP_6DOF,
+                          bounds=_PARAM_BOUNDS_6DOF,
+                          max_nfev=self.edges_max_iter * 2,
+                          xtol=1e-6, ftol=1e-6)
+    except Exception:
+      return xy0, dz0, rpy0, None
+    res_norm = float(np.sqrt(np.mean(sol.fun ** 2))) if sol.fun.size else None
+    return (np.asarray(sol.x[:2]), float(sol.x[2]),
+            (float(sol.x[3]), float(sol.x[4]), float(sol.x[5])),
+            res_norm)
 
   def _refine_silhouette(self, mask: np.ndarray, rest: _RestHypothesis,
                           xy0: np.ndarray, yaw0: float
@@ -271,14 +420,36 @@ class ObjectPoseEstimator:
     xyz = np.array([xy[0], xy[1], rest.z_mm])
     return transform_object(self.mesh.vertices_mm, R, xyz)
 
+  def _world_vertices_6dof(self, rest: _RestHypothesis, xy: np.ndarray,
+                            dz: float, rpy: tuple[float, float, float]) -> np.ndarray:
+    """6-DOF analogue: applies dyaw o tilt-delta o R_tilt, plus (xy, z+dz)."""
+    droll, dpitch, dyaw = rpy
+    R = (_yaw_about_z(dyaw)
+         @ _small_tilt(droll, dpitch)
+         @ rest.R_tilt)
+    xyz = np.array([xy[0], xy[1], rest.z_mm + dz])
+    return transform_object(self.mesh.vertices_mm, R, xyz)
+
   def _render_silhouette(self, rest: _RestHypothesis, xy: np.ndarray, yaw: float
                           ) -> tuple[np.ndarray, np.ndarray | None]:
     verts = self._world_vertices(rest, xy, yaw)
     return project_silhouette(verts, self.mesh.triangles, self.camera)
 
+  def _render_silhouette_6dof(self, rest: _RestHypothesis, xy: np.ndarray,
+                                dz: float, rpy: tuple[float, float, float]
+                                ) -> tuple[np.ndarray, np.ndarray | None]:
+    verts = self._world_vertices_6dof(rest, xy, dz, rpy)
+    return project_silhouette(verts, self.mesh.triangles, self.camera)
+
   def _render_edges(self, rest: _RestHypothesis, xy: np.ndarray, yaw: float
                      ) -> list[tuple[np.ndarray, np.ndarray]]:
     verts = self._world_vertices(rest, xy, yaw)
+    return project_visible_edges(verts, self.mesh.triangles, self.camera)
+
+  def _render_edges_6dof(self, rest: _RestHypothesis, xy: np.ndarray,
+                          dz: float, rpy: tuple[float, float, float]
+                          ) -> list[tuple[np.ndarray, np.ndarray]]:
+    verts = self._world_vertices_6dof(rest, xy, dz, rpy)
     return project_visible_edges(verts, self.mesh.triangles, self.camera)
 
 
@@ -374,25 +545,33 @@ def _group_coplanar_faces(normals: np.ndarray, centers: np.ndarray) -> list[list
 
 
 def _rotation_align(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
-  """Rotation that maps unit ``src`` to unit ``dst``."""
-  src = src / (np.linalg.norm(src) + 1e-9)
-  dst = dst / (np.linalg.norm(dst) + 1e-9)
-  v = np.cross(src, dst)
+  """Rotation that maps unit ``src`` to unit ``dst``.
+
+  Uses Rodrigues' formula for the general case; falls back to a 180°
+  flip about an arbitrary perpendicular axis when src and dst are
+  antiparallel. The antipodal threshold is intentionally generous
+  (``c < -0.999``) because the inputs come from unit normals that may
+  carry a few ULPs of float drift — a tighter cutoff was missing the
+  case ``src=(0,0,1) -> dst=(0,0,-1)`` and silently returning identity.
+  """
+  src = src / np.linalg.norm(src)
+  dst = dst / np.linalg.norm(dst)
   c = float(np.dot(src, dst))
-  if c > 1.0 - 1e-9:
+  if c > 0.999999:
     return np.eye(3)
-  if c < -1.0 + 1e-9:
+  if c < -0.999999:
     helper = np.array([1.0, 0.0, 0.0]) if abs(src[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
     axis = np.cross(src, helper)
-    axis = axis / (np.linalg.norm(axis) + 1e-9)
+    axis = axis / np.linalg.norm(axis)
     return _axis_angle(axis, np.pi)
+  v = np.cross(src, dst)
   s = np.linalg.norm(v)
   vx = np.array([
     [0.0, -v[2], v[1]],
     [v[2], 0.0, -v[0]],
     [-v[1], v[0], 0.0],
   ])
-  return np.eye(3) + vx + vx @ vx * ((1 - c) / (s * s + 1e-12))
+  return np.eye(3) + vx + vx @ vx * ((1 - c) / (s * s))
 
 
 def _axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:
@@ -413,6 +592,28 @@ def _yaw_about_z(yaw: float) -> np.ndarray:
     [s,  c, 0.0],
     [0.0, 0.0, 1.0],
   ])
+
+
+def _small_tilt(roll: float, pitch: float) -> np.ndarray:
+  """Tilt about world +X then +Y, composed left-to-right.
+
+  Intended for small angles (a few degrees at most). The 6-DOF refinement
+  uses this to let the rest face wobble slightly off horizontal without
+  reaching for gimbal-lock-sensitive Euler-angle gymnastics.
+  """
+  cr, sr = math.cos(roll), math.sin(roll)
+  cp, sp = math.cos(pitch), math.sin(pitch)
+  Rx = np.array([
+    [1.0, 0.0, 0.0],
+    [0.0,  cr, -sr],
+    [0.0,  sr,  cr],
+  ])
+  Ry = np.array([
+    [ cp, 0.0,  sp],
+    [0.0, 1.0, 0.0],
+    [-sp, 0.0,  cp],
+  ])
+  return Ry @ Rx
 
 
 def _back_project_centroid(mask: np.ndarray, cam: Camera) -> np.ndarray | None:
@@ -463,11 +664,26 @@ def _distance_transform_from_contour(contour: np.ndarray,
   return cv2.distanceTransform(bg, cv2.DIST_L2, 3)
 
 
-def _make_pose(mesh: Mesh, rest: _RestHypothesis, xy: np.ndarray, yaw: float,
-               residual_px: float | None, mask: np.ndarray, camera: Camera) -> ObjectPose:
-  R = _yaw_about_z(yaw) @ rest.R_tilt
-  xyz = np.array([xy[0], xy[1], rest.z_mm], dtype=np.float64)
-  confidence = _score_confidence(mesh, rest, xy, yaw, residual_px, mask, camera)
+def _make_pose(mesh: Mesh, rest: _RestHypothesis, xy: np.ndarray,
+               dz: float, rpy: tuple[float, float, float],
+               residual_px: float | None, mask: np.ndarray,
+               camera: Camera) -> ObjectPose:
+  """Build an ObjectPose from the 6-DOF refinement output.
+
+  ``dz`` is the height delta from the rest hypothesis; ``rpy`` is
+  ``(droll, dpitch, dyaw)`` where roll/pitch are small tilts off-axis
+  and dyaw is the full yaw about world +Z.
+  """
+  droll, dpitch, dyaw = rpy
+  R = (_yaw_about_z(dyaw)
+       @ _small_tilt(droll, dpitch)
+       @ rest.R_tilt)
+  z  = float(rest.z_mm + dz)
+  xyz = np.array([xy[0], xy[1], z], dtype=np.float64)
+  # tilt magnitude (radians off vertical); zero when droll = dpitch = 0.
+  tilt_rad = float(math.hypot(droll, dpitch))
+  confidence = _score_confidence_6dof(
+    mesh, rest, xy, dz, rpy, residual_px, mask, camera)
   return ObjectPose(
     xy_mm                = xy.astype(np.float64),
     xyz_mm               = xyz,
@@ -475,8 +691,8 @@ def _make_pose(mesh: Mesh, rest: _RestHypothesis, xy: np.ndarray, yaw: float,
     resting_face_class   = rest.cls,
     confidence           = confidence,
     reprojection_error_px = float(residual_px) if residual_px is not None else float("nan"),
-    yaw_rad              = float(yaw),
-    tilt_rad             = 0.0,
+    yaw_rad              = float(dyaw),
+    tilt_rad             = tilt_rad,
   )
 
 
@@ -485,6 +701,30 @@ def _score_confidence(mesh: Mesh, rest: _RestHypothesis, xy: np.ndarray, yaw: fl
                        camera: Camera) -> float:
   verts = transform_object(mesh.vertices_mm, _yaw_about_z(yaw) @ rest.R_tilt,
                            np.array([xy[0], xy[1], rest.z_mm]))
+  ren_mask, _ = project_silhouette(verts, mesh.triangles, camera)
+  observed_area = float(mask.sum())
+  rendered_area = float((ren_mask > 0).sum())
+  if observed_area == 0 or rendered_area == 0:
+    return 0.0
+  area_ratio = min(observed_area, rendered_area) / max(observed_area, rendered_area)
+  if residual_px is None or not math.isfinite(residual_px):
+    residual_score = 0.0
+  else:
+    residual_score = max(0.0, 1.0 - residual_px / 10.0)
+  return float(max(0.0, min(1.0, 0.5 * area_ratio + 0.5 * residual_score)))
+
+
+def _score_confidence_6dof(mesh: Mesh, rest: _RestHypothesis, xy: np.ndarray,
+                            dz: float, rpy: tuple[float, float, float],
+                            residual_px: float | None, mask: np.ndarray,
+                            camera: Camera) -> float:
+  """6-DOF analogue of _score_confidence."""
+  droll, dpitch, dyaw = rpy
+  R = (_yaw_about_z(dyaw)
+       @ _small_tilt(droll, dpitch)
+       @ rest.R_tilt)
+  verts = transform_object(mesh.vertices_mm, R,
+                           np.array([xy[0], xy[1], rest.z_mm + dz]))
   ren_mask, _ = project_silhouette(verts, mesh.triangles, camera)
   observed_area = float(mask.sum())
   rendered_area = float((ren_mask > 0).sum())

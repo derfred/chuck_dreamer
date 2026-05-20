@@ -64,7 +64,7 @@ def _resolve_obs_shape(cfg, image_extra: dict[str, int] | None = None) -> dict[s
 
     * ``image`` uses ``cfg.model.encoder.image_size`` for H and W with
       3 channels.
-    * ``state`` defaults to 5 dims (a reasonable proprio length); the
+    * ``joints`` defaults to 5 dims (a reasonable joint length); the
       ``--state-dim`` flag overrides.
   """
   image_extra = image_extra or {}
@@ -73,7 +73,7 @@ def _resolve_obs_shape(cfg, image_extra: dict[str, int] | None = None) -> dict[s
     if c == "image":
       img = int(cfg.model.encoder.image_size)
       obs_shape[c] = (img, img, 3)
-    elif c == "state":
+    elif c == "joints":
       obs_shape[c] = (int(image_extra.get("state_dim", 5)),)
     else:
       raise ValueError(f"unknown obs component {c!r}")
@@ -327,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
   _add_common(pw, needs_device=True)
   pw.add_argument("--action-dim", type=int, default=6)
   pw.add_argument("--state-dim",  type=int, default=5,
-                  help="Dimensionality of the 'state' obs component (when present).")
+                  help="Dimensionality of the 'joints' obs component (when present).")
   pw.add_argument("--batch",      type=int, default=4)
   pw.add_argument("--input-seed", type=int, default=0,
                   help="numpy seed used to draw the fixture batch.")

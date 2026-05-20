@@ -279,13 +279,21 @@ object_localization:
   intrinsics:
     n_frames_target:   5       # sample this many frames from the checkerboard episode
     n_frames_min:      5        # abort if fewer usable detections
-    rms_threshold_px:  0.3      # warn (not fail) above this
+    rms_threshold_px:  1.0      # warn (not fail) above this
     coverage_grid:    [6, 4]    # >=80% of cells must contain >=1 detected corner
     # Distortion model. 5 -> Brown-Conrady (k1, k2, p1, p2, k3); 2 ->
     # k1+k2 only with p1=p2=k3=0; 0 -> pinhole, no distortion. With
     # <~20 views the higher-order coefficients are not well-constrained
     # and inflate test-time error; 2 is the safe default for sparse fits.
     distortion_model:  5
+    # Constrain the focal-length and principal-point parameterization
+    # when views are sparse / clustered. Forcing fy = fx removes a free
+    # parameter that the optimizer otherwise burns to overfit residuals
+    # along the cluster axis; fixing the principal point at the image
+    # center is a sensible prior for most cameras. Turn both on when
+    # you have <~20 views or all views land in the same image region.
+    fix_aspect_ratio:    false
+    fix_principal_point: false
 
   extrinsics:
     rms_threshold_px:  1.0
@@ -303,6 +311,28 @@ object_localization:
       canny_high:       150
       search_range_px:  25
       max_iter:         50
+
+  # Per-episode RTS smoother (chuck_dreamer.real.object_localization.smoother).
+  # Consumes the per-frame ObjectPose stream from the estimator and
+  # produces a gap-free (x, y) trajectory + per-frame object_gap_too_long
+  # flag that the LeRobot import processor writes onto the augmented
+  # dataset. See data/specs/object_localization_spec.md, Deliverable 4.
+  smoother:
+    fps:               30.0     # frame rate; dt = 1 / fps
+    friction_alpha:    0.92     # per-frame velocity retention; identify empirically
+    process_noise:
+      pos_mm:          0.5      # std of position perturbation per frame
+      vel_mm_s:        200.0    # std of velocity perturbation per second
+    observation_noise:
+      base_sigma_mm:     1.0    # obs std at confidence=1.0, residual=0
+      confidence_floor:  0.05   # epsilon to avoid division by zero
+      residual_scale:    2.0    # k: mm-per-pixel multiplier on the reprojection residual
+    gating:
+      mahalanobis_threshold: 9.21   # chi2(2 dof, 0.99) — rejects bad locks
+    initial:
+      pos_sigma_mm:    2.0      # initial position uncertainty (trust first frame)
+      vel_sigma_mm_s:  500.0    # initial velocity uncertainty (push direction unknown)
+    gap_too_long_frames: 30     # mark frames inside longer occlusion gaps as untrustworthy
 
   # Legacy paths read by the rescale_joints_and_fk processor.
   mesh_path: "assets/RobotLearning_Rhombicuboctahedron_Object.3mf"

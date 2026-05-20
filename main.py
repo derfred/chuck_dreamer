@@ -561,14 +561,12 @@ def run_cmd(ctx, policy_type, checkpoint_path, camera_source, arm_port, override
 from chuck_dreamer.real.object_localization.cli import (
   annotate_mat_cmd,
   calibrate_intrinsics_cmd,
-  pick_checkerboard_frames_cmd,
   test_calibration_cmd,
   test_object_pose_cmd,
 )
 
 cli.add_command(calibrate_intrinsics_cmd)
 cli.add_command(annotate_mat_cmd)
-cli.add_command(pick_checkerboard_frames_cmd)
 cli.add_command(test_calibration_cmd)
 cli.add_command(test_object_pose_cmd)
 
