@@ -1073,6 +1073,22 @@ class DreamerTorchModel:
     self._apply_mlx_state(weights)
     return {k: v for k, v in meta.items() if k != CONFIG_METADATA_KEY}
 
+  def state_bytes(self) -> bytes:
+    """Serialize current weights to an in-memory safetensors blob.
+
+    Used to broadcast weights to async collector workers without
+    touching disk. Uses the same MLX-compatible key layout as
+    :meth:`save` so a future worker could equally load from a file.
+    Optimizer state is not included.
+    """
+    from safetensors.torch import save as _st_save_bytes
+    return _st_save_bytes(self._iter_mlx_state())
+
+  def load_state_bytes(self, blob: bytes) -> None:
+    """Inverse of :meth:`state_bytes` — load weights from a bytes blob."""
+    from safetensors.torch import load as _st_load_bytes
+    self._apply_mlx_state(_st_load_bytes(blob))
+
 
 # ---------------------------------------------------------------------------
 # MLX-format translation helpers (module-level so they can be tested

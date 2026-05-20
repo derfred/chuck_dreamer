@@ -1,0 +1,27 @@
+# Overlay for the 2× H200 remote box.
+#
+# Apply with:
+#   uv run python main.py -c configs/h200.yaml train --name <run-name> [more -o flags]
+#
+# Anything not set here inherits from configs/default.yaml.
+
+hardware:
+  device: "cuda"
+
+training:
+  policy: "scripted"
+  batch_size: 128
+  num_gradient_steps: 40
+  num_collect_episodes: 20
+
+  collector:
+    mode: "async"
+    num_workers: 12
+    max_pending: 128
+    weight_broadcast_every_n_iters: 3
+
+  data:
+    warmup_num_workers: 16
+
+  optimizer:
+    wm_lr: 8e-4

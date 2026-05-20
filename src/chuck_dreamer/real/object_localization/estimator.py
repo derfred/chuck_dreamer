@@ -288,43 +288,64 @@ class ObjectPoseEstimator:
 
 
 def _build_rest_classes(mesh: Mesh) -> list[_RestHypothesis]:
-  """Build one canonical hypothesis per rest class (square / triangle).
+  """Enumerate every distinct face-orientation as a rest hypothesis.
 
-  For each face class we find the face whose vertex count matches (4 for
-  squares, 3 for triangles — though the mesh is triangulated, "square"
-  faces are pairs of coplanar triangles), compute the rotation that
-  brings that face's outward normal to ``+Z_world``, and report the
-  face-to-centroid distance as the resting ``z``.
+  The previous implementation picked a single representative per
+  ``cls`` (square / triangle), which is wrong for the
+  rhombicuboctahedron: there are 18 square faces split into two
+  symmetry classes (6 axis-aligned squares with normals along
+  ±X/±Y/±Z, and 12 diagonal squares whose normals point along
+  face-diagonals like (±1, ±1, 0)/√2). The two classes have
+  different face-to-centroid distances and very different rendered
+  silhouettes, so picking only one means the optimizer can never
+  recover the other. Same kind of trap exists for any non-uniform
+  polyhedron.
+
+  This version returns one hypothesis per coplanar face group. The
+  outer pose search iterates them all; the ``cls`` label is kept for
+  the public ObjectPose API but no longer collapses the search space.
   """
-  # The .3mf is triangulated; we have to recover the original face classes
-  # by grouping coplanar adjacent triangles. Simplification: bin face
-  # normals; the rhombicuboctahedron has 8 triangle faces and 18 square
-  # faces (6 axis-aligned + 12 diagonal). Triangle faces have ~equal
-  # triangle area; square faces split into two triangles each.
-  hypotheses: list[_RestHypothesis] = []
-
-  normals = mesh.face_normals
   centers = (mesh.vertices_mm[mesh.triangles[:, 0]]
              + mesh.vertices_mm[mesh.triangles[:, 1]]
              + mesh.vertices_mm[mesh.triangles[:, 2]]) / 3.0
   centroid = mesh.vertices_mm.mean(axis=0)
 
-  groups = _group_coplanar_faces(normals, centers)
-  square_pick = max((g for g in groups if len(g) >= 2), key=lambda g: len(g), default=None)
-  triangle_pick = next((g for g in groups if len(g) == 1), None)
-
-  for cls_name, g in (("square", square_pick), ("triangle", triangle_pick)):
-    if g is None:
-      continue
-    n = normals[g].mean(axis=0)
+  groups = _group_coplanar_faces(mesh.face_normals, centers)
+  hypotheses: list[_RestHypothesis] = []
+  for g in groups:
+    n = mesh.face_normals[g].mean(axis=0)
     n = n / (np.linalg.norm(n) + 1e-9)
     face_center = centers[g].mean(axis=0)
-    z_mm = float(np.dot(face_center - centroid, n))
+    z_mm = abs(float(np.dot(face_center - centroid, n)))
     R_tilt = _rotation_align(n, np.array([0.0, 0.0, -1.0]))
-    hypotheses.append(_RestHypothesis(
-      cls=cls_name, z_mm=abs(z_mm), R_tilt=R_tilt,
-    ))
-  return hypotheses
+    cls: _RestingFaceClass = "square" if len(g) >= 2 else "triangle"
+    hypotheses.append(_RestHypothesis(cls=cls, z_mm=z_mm, R_tilt=R_tilt))
+
+  # Dedupe by silhouette signature: rotated vertex z-distribution.
+  # Two rest hypotheses produce the same silhouette (modulo the yaw
+  # rotation the optimizer already searches over) iff the set of vertex
+  # heights above the mat plane is the same. Buckets at 0.5mm precision
+  # to absorb float noise.
+  unique: list[_RestHypothesis] = []
+  for h in hypotheses:
+    if not any(_same_silhouette_signature(h, u, mesh.vertices_mm)
+               for u in unique):
+      unique.append(h)
+  return unique
+
+
+def _same_silhouette_signature(a: _RestHypothesis, b: _RestHypothesis,
+                                vertices_mm: np.ndarray) -> bool:
+  """Return True iff a and b place the mesh in geometrically equivalent
+  poses (up to in-plane rotation about world +Z).
+  """
+  if abs(a.z_mm - b.z_mm) > 0.5:
+    return False
+  za = np.sort(np.round((a.R_tilt @ vertices_mm.T).T[:, 2], 1))
+  zb = np.sort(np.round((b.R_tilt @ vertices_mm.T).T[:, 2], 1))
+  if za.shape != zb.shape:
+    return False
+  return bool(np.allclose(za, zb, atol=0.5))
 
 
 def _group_coplanar_faces(normals: np.ndarray, centers: np.ndarray) -> list[list[int]]:

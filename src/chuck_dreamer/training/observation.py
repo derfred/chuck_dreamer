@@ -1,20 +1,26 @@
 """Polymorphic multi-modal observation wrapper.
 
 ``obs_mode`` is a list of component names (a non-empty subset of
-``image``, ``state``, ``proprio``, ``ee``). Each component is encoded
-by its own branch (CNN for ``image``, MLP for the others); embeddings
-are concatenated and fused into a single ``embed_size`` vector. The
-decoder is symmetric — one reconstruction head per component, summed
-into the recon loss.
+``image``, ``joints``, ``proprio``, ``ee``, ``object_xy``, ``object_uv``).
+Each component is encoded by its own branch (CNN for ``image``, MLP for
+the others); embeddings are concatenated and fused into a single
+``embed_size`` vector. The decoder is symmetric — one reconstruction
+head per component, summed into the recon loss.
 
 Component vocabulary:
-  * ``image``   — raw RGB frame, processed by the CNN branch.
-  * ``state``   — ``object_xy ‖ joint_qpos`` (the privileged ground-truth
-                  scene state). End-effector pose deliberately lives in
-                  ``ee`` so a config can ablate them independently.
-  * ``proprio`` — ``joint_qpos`` only (what a proprioceptive sensor sees
-                  on the real arm).
-  * ``ee``      — ``ee_pos ‖ ee_quat`` (7-D end-effector pose).
+  * ``image``     — raw RGB frame, processed by the CNN branch.
+  * ``joints``    — ``joint_qpos`` only (the arm's joint angles). The
+                    privileged ground-truth scene state was previously
+                    a single ``state`` component; it's now split so a
+                    config can ablate object pose and joints independently.
+  * ``proprio``   — ``joint_qpos`` only (what a proprioceptive sensor sees
+                    on the real arm). Equivalent to ``joints`` today but
+                    kept distinct so future proprioceptive signals
+                    (velocities, torques) can extend ``proprio`` without
+                    touching the ground-truth ``joints`` channel.
+  * ``ee``        — ``ee_pos ‖ ee_quat`` (7-D end-effector pose).
+  * ``object_xy`` — object position in the table plane (2-D).
+  * ``object_uv`` — object pixel coordinates in the camera image (2-D).
 
 The :class:`Observation` dataclass carries a uniform
 ``components: dict[str, ndarray]`` mapping. A single-mode config like
@@ -37,15 +43,21 @@ import numpy as np
 # 1-D vectors. Keep this list in sync with the encoder/decoder branches
 # in the dreamer backends.
 ComponentName = str
-IMAGE = "image"
-STATE = "state"
-PROPRIO = "proprio"
-EE = "ee"
-VALID_COMPONENTS: frozenset[str] = frozenset({IMAGE, STATE, PROPRIO, EE})
+IMAGE     = "image"
+JOINTS    = "joints"
+PROPRIO   = "proprio"
+EE        = "ee"
+OBJECT_XY = "object_xy"
+OBJECT_UV = "object_uv"
+VALID_COMPONENTS: frozenset[str] = frozenset(
+  {IMAGE, JOINTS, PROPRIO, EE, OBJECT_XY, OBJECT_UV}
+)
 
 # Convenience: number of trailing axes that describe one frame of each
 # component. ``image`` is (H, W, C); others are flat vectors.
-_TRAILING_NDIM: dict[str, int] = {IMAGE: 3, STATE: 1, PROPRIO: 1, EE: 1}
+_TRAILING_NDIM: dict[str, int] = {
+  IMAGE: 3, JOINTS: 1, PROPRIO: 1, EE: 1, OBJECT_XY: 1, OBJECT_UV: 1,
+}
 
 
 # An ``obs_mode`` value as it travels through the codebase: a tuple of
@@ -213,8 +225,8 @@ class Observation:
     missing = [c for c in mode if c not in value]
     if missing:
       raise ValueError(f"buffer value missing components {missing!r} (mode={mode!r})")
-    # Restrict to the configured mode — extra keys (legacy "proprio"
-    # under a state-only mode, for example) are ignored.
+    # Restrict to the configured mode — extra keys (e.g. a "proprio"
+    # entry on disk under a joints-only mode) are ignored.
     selected = {c: value[c] for c in mode}
     return cls.from_components(selected, focus_mask=focus_mask)
 

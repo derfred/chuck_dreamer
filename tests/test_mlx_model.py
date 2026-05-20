@@ -234,13 +234,13 @@ def test_actor_initial_std_uses_init_std_offset():
 
 def test_dreamer_model_builds_from_default_config():
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
-  model = build_model(cfg, obs_shape={"state": (15,)}, action_dim=6)
+  cfg.env.obs_mode = ["joints"]
+  model = build_model(cfg, obs_shape={"joints": (15,)}, action_dim=6)
   assert isinstance(model, DreamerMLXModel)
   assert isinstance(model.encoder, MultiModalEncoder)
   assert isinstance(model.decoder, MultiModalDecoder)
-  assert isinstance(model.encoder.b_state, MLPEncoder)
-  assert isinstance(model.decoder.h_state, MLPDecoder)
+  assert isinstance(model.encoder.b_joints, MLPEncoder)
+  assert isinstance(model.decoder.h_joints, MLPDecoder)
   assert isinstance(model.rssm, RSSM)
   assert isinstance(model.reward_head, RewardHead)
   assert isinstance(model.actor, Actor)
@@ -249,11 +249,11 @@ def test_dreamer_model_builds_from_default_config():
 
 def test_dreamer_model_end_to_end_forward_shapes():
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
+  cfg.env.obs_mode = ["joints"]
   B, T, obs_dim, action_dim = 2, 4, 15, 6
-  model = build_model(cfg, obs_shape={"state": (obs_dim,)}, action_dim=action_dim)
+  model = build_model(cfg, obs_shape={"joints": (obs_dim,)}, action_dim=action_dim)
 
-  obs = {"state": mx.zeros((B, T, obs_dim))}
+  obs = {"joints": mx.zeros((B, T, obs_dim))}
   actions = mx.zeros((B, T, action_dim))
 
   embeds = model.encoder(obs)
@@ -268,7 +268,7 @@ def test_dreamer_model_end_to_end_forward_shapes():
   assert f.shape == (B, feat_dim)
 
   decoded = model.decoder(f)
-  assert decoded["state"].shape == (B, obs_dim)
+  assert decoded["joints"].shape == (B, obs_dim)
   assert model.reward_head(f).shape == (B,)
 
   action, mean, std = model.actor(f)
@@ -281,8 +281,8 @@ def test_dreamer_model_end_to_end_forward_shapes():
 
 def test_dreamer_model_imagine_uses_actor_and_yields_horizon_plus_one():
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
-  model = build_model(cfg, obs_shape={"state": (15,)}, action_dim=6)
+  cfg.env.obs_mode = ["joints"]
+  model = build_model(cfg, obs_shape={"joints": (15,)}, action_dim=6)
 
   init = model.rssm.initial_state(batch_size=3)
 
@@ -306,10 +306,10 @@ def test_dreamer_model_rejects_unsupported_obs_mode():
 
 def test_build_model_rejects_unknown_device():
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
+  cfg.env.obs_mode = ["joints"]
   cfg.hardware.device = "not-a-real-backend"
   with pytest.raises(ValueError):
-    build_model(cfg, obs_shape={"state": (15,)}, action_dim=6)
+    build_model(cfg, obs_shape={"joints": (15,)}, action_dim=6)
 
 
 # ---------------------------------------------------------------------------
@@ -461,10 +461,10 @@ def test_dreamer_image_proprio_recon_loss_sums_image_and_proprio():
 
 def test_dreamer_state_recon_loss_unchanged():
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
-  recon  = Observation.from_components({"state": mx.zeros((2, 3, 5))})
-  target = Observation.from_components({"state": mx.ones((2, 3, 5))})
+  cfg.env.obs_mode = ["joints"]
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
+  recon  = Observation.from_components({"joints": mx.zeros((2, 3, 5))})
+  target = Observation.from_components({"joints": mx.ones((2, 3, 5))})
   loss = model._recon_loss(recon, target)
   assert abs(float(loss.item()) - 5.0) < 1e-6  # 5 dims, all (0-1)^2 = 1, summed.
 
@@ -485,27 +485,27 @@ def test_aux_head_disabled_by_default():
   Skipping construction keeps the parameter tree (and checkpoint key set)
   identical to pre-aux runs."""
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  cfg.env.obs_mode = ["joints"]
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   assert model.aux_head is None
 
 
 def test_aux_head_built_when_aux_scale_positive():
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
+  cfg.env.obs_mode = ["joints"]
   cfg.training.losses.aux_scale = 1.0
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   assert isinstance(model.aux_head, AuxHead)
   assert model.aux_head.target_dim == int(cfg.model.aux.target_dim)
 
 
 def test_wm_loss_uses_aux_when_head_present():
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
+  cfg.env.obs_mode = ["joints"]
   cfg.training.losses.aux_scale = 1.0
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   batch = {
-    "obs":        {"state": mx.zeros((2, 4, 5))},
+    "obs":        {"joints": mx.zeros((2, 4, 5))},
     "action":     mx.zeros((2, 4, 6)),
     "reward":     mx.zeros((2, 4)),
     "aux_target": mx.ones((2, 4, int(cfg.model.aux.target_dim))),
@@ -519,16 +519,16 @@ def test_wm_loss_uses_aux_when_head_present():
 
 def test_aux_head_round_trips_through_save_load(tmp_path):
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
+  cfg.env.obs_mode = ["joints"]
   cfg.training.losses.aux_scale = 1.0
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
 
   path = str(tmp_path / "ckpt.safetensors")
   model.save(path)
 
   # Build a fresh model and reload — aux head must be present and weights
   # must match (we test via output equality on a fixed input).
-  model2 = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model2 = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   model2.load(path)
 
   f = mx.zeros((3, cfg.model.rssm.stoch_size + cfg.model.rssm.deter_size))

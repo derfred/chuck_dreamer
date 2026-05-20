@@ -7,6 +7,7 @@ import tqdm
 from .reward import build_reward_fn
 from .sim.pushing_env import PushingEnv
 from .sim.episode_collector import EpisodeCollector
+from .sim.collector_backend import CollectResult, build_collector_backend
 
 from .eval import OnlineEvaluator
 from .training.episode_processor import processor_for
@@ -38,6 +39,14 @@ class Trainer:
     self.evaluator = OnlineEvaluator(config, self.model)
     self.tracker   = Tracker(config)
     self.tracker.init()
+
+    self._backend = build_collector_backend(config, self.collector)
+
+    # Replay-ratio bookkeeping. Both axes useful: cumulative is the
+    # long-run rate that matters for stability; per-iter is the
+    # instantaneous balance you tune against after async lands.
+    self._cumulative_env_steps:  int = 0
+    self._cumulative_grad_steps: int = 0
 
   def _warmup(self):
     for src in self.config.training.data.warmup_source:
@@ -80,37 +89,50 @@ class Trainer:
     else:
       raise ValueError(f"Unknown policy type {config.training.policy!r}")
 
-  def _collect_phase(self, iteration: int):
+  def _absorb(self, results: list[CollectResult], iteration: int) -> int:
+    """Insert collected episodes into the replay buffer and log outcomes.
+
+    Returns the number of env-steps actually added (sum of action
+    lengths across non-None episodes). Used by ``train`` to update the
+    replay-ratio counters.
+    """
     collect_data: defaultdict[str, int] = defaultdict(int)
-    num_collect  = self.config.training.num_collect_episodes
+    env_steps_added = 0
     with self.tracker.scope(
       {"phase": "collect", "iteration": iteration}, step=self.tracker.current_step,
     ) as tracker:
-      for _ in tqdm.tqdm(range(num_collect), desc=f"Collecting episodes - iteration {iteration}", total=num_collect):
-        scene = self.collector.reset()
-        if self.config.env.max_steps is not None:
-          scene.max_steps = int(self.config.env.max_steps)
-
-        episode_data, outcome = self.collector.run()
-        collect_data[outcome] += 1
-
-        if episode_data is not None:
-          self._replay_buffer.add_sim_episode(episode_data)
-          tracker.maybe_log_collect_episode(episode_data, scene, outcome, {"iteration": iteration})
+      for r in results:
+        collect_data[r.outcome] += 1
+        if r.episode is not None:
+          self._replay_buffer.add_sim_episode(r.episode)
+          # Raw episode actions are keyed by their mode (``joint_action``
+          # / ``ee_action``); reward is always present and shares the
+          # action time axis, so it's the safe length-of-episode source.
+          env_steps_added += int(r.episode["reward"].shape[0])
+          if r.scene is not None:
+            tracker.maybe_log_collect_episode(
+              r.episode, r.scene, r.outcome, {"iteration": iteration},
+            )
 
       tracker.log({
-        "num_episodes": sum(collect_data.values()),
+        "num_episodes":   sum(collect_data.values()),
+        "env_steps_iter": env_steps_added,
         **{f"outcome/{k}": v for k, v in collect_data.items()},
       })
+    return env_steps_added
 
-  def _train_phase(self, iteration: int):
+  def _train_phase(self, iteration: int) -> int:
+    """Run one train phase and return the number of gradient steps taken.
+
+    Returns 0 when the buffer was too small to sample (phase skipped).
+    """
     with self.tracker.scope(
       {"phase": "train", "iteration": iteration}, step=self.tracker.current_step,
     ) as tracker:
       tracker.log_replay_buffer_size(self._replay_buffer)
       if not self._replay_buffer.can_sample(self.config.training.batch_size, self.config.training.seq_len):
         logger.warning("Buffer too small to sample (have %d steps); skipping train phase.", len(self._replay_buffer))
-        return
+        return 0
 
       num_steps = self.config.training.num_gradient_steps
       phase_losses: list[float] = []
@@ -140,6 +162,8 @@ class Trainer:
           "wm/loss_phase_first":      float(losses[0]),
           "wm/loss_phase_last":       float(losses[-1]),
         })
+
+      return num_steps
 
   def _eval_phase(self, iteration: int, checkpoint_path: str | None = None, cleanup: bool = False):
     self.evaluator.evaluate(
@@ -210,17 +234,54 @@ class Trainer:
   def train(self, resume: bool | str = False):
     start = self._resume(resume)
     self._warmup()
-    for i in range(start, self.config.training.num_iterations):
-      self._collect_phase(i)
-      self._train_phase(i)
-      checkpoint_path = None
-      if i % self.config.training.save_every == 0:
-        checkpoint_path = self._checkpoint(i)
-      if i % self.config.training.eval_every == 0:
-        present_checkpoint = checkpoint_path is not None
-        if not present_checkpoint:
-          checkpoint_path = self._checkpoint(i, temporary=True)
-        self._eval_phase(i, checkpoint_path=checkpoint_path, cleanup=not present_checkpoint)
+
+    broadcast_every = int(self.config.training.collector.weight_broadcast_every_n_iters)
+    is_dreamer = self.config.training.policy == "dreamer"
+    target = int(self.config.training.num_collect_episodes)
+
+    try:
+      for i in range(start, self.config.training.num_iterations):
+        # ---- collect (sync inline, or drain async pool) ----
+        with tqdm.tqdm(
+          total=target, desc=f"Collecting episodes - iteration {i}",
+        ) as bar:
+          results = self._backend.drain(target=target)
+          bar.update(len(results))
+        env_steps = self._absorb(results, i)
+        self._cumulative_env_steps += env_steps
+
+        # ---- train ----
+        grad_steps = self._train_phase(i)
+        self._cumulative_grad_steps += grad_steps
+
+        # ---- replay-ratio logging (per-iter + cumulative) ----
+        if env_steps > 0 or grad_steps > 0:
+          self.tracker.at_step(self.tracker.current_step).log({
+            "replay_ratio/iter":            grad_steps / max(env_steps, 1),
+            "replay_ratio/cumulative":      self._cumulative_grad_steps / max(self._cumulative_env_steps, 1),
+            "replay_ratio/env_steps_total": self._cumulative_env_steps,
+            "replay_ratio/grad_steps_total": self._cumulative_grad_steps,
+          })
+
+        # ---- broadcast updated weights to async workers ----
+        if (
+          is_dreamer
+          and broadcast_every > 0
+          and (i + 1) % broadcast_every == 0
+        ):
+          self._backend.broadcast_weights(self.model.state_bytes())
+
+        # ---- checkpoint / eval ----
+        checkpoint_path = None
+        if i % self.config.training.save_every == 0:
+          checkpoint_path = self._checkpoint(i)
+        if i % self.config.training.eval_every == 0:
+          present_checkpoint = checkpoint_path is not None
+          if not present_checkpoint:
+            checkpoint_path = self._checkpoint(i, temporary=True)
+          self._eval_phase(i, checkpoint_path=checkpoint_path, cleanup=not present_checkpoint)
+    finally:
+      self._backend.shutdown()
 
     final_path = os.path.join(self._checkpoint_dir(), "final.safetensors")
     os.makedirs(self._checkpoint_dir(), exist_ok=True)

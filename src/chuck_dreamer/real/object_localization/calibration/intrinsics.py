@@ -25,6 +25,7 @@ single well-conditioned fit.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -35,12 +36,46 @@ from typing import Any
 
 import numpy as np
 
-from ..dataset import episode_bounds, get_frame, iter_episode_frame_indices
+from ..dataset import (
+  episode_bounds, episode_bounds_from_meta, get_frame, iter_episode_frame_indices,
+)
 from ..runtime import ObjectLocalizationConfig
 from ..types import Intrinsics, dataset_cache_dir, write_intrinsics
 from . import _worker  # noqa: F401 — registers the worker module path
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DatasetSpec:
+  """One entry in the pooled-calibration input list.
+
+  When ``frame_indices`` is None, the enumerator picks the candidate
+  frames from the configured checkerboard episode the usual way.
+  When provided, those exact global frame indices are used as the work
+  queue for this dataset — no enumeration, no fallback, no LeRobotDataset
+  open during the planning phase. This is the "resume from prior HITs"
+  path: pass the indices that already detected last time.
+
+  ``frame_bboxes`` (parallel to ``frame_indices``) optionally narrows
+  the corner search to a per-frame ``(x0, y0, x1, y1)`` ROI. ``None``
+  entries mean "search the whole frame". When set, this dramatically
+  speeds up findChessboardCornersSB and bypasses background
+  distractors, at the cost of relying on the box being right.
+  """
+  dataset_id: str
+  frame_indices: list[int] | None = None
+  frame_bboxes:  list[tuple[int, int, int, int] | None] | None = None
+
+  def __post_init__(self) -> None:
+    if (self.frame_indices is None) != (self.frame_bboxes is None) and self.frame_bboxes is not None:
+      raise ValueError(
+        f"DatasetSpec({self.dataset_id!r}): frame_bboxes requires frame_indices.")
+    if (self.frame_indices is not None and self.frame_bboxes is not None
+        and len(self.frame_indices) != len(self.frame_bboxes)):
+      raise ValueError(
+        f"DatasetSpec({self.dataset_id!r}): frame_indices ({len(self.frame_indices)}) "
+        f"and frame_bboxes ({len(self.frame_bboxes)}) must have the same length.")
 
 
 @dataclass
@@ -74,52 +109,79 @@ class IntrinsicsAbort(RuntimeError):
 
 
 def calibrate_intrinsics_pooled(
-  dataset_ids: list[str], ol_cfg: ObjectLocalizationConfig,
+  dataset_specs: list[DatasetSpec], ol_cfg: ObjectLocalizationConfig,
   cache_dir: Path, workers: int,
+  no_gates: bool = False,
 ) -> PooledIntrinsicsResult:
   """Pooled + parallel checkerboard calibration.
 
   Submits one work item per candidate frame, drained `as_completed`. Stops
   submitting more work once we've filled enough distinct centroid buckets,
   but still drains any in-flight futures so their (rare) extra hits land.
+
+  ``no_gates`` (set by the CLI's ``--no-gates`` flag) accepts every
+  detected view: skips the centroid-bucket dedupe, skips the spatial
+  coverage gate, and ignores ``intrinsics_n_frames_min``. Use when picks
+  are hand-curated and any HIT should count toward the fit.
   """
-  if not dataset_ids:
+  if not dataset_specs:
     raise IntrinsicsAbort("calibrate_intrinsics_pooled called with no datasets.")
 
+  dataset_ids = [s.dataset_id for s in dataset_specs]
   ck_size = (int(ol_cfg.checkerboard_size[0]), int(ol_cfg.checkerboard_size[1]))
   ck_obj  = _checkerboard_object_points(ck_size, ol_cfg.checkerboard_square_mm)
   bucket_grid = tuple(int(x) for x in ol_cfg.intrinsics_coverage_grid)
 
   # Step 1 — enumerate per-dataset candidate frames (cheap, sequential).
+  # Specs with an explicit frame_indices list skip the LeRobotDataset
+  # open entirely — that's the fast-resume path. Each queue item is
+  # (frame_idx, bbox_or_None).
+  BboxOrNone = "tuple[int, int, int, int] | None"
   t0 = time.perf_counter()
-  per_dataset_queues: dict[str, list[int]] = {}
+  per_dataset_queues: dict[str, list[tuple[int, Any]]] = {}
   per_dataset_counts: dict[str, PerDatasetCounts] = {d: PerDatasetCounts() for d in dataset_ids}
-  for dataset_id in dataset_ids:
-    logger.info("[pool] enumerating frames for %s (episode %d) ...",
-                dataset_id, ol_cfg.episode_checkerboard)
+  for spec in dataset_specs:
+    if spec.frame_indices is not None:
+      bboxes = spec.frame_bboxes or [None] * len(spec.frame_indices)
+      per_dataset_queues[spec.dataset_id] = list(zip(spec.frame_indices, bboxes))
+      n_bbox = sum(1 for b in bboxes if b is not None)
+      logger.info("[pool]   %s: using %d explicit frame indices "
+                  "(%d with bbox).",
+                  spec.dataset_id, len(spec.frame_indices), n_bbox)
+      continue
+
+    logger.info("[pool] enumerating frames for %s (episode %d) via metadata ...",
+                spec.dataset_id, ol_cfg.episode_checkerboard)
     try:
-      from lerobot.datasets.lerobot_dataset import LeRobotDataset  # type: ignore
+      ep_fr, ep_to = episode_bounds_from_meta(
+        spec.dataset_id, ol_cfg.episode_checkerboard)
     except Exception as e:
-      raise IntrinsicsAbort(f"lerobot import failed: {e}")
-    ds = LeRobotDataset(dataset_id)
-    ep_fr, ep_to = episode_bounds(ds, ol_cfg.episode_checkerboard)
+      raise IntrinsicsAbort(
+        f"could not read episode bounds for {spec.dataset_id}: {e}")
     if ep_to <= ep_fr:
       logger.warning("[pool] %s episode %d is empty; skipping.",
-                     dataset_id, ol_cfg.episode_checkerboard)
-      per_dataset_queues[dataset_id] = []
+                     spec.dataset_id, ol_cfg.episode_checkerboard)
+      per_dataset_queues[spec.dataset_id] = []
       continue
-    initial, fallback = iter_episode_frame_indices(
-      ds, ol_cfg.episode_checkerboard, ol_cfg.intrinsics_n_frames_target,
-    )
-    per_dataset_queues[dataset_id] = list(initial) + list(fallback)
+    target = ol_cfg.intrinsics_n_frames_target
+    length = ep_to - ep_fr
+    if length <= target:
+      initial = list(range(ep_fr, ep_to))
+      fallback = []
+    else:
+      initial = sorted({int(x) for x in np.linspace(ep_fr, ep_to - 1, num=target)})
+      used = set(initial)
+      fallback = [i for i in range(ep_fr, ep_to) if i not in used]
+    indices = list(initial) + list(fallback)
+    per_dataset_queues[spec.dataset_id] = [(i, None) for i in indices]
     logger.info("[pool]   %s: episode spans [%d, %d) length=%d  "
                 "queue=%d (initial=%d + fallback=%d)",
-                dataset_id, ep_fr, ep_to, ep_to - ep_fr,
-                len(per_dataset_queues[dataset_id]), len(initial), len(fallback))
-    del ds  # free the video decoder before the next iteration
+                spec.dataset_id, ep_fr, ep_to, length,
+                len(indices), len(initial), len(fallback))
 
   # Step 2 — interleave the per-dataset queues into a single flat queue.
-  flat_queue: list[tuple[str, int]] = _interleave_queues(per_dataset_queues)
+  # Each item: (dataset_id, frame_idx, bbox_or_None).
+  flat_queue: list[tuple[str, int, Any]] = _interleave_queues(per_dataset_queues)
   total_queue = len(flat_queue)
   if total_queue == 0:
     raise IntrinsicsAbort("no frames available across any input dataset.")
@@ -136,9 +198,42 @@ def calibrate_intrinsics_pooled(
   target = int(ol_cfg.intrinsics_n_frames_target)
   inflight_cap = max(workers * 3, 8)
 
+  # Open one append-only JSONL per dataset so the user can grep `frame_idx`
+  # back after a crash and feed them in via the `id#f1,f2,...` CLI syntax.
+  # Truncate on start so the file always describes only this run.
+  hit_logs: dict[str, Any] = {}
+  for did in dataset_ids:
+    p = dataset_cache_dir(cache_dir, did) / "intrinsics_hits.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    hit_logs[did] = open(p, "w", buffering=1)  # line-buffered
+
+  def _record_hit(det: DetectedFrame) -> None:
+    f = hit_logs.get(det.dataset_id)
+    if f is None:
+      return
+    f.write(json.dumps({
+      "dataset_id": det.dataset_id,
+      "frame_idx":  int(det.frame_idx),
+      "bucket":     list(det.bucket),
+      "elapsed_s":  round(time.perf_counter() - t0, 3),
+    }) + "\n")
+
   log_state = {"last": time.perf_counter()}
 
-  def _maybe_log(verdict: str, item: tuple[str, int]) -> None:
+  def _log_hit(det: DetectedFrame) -> None:
+    """Always-on per-HIT log so the user sees every accepted frame."""
+    totals = _totals(per_dataset_counts)
+    logger.info(
+      "[pool] %s f%d: HIT@%s  hits=%d misses=%d dupes=%d  buckets=%d/%d  "
+      "queue_left=%d  elapsed=%.1fs",
+      det.dataset_id, det.frame_idx, det.bucket,
+      totals["hits"], totals["misses"], totals["dupes"],
+      len(occupied_buckets), target,
+      total_queue - totals["attempts"], time.perf_counter() - t0,
+    )
+    log_state["last"] = time.perf_counter()
+
+  def _maybe_log(verdict: str, item: tuple[str, int, Any]) -> None:
     now = time.perf_counter()
     if (now - log_state["last"]) < 5.0:
       return
@@ -155,16 +250,17 @@ def calibrate_intrinsics_pooled(
 
   with ProcessPoolExecutor(max_workers=workers) as pool:
     queue_iter = iter(flat_queue)
-    pending: dict[Any, tuple[str, int]] = {}
+    pending: dict[Any, tuple[str, int, Any]] = {}
 
     def _submit_more() -> None:
-      while len(pending) < inflight_cap and len(occupied_buckets) < target:
+      while len(pending) < inflight_cap and (no_gates or len(occupied_buckets) < target):
         try:
           item = next(queue_iter)
         except StopIteration:
           return
         fut = pool.submit(_worker.detect_corners_worker,
-                          item[0], item[1], ol_cfg.camera_key, ck_size)
+                          item[0], item[1], ol_cfg.camera_key, ck_size,
+                          item[2])
         pending[fut] = item
 
     _submit_more()
@@ -173,7 +269,7 @@ def calibrate_intrinsics_pooled(
       done, _ = wait(list(pending.keys()), return_when=FIRST_COMPLETED)
       for fut in done:
         item = pending.pop(fut)
-        dataset_id, frame_idx = item
+        dataset_id, frame_idx, _bbox = item
         per_dataset_counts[dataset_id].attempts += 1
         try:
           ok, payload = fut.result()
@@ -195,20 +291,28 @@ def calibrate_intrinsics_pooled(
           logger.info("[pool] first detection on %s frame %d; image_size=%dx%d",
                       dataset_id, frame_idx, image_size[0], image_size[1])
         bucket = _centroid_bucket(corners, image_size, bucket_grid)
-        if bucket in occupied_buckets:
+        if not no_gates and bucket in occupied_buckets:
           per_dataset_counts[dataset_id].dupes += 1
           _maybe_log(f"DUP@{bucket}", item)
           continue
 
         occupied_buckets.add(bucket)
         per_dataset_counts[dataset_id].hits += 1
-        detections.append(DetectedFrame(
+        det = DetectedFrame(
           dataset_id=dataset_id, frame_idx=frame_idx,
           corners=corners, bucket=bucket,
-        ))
-        _maybe_log(f"HIT@{bucket}", item)
+        )
+        detections.append(det)
+        _record_hit(det)
+        _log_hit(det)
 
       _submit_more()
+
+  for f in hit_logs.values():
+    try:
+      f.close()
+    except Exception:
+      pass
 
   totals = _totals(per_dataset_counts)
   logger.info(
@@ -224,23 +328,28 @@ def calibrate_intrinsics_pooled(
   if image_size is None:
     raise IntrinsicsAbort("no checkerboard detected in any frame from any dataset.")
 
-  if len(detections) < ol_cfg.intrinsics_n_frames_min:
+  if not no_gates and len(detections) < ol_cfg.intrinsics_n_frames_min:
     _write_failure_coverage(detections, ol_cfg, cache_dir, dataset_ids, image_size)
     raise IntrinsicsAbort(
       f"only {len(detections)} usable detections across all "
       f"{len(dataset_ids)} datasets (need >= {ol_cfg.intrinsics_n_frames_min}). "
       f"Re-record episode {ol_cfg.episode_checkerboard} with the board "
-      f"swept through the full field of view.")
+      f"swept through the full field of view, or re-run with --no-gates "
+      f"to accept the small sample.")
 
   filled, total = _coverage_fill(detections, image_size, bucket_grid)
   logger.info("[pool] spatial coverage: %d / %d cells (%.0f%%).",
               filled, total, 100.0 * filled / max(1, total))
-  if filled / max(1, total) < 0.8:
+  if not no_gates and filled / max(1, total) < 0.8:
     _write_failure_coverage(detections, ol_cfg, cache_dir, dataset_ids, image_size)
     raise IntrinsicsAbort(
       f"checkerboard covers only {filled}/{total} grid cells (<80%). "
       f"Re-record episode {ol_cfg.episode_checkerboard} with the board "
-      f"swept through the full field of view.")
+      f"swept through the full field of view, or re-run with --no-gates "
+      f"to accept the partial coverage.")
+  if no_gates:
+    logger.info("[pool] --no-gates: skipping bucket dedupe + coverage/min-frame gates; "
+                "using every detection.")
 
   import cv2
   obj_points = [ck_obj.copy() for _ in detections]
@@ -318,21 +427,23 @@ def calibrate_intrinsics_pooled(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _interleave_queues(per_dataset: dict[str, list[int]]) -> list[tuple[str, int]]:
-  """Round-robin interleave per-dataset frame lists into a flat queue.
+def _interleave_queues(per_dataset: dict[str, list[tuple[int, Any]]]
+                       ) -> list[tuple[str, int, Any]]:
+  """Round-robin interleave per-dataset (frame, bbox) lists into a flat queue.
 
   Datasets with longer queues end up tailing the output, but the first
   ``min(N) * D`` items hit every dataset before any one is exhausted —
   important because the early hits are what populate the bucket set and
   trigger the early-stop.
   """
-  out: list[tuple[str, int]] = []
+  out: list[tuple[str, int, Any]] = []
   iters = {k: iter(v) for k, v in per_dataset.items()}
   while iters:
     drained: list[str] = []
     for k, it in iters.items():
       try:
-        out.append((k, next(it)))
+        frame_idx, bbox = next(it)
+        out.append((k, frame_idx, bbox))
       except StopIteration:
         drained.append(k)
     for k in drained:

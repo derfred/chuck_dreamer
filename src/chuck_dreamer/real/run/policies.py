@@ -198,22 +198,25 @@ def _project_obs_for_model(obs: dict, obs_mode: Any) -> dict:
 
   The runner provides ``image`` and ``arm_qpos`` only — no EE pose
   (no IK is run here), no object pose (no detector wired up), so
-  ``state`` and ``ee`` checkpoints cannot run on the real arm yet.
-  ``proprio`` works because it's just ``joint_qpos`` (= ``arm_qpos``).
+  ``ee``, ``object_xy``, and ``object_uv`` checkpoints cannot run on
+  the real arm yet. ``joints`` and ``proprio`` both work because
+  ``joint_qpos`` = ``arm_qpos``.
   """
-  from ...training.observation import EE, IMAGE, PROPRIO, STATE, normalize_obs_mode
+  from ...training.observation import (
+    EE, IMAGE, JOINTS, OBJECT_UV, OBJECT_XY, PROPRIO, normalize_obs_mode,
+  )
 
   mode = normalize_obs_mode(obs_mode)
   out: dict[str, np.ndarray] = {}
   for c in mode:
     if c == IMAGE:
       out[c] = np.asarray(obs["image"], dtype=np.uint8)
-    elif c == PROPRIO:
+    elif c in (JOINTS, PROPRIO):
       out[c] = np.asarray(obs["arm_qpos"], dtype=np.float32)
-    elif c in (STATE, EE):
+    elif c in (EE, OBJECT_XY, OBJECT_UV):
       raise ValueError(
         f"obs_mode component {c!r} is not supported on the real arm: "
-        f"the runner does not compute object_xy / ee_pos / ee_quat."
+        f"the runner does not compute ee_pos / ee_quat / object_xy / object_uv."
       )
     else:
       raise ValueError(f"unknown obs_mode component {c!r}")

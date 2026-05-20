@@ -39,25 +39,39 @@ _DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "configs" / "defaul
 
 
 def load_config(
-  config_path: Optional[str] = None,
+  config_path: Optional[str | list[str] | tuple[str, ...]] = None,
   overrides: tuple[str, ...] = (),
   aliases: Optional[dict[str, Any]] = None,
 ) -> DictConfig:
-  """Load a YAML config, apply dotted-path overrides, normalize, return.
+  """Load YAML config(s), apply dotted-path overrides, normalize, return.
 
-  ``load_config`` is the single entry point: parses YAML, applies CLI
-  ``aliases`` first (``{dotted_key: value}``, ``None`` values skipped),
-  merges any ``-o key=value`` ``overrides`` on top, randomizes ``seed``
-  if unset, and normalizes ``training.data.warmup_source`` into a
-  uniform list of dicts. After this returns, callers can assume
+  Precedence (lowest → highest, last wins):
+    1. ``configs/default.yaml`` (always the base).
+    2. Each path in ``config_path`` in order — pass a list to factor out
+       machine- / experiment-specific overlays (e.g. an ``h200.yaml``
+       with scale-out settings) without editing the base.
+    3. ``aliases`` (CLI shortcuts; ``None`` values skipped).
+    4. ``overrides`` (``-o key=value`` flags).
+
+  Passing a single string for ``config_path`` is treated as a one-entry
+  overlay list (kept for backward compatibility with older callers).
+
+  After this returns, callers can assume
   ``cfg.training.data.warmup_source`` is a ``list[dict]`` whose entries
   each carry ``path``, ``format``, ``num_episodes``.
-
-  ``aliases`` are applied before ``overrides``, so an explicit ``-o``
-  flag always wins over a CLI shorthand for the same key.
   """
-  path = Path(config_path) if config_path else _DEFAULT_CONFIG_PATH
-  cfg  = cast(DictConfig, OmegaConf.load(path))
+  if config_path is None:
+    overlay_paths: list[str] = []
+  elif isinstance(config_path, str):
+    overlay_paths = [config_path]
+  else:
+    overlay_paths = list(config_path)
+
+  cfg = cast(DictConfig, OmegaConf.load(_DEFAULT_CONFIG_PATH))
+  for p in overlay_paths:
+    overlay = cast(DictConfig, OmegaConf.load(Path(p)))
+    cfg = cast(DictConfig, OmegaConf.merge(cfg, overlay))
+
   merged: list[str] = []
   if aliases:
     merged.extend(f"{k}={v}" for k, v in aliases.items() if v is not None)

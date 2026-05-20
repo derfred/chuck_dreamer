@@ -52,6 +52,22 @@ training:
   save_every: 10
   eval_every: 5
 
+  collector:
+    # "sync"  — collect episodes inline in the trainer process (today's
+    #           behavior, default for local dev).
+    # "async" — spawn ``num_workers`` worker processes that collect
+    #           continuously in the background; the trainer drains the
+    #           queue between train phases.
+    mode: "sync"
+    num_workers: 4               # ignored when mode=sync
+    max_pending: 64              # episode_q cap (async only); backpressures workers when trainer falls behind
+    # How often (in iterations) the trainer broadcasts the latest model
+    # weights to async workers. Workers train on stale weights between
+    # broadcasts — fine for Dreamer's WM (off-policy data) but you may
+    # want this lower if the actor/critic depend on fresh data. Ignored
+    # when mode=sync or policy=scripted.
+    weight_broadcast_every_n_iters: 5
+
   data:
     # Defaults applied to string-form warmup_source entries and to dict entries
     # that omit format/num_episodes. Stripped from the config after load_config()
@@ -202,10 +218,11 @@ env:
   table_size: [0.60, 0.5, 0.02]  # [half_x, half_y, half_z]
   max_steps: null  # Per-episode step cap; null uses the difficulty preset's default.
 
-  # Any non-empty subset of: "image" (CNN), "state" (MLP over
-  # object_xy + joint_qpos), "proprio" (MLP over joint_qpos),
-  # "ee" (MLP over ee_pos + ee_quat). Each listed component gets its
-  # own encoder/decoder branch; embeddings are fused to embed_size.
+  # Any non-empty subset of: "image" (CNN), "joints" (MLP over
+  # joint_qpos), "proprio" (MLP over joint_qpos), "ee" (MLP over
+  # ee_pos + ee_quat), "object_xy" (MLP over object_xy),
+  # "object_uv" (MLP over object pixel coords). Each listed component
+  # gets its own encoder/decoder branch; embeddings are fused to embed_size.
   obs_mode: ["image"]
   act_mode: "ee"      # "joint" | "ee"
 

@@ -73,7 +73,7 @@ def _make_episode_with_step_info(
   }
 
   return {
-    "obs": {"state": obs},
+    "obs": {"joints": obs},
     "action": action,
     "reward": reward,
     "done": done,

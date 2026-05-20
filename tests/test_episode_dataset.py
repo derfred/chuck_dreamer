@@ -69,7 +69,7 @@ def _step_info_columns(N: int) -> dict:
 def test_pack_enforces_buffer_invariants():
   N = 10
   obs = Observation.from_components(
-    {"state": np.arange(N * 4, dtype=np.float32).reshape(N, 4)},
+    {"joints": np.arange(N * 4, dtype=np.float32).reshape(N, 4)},
   )
   raw = {
     "joint_action": np.arange(N * 2, dtype=np.float32).reshape(N, 2),
@@ -78,7 +78,7 @@ def test_pack_enforces_buffer_invariants():
   }
   ep = _pack(obs, raw, "joint")
 
-  assert ep["obs"]["state"].shape == (N, 4)
+  assert ep["obs"]["joints"].shape == (N, 4)
   assert ep["action"].shape == (N - 1, 2)
   assert ep["reward"].shape == (N - 1,)
   assert ep["done"].shape == (N - 1,)
@@ -92,7 +92,7 @@ def test_pack_enforces_buffer_invariants():
 def test_pack_rejects_single_step_episode():
   with pytest.raises(ValueError):
     _pack(
-      Observation.from_components({"state": np.zeros((1, 3), dtype=np.float32)}),
+      Observation.from_components({"joints": np.zeros((1, 3), dtype=np.float32)}),
       {"joint_action": np.zeros((1, 2), dtype=np.float32),
        "reward": np.zeros((1,)),
        **_step_info_columns(1)},
@@ -105,7 +105,7 @@ def test_pack_rejects_single_step_episode():
 # ---------------------------------------------------------------------------
 
 
-def test_state_vector_processor_concatenates_state_fields():
+def test_joints_processor_returns_joint_qpos():
   N = 5
   raw = {
     "image": np.zeros((N, 4, 4, 3), dtype=np.uint8),
@@ -117,13 +117,47 @@ def test_state_vector_processor_concatenates_state_fields():
     "ee_quat": np.full((N, 4), 3.0, dtype=np.float32),
     "object_xy": np.full((N, 2), 4.0, dtype=np.float32),
   }
-  ep = EpisodeProcessor(("state",), act_mode="joint")(raw)
+  ep = EpisodeProcessor(("joints",), act_mode="joint")(raw)
 
-  # state = object_xy(2) ‖ joint_qpos(6) = 8. EE fields live in the
-  # separate ``ee`` component now.
-  assert ep["obs"]["state"].shape == (N, 8)
-  np.testing.assert_array_equal(ep["obs"]["state"][0, 0:2], [4.0, 4.0])
-  np.testing.assert_array_equal(ep["obs"]["state"][0, 2:8], [1.0] * 6)
+  assert ep["obs"]["joints"].shape == (N, 6)
+  np.testing.assert_array_equal(ep["obs"]["joints"][0], [1.0] * 6)
+
+
+def test_object_xy_processor_returns_object_xy():
+  N = 5
+  raw = {
+    "image": np.zeros((N, 4, 4, 3), dtype=np.uint8),
+    "joint_action": np.zeros((N, 3), dtype=np.float32),
+    "reward": np.zeros((N,), dtype=np.float32),
+    "timestamp": np.zeros((N,), dtype=np.float32),
+    "joint_qpos": np.ones((N, 6), dtype=np.float32),
+    "ee_pos": np.full((N, 3), 2.0, dtype=np.float32),
+    "ee_quat": np.full((N, 4), 3.0, dtype=np.float32),
+    "object_xy": np.full((N, 2), 4.0, dtype=np.float32),
+  }
+  ep = EpisodeProcessor(("object_xy",), act_mode="joint")(raw)
+
+  assert ep["obs"]["object_xy"].shape == (N, 2)
+  np.testing.assert_array_equal(ep["obs"]["object_xy"][0], [4.0, 4.0])
+
+
+def test_object_uv_processor_returns_object_uv():
+  N = 5
+  raw = {
+    "image": np.zeros((N, 4, 4, 3), dtype=np.uint8),
+    "joint_action": np.zeros((N, 3), dtype=np.float32),
+    "reward": np.zeros((N,), dtype=np.float32),
+    "timestamp": np.zeros((N,), dtype=np.float32),
+    "joint_qpos": np.ones((N, 6), dtype=np.float32),
+    "ee_pos": np.full((N, 3), 2.0, dtype=np.float32),
+    "ee_quat": np.full((N, 4), 3.0, dtype=np.float32),
+    "object_xy": np.full((N, 2), 4.0, dtype=np.float32),
+    "object_uv": np.full((N, 2), 50.0, dtype=np.float32),
+  }
+  ep = EpisodeProcessor(("object_uv",), act_mode="joint")(raw)
+
+  assert ep["obs"]["object_uv"].shape == (N, 2)
+  np.testing.assert_array_equal(ep["obs"]["object_uv"][0], [50.0, 50.0])
 
 
 def test_image_processor_returns_normalized_float32():
@@ -292,7 +326,7 @@ def test_replay_buffer_loads_hdf5_directory(tmp_path):
 
   buf = ReplayBuffer(
     capacity_steps=10_000, min_episode_len=5, seed=0,
-    processor=EpisodeProcessor(("state",), act_mode="joint"),
+    processor=EpisodeProcessor(("joints",), act_mode="joint"),
   )
   n = buf.load_sim_episodes(tmp_path, format="hdf5")
 
@@ -301,13 +335,13 @@ def test_replay_buffer_loads_hdf5_directory(tmp_path):
   # 20 raw steps → 20 obs + 19 actions per episode.
   assert len(buf) == 2 * 19
   ep = buf._episodes[0]
-  # state = object_xy(2) ‖ joint_qpos(6) = 8 under the new vocabulary.
-  assert ep["obs"].components["state"].shape == (20, 8)
+  # joints = joint_qpos(6) under the new vocabulary.
+  assert ep["obs"].components["joints"].shape == (20, 6)
   assert ep["action"].shape == (20 - 1, 3)
   assert bool(ep["done"][-1])
 
   batch = buf.sample(batch_size=4, seq_len=10)
-  assert batch["obs"]["state"].shape == (4, 10, 8)
+  assert batch["obs"]["joints"].shape == (4, 10, 6)
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +458,7 @@ def test_dataset_load_skips_too_short_episodes_via_buffer(tmp_path):
   )
   buf = ReplayBuffer(
     capacity_steps=10_000, min_episode_len=5, seed=0,
-    processor=EpisodeProcessor("state", act_mode="joint"),
+    processor=EpisodeProcessor("joints", act_mode="joint"),
   )
   inserted = buf.load_sim_episodes(tmp_path, format="hdf5")
   assert inserted == 0
@@ -469,7 +503,7 @@ def test_load_sim_episodes_forwards_progress(tmp_path):
   seen: list[int] = []
   buf = ReplayBuffer(
     capacity_steps=10_000, min_episode_len=5, seed=0,
-    processor=EpisodeProcessor("state", act_mode="joint"),
+    processor=EpisodeProcessor("joints", act_mode="joint"),
   )
   buf.load_sim_episodes(
     tmp_path,
@@ -605,12 +639,12 @@ def test_ee_processor_concatenates_ee_pos_and_quat():
 # ---------------------------------------------------------------------------
 
 
-def test_processor_for_state_mode_returns_state_processor():
+def test_processor_for_joints_mode_returns_joints_processor():
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
+  cfg.env.obs_mode = ["joints"]
   p = processor_for(cfg)
   assert isinstance(p, EpisodeProcessor)
-  assert p.obs_mode == ("state",)
+  assert p.obs_mode == ("joints",)
   assert p.image_size is None
 
 
@@ -723,7 +757,7 @@ def test_processor_picks_joint_action_when_act_mode_joint(tmp_path, fmt, suffix)
   writer.write_episode(_make_dual_action_raw(T=8), metadata={}, name_suffix="00000")
   raw = Episode.from_file(tmp_path / f"episode-00000{suffix}").data
 
-  ep = EpisodeProcessor("state", act_mode="joint")(raw)
+  ep = EpisodeProcessor("joints", act_mode="joint")(raw)
   # joint_action[t] = [0.1t, 0.2t, 0.3t] from _make_raw_episode.
   assert ep["action"].shape == (7, 3)
   np.testing.assert_allclose(ep["action"][0], [0.0, 0.0, 0.0], atol=1e-6)
@@ -736,7 +770,7 @@ def test_processor_picks_ee_action_when_act_mode_ee(tmp_path, fmt, suffix):
   writer.write_episode(_make_dual_action_raw(T=8), metadata={}, name_suffix="00000")
   raw = Episode.from_file(tmp_path / f"episode-00000{suffix}").data
 
-  ep = EpisodeProcessor("state", act_mode="ee")(raw)
+  ep = EpisodeProcessor("joints", act_mode="ee")(raw)
   # ee_action[t] starts with [1.0+0.01t, 2.0+0.01t, 3.0+0.01t, 1, 0, 0, 0].
   assert ep["action"].shape == (7, 7)
   np.testing.assert_allclose(ep["action"][0][:3], [1.0, 2.0, 3.0], atol=1e-5)
@@ -746,7 +780,7 @@ def test_processor_raises_when_requested_action_stream_missing():
   # Episode carries joint_action only; asking for ee_action must hard-error.
   raw = _make_raw_episode(T=5)
   with pytest.raises(KeyError, match="ee_action"):
-    EpisodeProcessor("state", act_mode="ee")(raw)
+    EpisodeProcessor("joints", act_mode="ee")(raw)
 
 
 def test_processor_for_reads_act_mode_from_config():

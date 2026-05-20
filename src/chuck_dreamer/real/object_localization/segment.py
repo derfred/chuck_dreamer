@@ -125,24 +125,45 @@ def _largest_component(mask: np.ndarray) -> np.ndarray | None:
 
 def _fallback_mask(rgb: np.ndarray, prompt: tuple[int, int] | list[tuple[int, int]]
                    ) -> np.ndarray | None:
-  """Brightness-threshold fallback. Picks the connected component nearest
-  the first prompt point. Works on the dark-mat / light-object rig but
-  is intentionally crude — the spec calls for SAM2 in production.
+  """Color-similarity floodfill from the prompt click.
+
+  Anchors the segmentation at the click pixel, then floodfills outward
+  while pixel intensity stays within a tolerance of the click. This
+  contains the segmentation to a single contiguous region of similar
+  brightness, which is much more robust than a global threshold against
+  scenes with multiple bright distractors (mat fiducials, walls).
+
+  Caveat: still a heuristic. If the click is on a near-saturated patch
+  the tolerance lets in too much; if it's on a shadowed edge it lets in
+  too little. SAM2 is the right tool for production.
   """
   import cv2
   pts = _prompt_to_array(prompt)
-  hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-  v = hsv[..., 2]
-  mask = v > max(80, int(np.percentile(v, 70)))
-  m = mask.astype(np.uint8)
-  num, labels, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
-  if num <= 1:
-    return None
-  u0, v0 = int(round(pts[0, 0])), int(round(pts[0, 1]))
+  u0 = int(round(pts[0, 0]))
+  v0 = int(round(pts[0, 1]))
   u0 = max(0, min(rgb.shape[1] - 1, u0))
   v0 = max(0, min(rgb.shape[0] - 1, v0))
-  chosen = int(labels[v0, u0])
-  if chosen == 0:
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    chosen = int(np.argmax(areas)) + 1
-  return labels == chosen
+
+  gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+  seed = int(gray[v0, u0])
+
+  # Floodfill with a per-channel tolerance. cv2.floodFill mutates the
+  # input mask in-place; ours is (H+2, W+2) per its API.
+  H, W = gray.shape
+  ff_mask = np.zeros((H + 2, W + 2), dtype=np.uint8)
+  img = gray.copy()
+  flags = 4 | (255 << 8) | cv2.FLOODFILL_FIXED_RANGE | cv2.FLOODFILL_MASK_ONLY
+  lo_diff = 30   # how much darker than the seed a pixel can be and still join
+  hi_diff = 30   # how much brighter
+  cv2.floodFill(img, ff_mask, (u0, v0), 255,
+                loDiff=(lo_diff,), upDiff=(hi_diff,), flags=flags)
+  mask = ff_mask[1:-1, 1:-1].astype(bool)
+
+  if not mask.any():
+    return None
+
+  # Tiny morphological closing fills 1-px gaps from camera noise + JPEG.
+  m = mask.astype(np.uint8)
+  k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+  m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
+  return m.astype(bool)

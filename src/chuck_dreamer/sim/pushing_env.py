@@ -13,8 +13,10 @@ from ..reward import GoalDistanceReward
 from ..training.observation import (
   EE,
   IMAGE,
+  JOINTS,
+  OBJECT_UV,
+  OBJECT_XY,
   PROPRIO,
-  STATE,
   ObsMode,
   normalize_obs_mode,
 )
@@ -258,7 +260,7 @@ class PushingEnv(gym.Env):
     self.generator = SceneGenerator(config)
 
     env_cfg = config.get("env", {}) if hasattr(config, "get") else {}
-    self.obs_mode: ObsMode = normalize_obs_mode(env_cfg.get("obs_mode", "state"))
+    self.obs_mode: ObsMode = normalize_obs_mode(env_cfg.get("obs_mode", "joints"))
     self.act_mode: ActMode = cast(ActMode, env_cfg.get("act_mode", "ee"))
 
     self.model: mujoco.MjModel | None = None
@@ -298,12 +300,16 @@ class PushingEnv(gym.Env):
     for c in self.obs_mode:
       if c == IMAGE:
         dims[c] = (H, W, 3)
-      elif c == STATE:
-        dims[c] = (2 + self.n_joints,)             # object_xy ‖ joint_qpos
+      elif c == JOINTS:
+        dims[c] = (self.n_joints,)                  # joint_qpos
       elif c == PROPRIO:
         dims[c] = (self.n_joints,)                  # joint_qpos
       elif c == EE:
         dims[c] = (3 + 4,)                          # ee_pos ‖ ee_quat
+      elif c == OBJECT_XY:
+        dims[c] = (2,)                              # object_xy
+      elif c == OBJECT_UV:
+        dims[c] = (2,)                              # object pixel coords (u, v)
       else:
         raise ValueError(f"unknown obs_mode component {c!r}")
     return dims
@@ -369,11 +375,8 @@ class PushingEnv(gym.Env):
       if c == IMAGE:
         image_obs: ObservationImage = full_obs["image"]
         out[c] = np.asarray(image_obs.image, dtype=np.uint8)
-      elif c == STATE:
-        out[c] = np.concatenate([
-          np.asarray(full_obs["object_xy"], dtype=np.float32),
-          np.asarray(full_obs["arm_qpos"],  dtype=np.float32),
-        ])
+      elif c == JOINTS:
+        out[c] = np.asarray(full_obs["arm_qpos"], dtype=np.float32)
       elif c == PROPRIO:
         out[c] = np.asarray(full_obs["arm_qpos"], dtype=np.float32)
       elif c == EE:
@@ -381,6 +384,15 @@ class PushingEnv(gym.Env):
           np.asarray(full_obs["ee_pos"],  dtype=np.float32),
           np.asarray(full_obs["ee_quat"], dtype=np.float32),
         ])
+      elif c == OBJECT_XY:
+        out[c] = np.asarray(full_obs["object_xy"], dtype=np.float32)
+      elif c == OBJECT_UV:
+        if "object_uv" not in full_obs:
+          raise KeyError(
+            "policy_obs requires 'object_uv' in the env obs for obs_mode "
+            "component 'object_uv'; the sim env does not yet compute it."
+          )
+        out[c] = np.asarray(full_obs["object_uv"], dtype=np.float32)
       else:
         raise ValueError(f"unknown obs_mode component {c!r}")
     return out

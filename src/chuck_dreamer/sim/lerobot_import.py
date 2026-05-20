@@ -356,7 +356,10 @@ def import_dataset(
       "object_xy":    np.zeros((T, 2),        dtype=np.float32),
     }
     if _derive_target_mask is not None:
-      episode["segmentation_target"] = _derive_target_mask(images)
+      mask = _derive_target_mask(images)
+      episode["segmentation_target"] = mask
+      from .episode_collector import mask_centroids_uv
+      episode["object_uv"] = mask_centroids_uv(np.asarray(mask, dtype=bool))
     metadata = {
       "config": {
         "source_repo":   repo_id,

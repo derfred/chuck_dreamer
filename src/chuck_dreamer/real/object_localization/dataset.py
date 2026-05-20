@@ -17,6 +17,13 @@ def episode_bounds(ds: Any, episode_idx: int) -> tuple[int, int]:
   Works against both the new and old LeRobotDataset APIs by sniffing
   for ``episode_data_index``; falls back to a per-frame scan otherwise.
   """
+  # New API: ds.meta.episodes is a HF Dataset with dataset_from/to_index.
+  # That table is already cached on disk; reading it touches no video.
+  try:
+    row = ds.meta.episodes[episode_idx]
+    return int(row["dataset_from_index"]), int(row["dataset_to_index"])
+  except (AttributeError, KeyError, IndexError, TypeError):
+    pass
   try:
     idx_table = ds.episode_data_index
     fr = int(idx_table["from"][episode_idx])
@@ -35,6 +42,20 @@ def episode_bounds(ds: Any, episode_idx: int) -> tuple[int, int]:
       current = ep
   starts.append(len(ds))
   return starts[episode_idx], starts[episode_idx + 1]
+
+
+def episode_bounds_from_meta(dataset_id: str, episode_idx: int) -> tuple[int, int]:
+  """``(from_idx, to_idx_exclusive)`` from cached parquet metadata only.
+
+  This avoids ``LeRobotDataset(dataset_id)`` and the multi-minute PyAV
+  index build it triggers on first access. ``LeRobotDatasetMetadata``
+  only reads the parquet sidecars under ``meta/`` and the small HF refs
+  files — no video touch.
+  """
+  from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # type: ignore
+  meta = LeRobotDatasetMetadata(dataset_id)
+  row = meta.episodes[episode_idx]
+  return int(row["dataset_from_index"]), int(row["dataset_to_index"])
 
 
 def get_frame(ds: Any, frame_idx: int, camera_key: str) -> np.ndarray:

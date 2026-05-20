@@ -84,9 +84,9 @@ def backend(request) -> Backend:
 
 def _build_state_model(backend: Backend, action_dim: int = 6, obs_dim: int = 15):
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
+  cfg.env.obs_mode = ["joints"]
   cfg.hardware.device = backend.name
-  return build_model(cfg, obs_shape={"state": (obs_dim,)}, action_dim=action_dim), cfg
+  return build_model(cfg, obs_shape={"joints": (obs_dim,)}, action_dim=action_dim), cfg
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +157,7 @@ def test_prior_step_sample_false_uses_prior_mean(backend: Backend):
 def test_rollout_posterior_only_with_explicit_actions_and_embeds(backend: Backend):
   model, _ = _build_state_model(backend)
   B, T = 2, 5
-  obs     = {"state": backend.zeros((B, T, 15))}
+  obs     = {"joints": backend.zeros((B, T, 15))}
   actions = backend.zeros((B, T, model.action_dim))
   embeds  = model.encode(obs)
 
@@ -205,7 +205,7 @@ def test_rollout_with_external_policy_callable(backend: Backend):
 def test_rollout_burn_in_splits_modes_correctly(backend: Backend):
   model, _ = _build_state_model(backend)
   B, T = 2, 5
-  obs     = {"state": backend.zeros((B, T, 15))}
+  obs     = {"joints": backend.zeros((B, T, 15))}
   actions = backend.zeros((B, T, model.action_dim))
   embeds  = model.encode(obs)
   traj = rollout(
@@ -232,14 +232,14 @@ def test_rollout_decode_and_predict_reward_shapes(backend: Backend):
   B, T = 2, 3
   traj = rollout(model, init_state=model.initial_state(B), horizon=T,
                  mode="prior", decode=True, predict_reward=True)
-  assert tuple(traj.obs_pred["state"].shape) == (B, T, 15)
+  assert tuple(traj.obs_pred["joints"].shape) == (B, T, 15)
   assert tuple(traj.rewards.shape)  == (B, T)
 
 
 def test_rollout_sample_false_is_deterministic(backend: Backend):
   model, _ = _build_state_model(backend)
   B, T = 2, 4
-  obs     = {"state": backend.zeros((B, T, 15))}
+  obs     = {"joints": backend.zeros((B, T, 15))}
   actions = backend.zeros((B, T, model.action_dim))
   embeds  = model.encode(obs)
   init    = model.initial_state(B)
@@ -273,7 +273,7 @@ def test_eval_split_rollout_shares_anchor_and_emits_two_trajs(backend: Backend):
   model, _ = _build_state_model(backend)
   B, burn_in, horizon = 2, 3, 4
   T = burn_in + horizon
-  obs     = {"state": backend.zeros((B, T, 15))}
+  obs     = {"joints": backend.zeros((B, T, 15))}
   actions = backend.zeros((B, T, model.action_dim))
   embeds  = model.encode(obs)
 
@@ -291,7 +291,7 @@ def test_eval_split_rollout_shares_anchor_and_emits_two_trajs(backend: Backend):
 def test_trajectory_stack_helpers_match_per_step_states(backend: Backend):
   model, _ = _build_state_model(backend)
   B, T = 2, 4
-  obs     = {"state": backend.zeros((B, T, 15))}
+  obs     = {"joints": backend.zeros((B, T, 15))}
   actions = backend.zeros((B, T, model.action_dim))
   embeds  = model.encode(obs)
   traj = rollout(model, init_state=model.initial_state(B), horizon=T,
@@ -314,7 +314,7 @@ def test_trajectory_stack_feat_matches_decode_input(backend: Backend):
   feats = traj.stack_feat()
   assert tuple(feats.shape) == (B, T, model.feat_dim)
   decoded = model.decode(feats)
-  assert backend.allclose(decoded["state"], traj.obs_pred["state"])
+  assert backend.allclose(decoded["joints"], traj.obs_pred["joints"])
 
 
 def test_trajectory_stack_helpers_cache_results(backend: Backend):
@@ -329,7 +329,7 @@ def test_trajectory_stack_helpers_cache_results(backend: Backend):
 def test_eval_split_rollout_with_zero_burn_in_anchors_at_initial_state(backend: Backend):
   model, _ = _build_state_model(backend)
   B, horizon = 2, 4
-  obs     = {"state": backend.zeros((B, horizon, 15))}
+  obs     = {"joints": backend.zeros((B, horizon, 15))}
   actions = backend.zeros((B, horizon, model.action_dim))
   embeds  = model.encode(obs)
   out = eval_split_rollout(
@@ -349,16 +349,16 @@ def test_eval_split_rollout_with_zero_burn_in_anchors_at_initial_state(backend: 
 def _build_mlx_state_model():
   mx = pytest.importorskip("mlx.core")  # noqa: F841
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
+  cfg.env.obs_mode = ["joints"]
   cfg.hardware.device = "mlx"
-  return build_model(cfg, obs_shape={"state": (15,)}, action_dim=6)
+  return build_model(cfg, obs_shape={"joints": (15,)}, action_dim=6)
 
 
 def test_cem_policy_act_returns_action_in_bounds():
   model = _build_mlx_state_model()
   policy = CEMPolicy(model, horizon=4, num_samples=16, num_elites=4, num_iterations=2)
   policy.reset(scene=None)
-  action = policy.act({"state": np.zeros(15, dtype=np.float32)})
+  action = policy.act({"joints": np.zeros(15, dtype=np.float32)})
   assert action.shape == (model.action_dim,)
   assert action.dtype == np.float32
   assert np.all(action >= -1.0) and np.all(action <= 1.0)
@@ -368,7 +368,7 @@ def test_cem_policy_warm_starts_after_first_step():
   model = _build_mlx_state_model()
   policy = CEMPolicy(model, horizon=3, num_samples=16, num_elites=4, num_iterations=2)
   policy.reset(scene=None)
-  obs = {"state": np.zeros(15, dtype=np.float32)}
+  obs = {"joints": np.zeros(15, dtype=np.float32)}
   policy.act(obs)
   assert policy._mean is not None
   policy.act(obs)
@@ -379,4 +379,4 @@ def test_cem_policy_requires_reset_before_act():
   model = _build_mlx_state_model()
   policy = CEMPolicy(model, horizon=2, num_samples=4, num_elites=2, num_iterations=1)
   with pytest.raises(RuntimeError, match="reset"):
-    policy.act({"state": np.zeros(15, dtype=np.float32)})
+    policy.act({"joints": np.zeros(15, dtype=np.float32)})

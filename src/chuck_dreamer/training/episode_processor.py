@@ -20,8 +20,10 @@ import numpy as np
 from .observation import (
   EE,
   IMAGE,
+  JOINTS,
+  OBJECT_UV,
+  OBJECT_XY,
   PROPRIO,
-  STATE,
   ObsMode,
   Observation,
   normalize_obs_mode,
@@ -141,10 +143,8 @@ def _union_focus_mask(raw: RawEpisode, sources: tuple[str, ...]) -> np.ndarray |
 # Per-component vector builders. ``image`` is handled separately because
 # it needs the image_size argument for resize. Keep the field
 # composition here as the single source of truth.
-def _build_state(raw: RawEpisode) -> np.ndarray:
-  object_xy  = np.asarray(raw["object_xy"],  dtype=np.float32)
-  joint_qpos = np.asarray(raw["joint_qpos"], dtype=np.float32)
-  return np.concatenate([object_xy, joint_qpos], axis=1)
+def _build_joints(raw: RawEpisode) -> np.ndarray:
+  return np.asarray(raw["joint_qpos"], dtype=np.float32)
 
 
 def _build_proprio(raw: RawEpisode) -> np.ndarray:
@@ -157,10 +157,20 @@ def _build_ee(raw: RawEpisode) -> np.ndarray:
   return np.concatenate([ee_pos, ee_quat], axis=1)
 
 
+def _build_object_xy(raw: RawEpisode) -> np.ndarray:
+  return np.asarray(raw["object_xy"], dtype=np.float32)
+
+
+def _build_object_uv(raw: RawEpisode) -> np.ndarray:
+  return np.asarray(raw["object_uv"], dtype=np.float32)
+
+
 _VECTOR_BUILDERS: dict[str, Callable[[RawEpisode], np.ndarray]] = {
-  STATE:   _build_state,
-  PROPRIO: _build_proprio,
-  EE:      _build_ee,
+  JOINTS:    _build_joints,
+  PROPRIO:   _build_proprio,
+  EE:        _build_ee,
+  OBJECT_XY: _build_object_xy,
+  OBJECT_UV: _build_object_uv,
 }
 
 

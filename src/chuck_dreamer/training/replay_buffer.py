@@ -91,7 +91,7 @@ class ReplayBuffer:
     self._total_steps: int         = 0
     self._rng                      = np.random.default_rng(seed)
 
-    self._sim_processor       = processor if processor is not None else EpisodeProcessor(("state",))
+    self._sim_processor       = processor if processor is not None else EpisodeProcessor(("joints",))
     self._default_num_workers = default_num_workers
     self._protected_tags      = frozenset(protected_tags)
     self._tag_weights: dict[str, float] = dict(tag_weights or {})
@@ -389,7 +389,7 @@ class ReplayBuffer:
 
     ``processor`` converts each raw sim episode into the buffer's
     ``(obs, action, reward, done)`` schema. Defaults to
-    ``EpisodeProcessor("state")`` (low-dim state obs). Returns the number
+    ``EpisodeProcessor("joints")`` (low-dim joint obs). Returns the number
     of episodes successfully inserted (short episodes that fail the
     ``min_episode_len`` check are skipped, like ``add_episode``).
 

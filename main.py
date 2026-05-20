@@ -36,16 +36,24 @@ override_option = click.option(
 
 
 @click.group()
-@click.option('--config', '-c', type=str, help='Path to configuration file')
+@click.option(
+  '--config', '-c', 'config_paths', type=str, multiple=True,
+  help=(
+    'Path to a YAML config. Repeatable: later files merge on top of '
+    'earlier ones, all on top of configs/default.yaml. Use to factor '
+    'out machine- or experiment-specific scale-out settings without '
+    'editing default.yaml.'
+  ),
+)
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose logging')
 @click.pass_context
-def cli(ctx, config, verbose):
+def cli(ctx, config_paths, verbose):
   """Chuck Dreamer CLI - Robotics ML with MLX."""
   if verbose:
     logging.getLogger().setLevel(logging.DEBUG)
 
   ctx.ensure_object(dict)
-  ctx.obj['config_path'] = config
+  ctx.obj['config_path'] = list(config_paths)
 
 
 def _collect_one_episode(cfg, output, fmt, ep_idx, episode_seed, min_steps):
@@ -553,10 +561,16 @@ def run_cmd(ctx, policy_type, checkpoint_path, camera_source, arm_port, override
 from chuck_dreamer.real.object_localization.cli import (
   annotate_mat_cmd,
   calibrate_intrinsics_cmd,
+  pick_checkerboard_frames_cmd,
+  test_calibration_cmd,
+  test_object_pose_cmd,
 )
 
 cli.add_command(calibrate_intrinsics_cmd)
 cli.add_command(annotate_mat_cmd)
+cli.add_command(pick_checkerboard_frames_cmd)
+cli.add_command(test_calibration_cmd)
+cli.add_command(test_object_pose_cmd)
 
 
 if __name__ == "__main__":

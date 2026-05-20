@@ -83,6 +83,9 @@ def _load_hdf5_episode(path: str | Path) -> RawEpisode:
     for key, dataset in _HDF5_DATASET.items():
       raw[key] = np.asarray(f[dataset][()])
 
+    if "object_uv" in f:
+      raw["object_uv"] = np.asarray(f["object_uv"][()], dtype=np.float32)
+
     has_joint = "joint_action" in f
     has_ee    = "ee_action"    in f
     if has_joint:
@@ -264,6 +267,8 @@ def _load_rerun_episode(path: str | Path) -> RawEpisode:
   raw["ee_pos"] = _scalars("/ee_pos")
   raw["ee_quat"] = _scalars("/ee_quat")
   raw["object_xy"] = _scalars("/object_xy")
+  if "/object_uv" in by_entity:
+    raw["object_uv"] = _scalars("/object_uv").astype(np.float32, copy=False)
 
   img_chunks = by_entity["/camera/image"]
   images, _steps = _ordered_image_stack(img_chunks)

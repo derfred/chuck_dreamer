@@ -67,7 +67,7 @@ def _make_env_cfg(
     difficulty: str = "easy",
     render_size: str = "64x64",
     seed: int = 42,
-    obs_mode: str = "state",
+    obs_mode: str = "joints",
     act_mode: str = "joint",
 ):
   """Build a DictConfig that PushingEnv / SceneGenerator accept."""
@@ -301,13 +301,13 @@ class TestPushingEnv:
     env_ee.reset(scene=cfg)
     assert env_ee.action_space.shape == (7,)
 
-  def test_observation_space_state_mode(self, env):
+  def test_observation_space_joints_mode(self, env):
     cfg = _make_simple_config()
     env.reset(scene=cfg)
-    # state = object_xy(2) ‖ arm_qpos(n_joints) under the new vocabulary.
+    # joints = arm_qpos(n_joints) under the new vocabulary.
     space = env.observation_space
-    assert set(space.spaces.keys()) == {"state"}
-    assert space["state"].shape == (2 + len(cfg.joint_names),)
+    assert set(space.spaces.keys()) == {"joints"}
+    assert space["joints"].shape == (len(cfg.joint_names),)
 
   def test_render_returns_image(self, env):
     cfg = _make_simple_config()
@@ -899,3 +899,141 @@ class TestEpisodeCollector:
     T = episode["ee_action"].shape[0]
     assert si["object_xy"].shape == (T, 2)
     assert si["ee_pos"].shape == (T, 3)
+
+
+# ---------------------------------------------------------------------------
+# Target-mask centroid → object_uv
+# ---------------------------------------------------------------------------
+
+
+class TestObjectUVCentroid:
+  def test_centroid_of_single_pixel_recovers_its_uv(self):
+    from chuck_dreamer.sim.episode_collector import mask_centroids_uv
+    masks = np.zeros((1, 8, 8), dtype=bool)
+    masks[0, 5, 3] = True  # row 5, col 3 → u=3, v=5
+    uv = mask_centroids_uv(masks)
+    assert uv.shape == (1, 2)
+    np.testing.assert_allclose(uv[0], [3.0, 5.0])
+
+  def test_centroid_of_square_block_is_geometric_centre(self):
+    from chuck_dreamer.sim.episode_collector import mask_centroids_uv
+    masks = np.zeros((1, 10, 10), dtype=bool)
+    masks[0, 2:6, 4:8] = True  # rows 2..5, cols 4..7 → mean v=3.5, u=5.5
+    uv = mask_centroids_uv(masks)
+    np.testing.assert_allclose(uv[0], [5.5, 3.5])
+
+  def test_centroid_is_nan_when_mask_is_empty(self):
+    from chuck_dreamer.sim.episode_collector import mask_centroids_uv
+    masks = np.zeros((3, 4, 4), dtype=bool)
+    masks[1, 1, 2] = True  # only the middle step has a target
+    uv = mask_centroids_uv(masks)
+    assert np.isnan(uv[0]).all()
+    np.testing.assert_allclose(uv[1], [2.0, 1.0])
+    assert np.isnan(uv[2]).all()
+
+  def test_collector_writes_object_uv_alongside_object_xy(self):
+    # Use a fake env whose target mask is non-empty so the centroid is finite.
+    class _MaskedFakeEnv(_FakeEnv):
+      def _obs_with_mask(self, step: int):
+        obs = _fake_obs(step, self.n_joints)
+        H, W = obs["image"].image.shape[:2]
+        tm = np.zeros((H, W), dtype=bool)
+        tm[H // 2, W // 2] = True  # centre pixel
+        # Rebuild ObservationImage with a non-empty target mask.
+        from chuck_dreamer.sim.observation_image import ObservationImage
+        obs["image"] = ObservationImage(
+          image=obs["image"].image,
+          target_mask=tm,
+          goal_mask=obs["image"].goal_mask,
+          clutter_masks=obs["image"].clutter_masks,
+          arm_mask=obs["image"].arm_mask,
+          background_mask=obs["image"].background_mask,
+        )
+        return obs
+
+      def reset(self, *, scene=None, seed=None):
+        self._step = 0
+        return self._obs_with_mask(0), {}
+
+      def step(self, action):
+        self._step += 1
+        info = {"step_info": _fake_step_info(self._step)}
+        terminated = self.terminate_at is not None and self._step >= self.terminate_at
+        return self._obs_with_mask(self._step), -0.1, terminated, False, info
+
+    env    = _MaskedFakeEnv(terminate_at=3, max_steps=20, act_mode="ee")
+    policy = _FakePolicy(action_dim=7)
+    collector = _make_collector(env, policy)
+
+    episode, _outcome = collector.run()
+    assert episode is not None
+    assert "object_uv" in episode
+    T = episode["ee_action"].shape[0]
+    assert episode["object_uv"].shape == (T, 2)
+    # Centre pixel of a 4x4 image is (u=2, v=2).
+    np.testing.assert_allclose(episode["object_uv"], 2.0)
+
+  def test_hdf5_round_trips_object_uv(self, tmp_path):
+    from chuck_dreamer.training.episode_dataset import Episode
+
+    writer = EpisodeWriter(str(tmp_path), format="hdf5")
+    T = 4
+    rng = np.random.default_rng(0)
+    episode = {
+      "image":        rng.integers(0, 256, (T, 8, 8, 3), dtype=np.uint8),
+      "joint_action": rng.uniform(-1, 1, (T, 6)).astype(np.float32),
+      "reward":       np.zeros((T,), dtype=np.float32),
+      "timestamp":    np.arange(T, dtype=np.float32) * 0.1,
+      "joint_qpos":   np.zeros((T, 6), dtype=np.float32),
+      "ee_pos":       np.zeros((T, 3), dtype=np.float32),
+      "ee_quat":      np.tile([1.0, 0.0, 0.0, 0.0], (T, 1)).astype(np.float32),
+      "object_xy":    np.zeros((T, 2), dtype=np.float32),
+      "object_uv":    np.arange(T * 2, dtype=np.float32).reshape(T, 2),
+    }
+    path = writer.write_episode(episode, metadata={"seed": 0}, name_suffix="00000")
+    raw = Episode.from_file(path).data
+    assert "object_uv" in raw
+    np.testing.assert_allclose(raw["object_uv"], episode["object_uv"])
+
+  def test_hdf5_round_trip_without_object_uv_still_works(self, tmp_path):
+    # Legacy episodes (no object_uv) must still load.
+    from chuck_dreamer.training.episode_dataset import Episode
+
+    writer = EpisodeWriter(str(tmp_path), format="hdf5")
+    T = 3
+    episode = {
+      "image":        np.zeros((T, 4, 4, 3), dtype=np.uint8),
+      "joint_action": np.zeros((T, 6), dtype=np.float32),
+      "reward":       np.zeros((T,), dtype=np.float32),
+      "timestamp":    np.zeros((T,), dtype=np.float32),
+      "joint_qpos":   np.zeros((T, 6), dtype=np.float32),
+      "ee_pos":       np.zeros((T, 3), dtype=np.float32),
+      "ee_quat":      np.tile([1.0, 0.0, 0.0, 0.0], (T, 1)).astype(np.float32),
+      "object_xy":    np.zeros((T, 2), dtype=np.float32),
+    }
+    path = writer.write_episode(episode, metadata={"seed": 0}, name_suffix="00000")
+    raw = Episode.from_file(path).data
+    assert "object_uv" not in raw
+
+  def test_rerun_round_trips_object_uv(self, tmp_path):
+    pytest.importorskip("rerun")
+    from chuck_dreamer.training.episode_dataset import Episode
+
+    writer = EpisodeWriter(str(tmp_path), format="rerun")
+    T = 4
+    rng = np.random.default_rng(1)
+    episode = {
+      "image":        rng.integers(0, 256, (T, 8, 8, 3), dtype=np.uint8),
+      "joint_action": rng.uniform(-1, 1, (T, 6)).astype(np.float32),
+      "reward":       np.zeros((T,), dtype=np.float32),
+      "timestamp":    np.arange(T, dtype=np.float32) * 0.1,
+      "joint_qpos":   np.zeros((T, 6), dtype=np.float32),
+      "ee_pos":       np.zeros((T, 3), dtype=np.float32),
+      "ee_quat":      np.tile([1.0, 0.0, 0.0, 0.0], (T, 1)).astype(np.float32),
+      "object_xy":    np.zeros((T, 2), dtype=np.float32),
+      "object_uv":    np.arange(T * 2, dtype=np.float32).reshape(T, 2),
+    }
+    path = writer.write_episode(episode, metadata={"seed": 1}, name_suffix="00000")
+    raw = Episode.from_file(path).data
+    assert "object_uv" in raw
+    np.testing.assert_allclose(raw["object_uv"], episode["object_uv"])

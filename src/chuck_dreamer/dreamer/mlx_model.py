@@ -941,3 +941,37 @@ class DreamerMLXModel:
     mx.eval(self.actor.parameters(), self.critic.parameters(), wm_bundle.parameters())
 
     return {k: v for k, v in metadata.items() if k != CONFIG_METADATA_KEY}
+
+  def state_bytes(self) -> bytes:
+    """Serialize current weights to an in-memory blob.
+
+    MLX's safetensors API only writes to files, so we round-trip through
+    a tempfile. The broadcast frequency is low (every N iterations) so
+    file-system overhead is negligible vs. the gradient step cost.
+    """
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as f:
+      tmp_path = f.name
+    try:
+      self.save(tmp_path)
+      with open(tmp_path, "rb") as f:
+        return f.read()
+    finally:
+      try:
+        os.remove(tmp_path)
+      except OSError:
+        pass
+
+  def load_state_bytes(self, blob: bytes) -> None:
+    """Inverse of :meth:`state_bytes` — load weights from a bytes blob."""
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as f:
+      tmp_path = f.name
+      f.write(blob)
+    try:
+      self.load(tmp_path)
+    finally:
+      try:
+        os.remove(tmp_path)
+      except OSError:
+        pass

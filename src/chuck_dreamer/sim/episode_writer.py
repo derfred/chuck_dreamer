@@ -209,6 +209,7 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
         ee_pos          (T, 3)          float32
         ee_quat         (T, 4)          float32
         object_xy       (T, 2)          float32
+        object_uv       (T, 2)          float32   — optional, pixel centroid of the target mask
         segmentation/                              — optional, present iff env produced masks
             target      (T, H, W)       bool
             goal        (T, H, W)       bool
@@ -300,6 +301,9 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
             f.create_dataset("ee_pos",     data=ee_pos)
             f.create_dataset("ee_quat",    data=ee_quat)
             f.create_dataset("object_xy",  data=object_xy)
+            object_uv = episode.get("object_uv")
+            if object_uv is not None:
+                f.create_dataset("object_uv", data=np.asarray(object_uv, dtype=np.float32))
 
             self._write_segmentation_hdf5(f, episode)
 
@@ -461,6 +465,11 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         ee_pos     = np.asarray(episode["ee_pos"],     dtype=np.float32)
         ee_quat    = np.asarray(episode["ee_quat"],    dtype=np.float32)
         object_xy  = np.asarray(episode["object_xy"],  dtype=np.float32)
+        object_uv_raw = episode.get("object_uv")
+        object_uv  = (
+          np.asarray(object_uv_raw, dtype=np.float32)
+          if object_uv_raw is not None else None
+        )
 
         seg_target     = episode.get("segmentation_target")
         seg_goal       = episode.get("segmentation_goal")
@@ -479,6 +488,8 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             rec.log("ee_pos",       rr.Scalars(ee_pos[i].tolist()))
             rec.log("ee_quat",      rr.Scalars(ee_quat[i].tolist()))
             rec.log("object_xy",    rr.Scalars(object_xy[i].tolist()))
+            if object_uv is not None:
+                rec.log("object_uv",  rr.Scalars(object_uv[i].tolist()))
 
             if seg_target is not None:
                 rec.log("camera/seg/target",

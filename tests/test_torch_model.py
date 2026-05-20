@@ -35,7 +35,7 @@ from chuck_dreamer.dreamer.torch_model import (  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Encoder / Decoder — state mode
+# Encoder / Decoder — joints mode
 # ---------------------------------------------------------------------------
 
 
@@ -235,19 +235,19 @@ def test_aux_head_output_shape():
 
 def _state_cfg():
   cfg = load_config()
-  cfg.env.obs_mode = ["state"]
+  cfg.env.obs_mode = ["joints"]
   cfg.hardware.device = "cpu"
   return cfg
 
 
 def test_dreamer_model_builds_from_default_config():
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape={"state": (15,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (15,)}, action_dim=6)
   assert isinstance(model, DreamerTorchModel)
   assert isinstance(model.encoder, MultiModalEncoder)
   assert isinstance(model.decoder, MultiModalDecoder)
-  assert isinstance(model.encoder.branches["state"], MLPEncoder)
-  assert isinstance(model.decoder.heads["state"], MLPDecoder)
+  assert isinstance(model.encoder.branches["joints"], MLPEncoder)
+  assert isinstance(model.decoder.heads["joints"], MLPDecoder)
 
 
 def test_dreamer_model_builds_image_mode():
@@ -278,9 +278,9 @@ def test_dreamer_model_builds_image_proprio_mode():
 def test_dreamer_model_end_to_end_forward_shapes():
   cfg = _state_cfg()
   B, T, obs_dim, action_dim = 2, 4, 15, 6
-  model = build_model(cfg, obs_shape={"state": (obs_dim,)}, action_dim=action_dim)
+  model = build_model(cfg, obs_shape={"joints": (obs_dim,)}, action_dim=action_dim)
 
-  obs = {"state": torch.zeros(B, T, obs_dim)}
+  obs = {"joints": torch.zeros(B, T, obs_dim)}
   actions = torch.zeros(B, T, action_dim)
 
   embeds = model.encoder(obs)
@@ -294,7 +294,7 @@ def test_dreamer_model_end_to_end_forward_shapes():
   f = feat(states[-1])
   assert f.shape == (B, feat_dim)
   out = model.decoder(f)
-  assert out["state"].shape == (B, obs_dim)
+  assert out["joints"].shape == (B, obs_dim)
   assert model.reward_head(f).shape == (B,)
   action, mean, std = model.actor(f)
   assert action.shape == (B, action_dim)
@@ -316,28 +316,28 @@ def test_dreamer_model_rejects_unsupported_obs_mode():
 
 def test_aux_head_disabled_by_default():
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   assert model.aux_head is None
 
 
 def test_aux_head_built_when_aux_scale_positive():
   cfg = _state_cfg()
   cfg.training.losses.aux_scale = 1.0
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   assert isinstance(model.aux_head, AuxHead)
   assert model.aux_head.target_dim == int(cfg.model.aux.target_dim)
 
 
 def test_wm_update_runs_and_advances_params():
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   # Snapshot the encoder's first linear layer's weight.
   first_linear = next(p for p in model._wm_bundle.encoder.parameters())
   before = first_linear.detach().clone()
 
   B, T = 2, 4
   batch = {
-    "obs":    {"state": torch.randn(B, T, 5)},
+    "obs":    {"joints": torch.randn(B, T, 5)},
     "action": torch.randn(B, T, 6),
     "reward": torch.randn(B, T),
   }
@@ -351,10 +351,10 @@ def test_wm_update_runs_and_advances_params():
 def test_wm_update_with_aux_head_runs():
   cfg = _state_cfg()
   cfg.training.losses.aux_scale = 1.0
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   B, T = 2, 3
   batch = {
-    "obs":        {"state": torch.randn(B, T, 5)},
+    "obs":        {"joints": torch.randn(B, T, 5)},
     "action":     torch.randn(B, T, 6),
     "reward":     torch.randn(B, T),
     "aux_target": torch.randn(B, T, int(cfg.model.aux.target_dim)),
@@ -369,43 +369,43 @@ def test_wm_update_with_aux_head_runs():
 
 def test_save_load_round_trip_matches_forward_output(tmp_path):
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   f = torch.randn(3, cfg.model.rssm.stoch_size + cfg.model.rssm.deter_size)
-  out_before = model.decoder(f)["state"].detach().clone()
+  out_before = model.decoder(f)["joints"].detach().clone()
 
   path = str(tmp_path / "ckpt.safetensors")
   model.save(path)
 
-  model2 = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model2 = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   # Different random init: outputs should differ before loading.
-  assert not torch.allclose(model.decoder(f)["state"], model2.decoder(f)["state"])
+  assert not torch.allclose(model.decoder(f)["joints"], model2.decoder(f)["joints"])
   model2.load(path)
-  assert torch.allclose(out_before, model2.decoder(f)["state"])
+  assert torch.allclose(out_before, model2.decoder(f)["joints"])
 
 
 def test_save_embeds_config_yaml(tmp_path):
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   path = str(tmp_path / "ckpt.safetensors")
   model.save(path)
   loaded_cfg = load_config_from_checkpoint(path)
   assert loaded_cfg is not None
-  assert list(loaded_cfg.env.obs_mode) == ["state"]
+  assert list(loaded_cfg.env.obs_mode) == ["joints"]
 
 
 def test_save_extra_metadata_round_trips(tmp_path):
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   path = str(tmp_path / "ckpt.safetensors")
   model.save(path, extra_metadata={"iteration": "42"})
-  model2 = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model2 = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   extra = model2.load(path)
   assert extra == {"iteration": "42"}
 
 
 def test_save_extra_metadata_rejects_reserved_key(tmp_path):
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   path = str(tmp_path / "ckpt.safetensors")
   with pytest.raises(ValueError):
     model.save(path, extra_metadata={"config_yaml": "x"})
@@ -414,11 +414,11 @@ def test_save_extra_metadata_rejects_reserved_key(tmp_path):
 def test_aux_head_round_trips_through_save_load(tmp_path):
   cfg = _state_cfg()
   cfg.training.losses.aux_scale = 1.0
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   path = str(tmp_path / "ckpt.safetensors")
   model.save(path)
 
-  model2 = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model2 = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   model2.load(path)
   f = torch.zeros(3, cfg.model.rssm.stoch_size + cfg.model.rssm.deter_size)
   assert torch.allclose(model.aux_head(f), model2.aux_head(f))
@@ -441,7 +441,7 @@ def test_resolve_device_rejects_mlx():
 
 def test_model_params_live_on_resolved_device():
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
   any_param = next(model._wm_bundle.parameters())
   assert any_param.device.type == model.device.type
 
@@ -450,7 +450,7 @@ def test_encode_accepts_numpy_input():
   """The encoder helper should handle numpy obs at the boundary — useful
   for callers like CEMPolicy that move between numpy and the model."""
   cfg = _state_cfg()
-  model = build_model(cfg, obs_shape={"state": (5,)}, action_dim=6)
-  emb = model.encode({"state": np.zeros((2, 3, 5), dtype=np.float32)})
+  model = build_model(cfg, obs_shape={"joints": (5,)}, action_dim=6)
+  emb = model.encode({"joints": np.zeros((2, 3, 5), dtype=np.float32)})
   assert emb.shape == (2, 3, cfg.model.encoder.embed_size)
   assert emb.device.type == model.device.type

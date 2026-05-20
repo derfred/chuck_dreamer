@@ -37,6 +37,27 @@ _SHARED_KEYS = (
 )
 
 
+def mask_centroids_uv(masks: np.ndarray) -> np.ndarray:
+  """Per-step pixel centroid ``(u, v)`` of a ``(T, H, W)`` bool mask stack.
+
+  ``u`` is the column coordinate, ``v`` is the row coordinate (matching
+  the image-coordinate convention used by OpenCV / Rerun). Steps whose
+  mask is empty get ``NaN`` so downstream code can detect dropouts
+  without silently snapping to 0. Returns ``(T, 2)`` float32.
+  """
+  if masks.ndim != 3:
+    raise ValueError(f"mask_centroids_uv expects (T, H, W); got shape {masks.shape!r}")
+  m = masks.astype(np.float32, copy=False)
+  counts = m.sum(axis=(1, 2))                                    # (T,)
+  H, W   = m.shape[1], m.shape[2]
+  vs     = m.sum(axis=2) @ np.arange(H, dtype=np.float32)        # (T,) row weight
+  us     = m.sum(axis=1) @ np.arange(W, dtype=np.float32)        # (T,) col weight
+  with np.errstate(invalid="ignore", divide="ignore"):
+    u = np.where(counts > 0, us / counts, np.float32("nan"))
+    v = np.where(counts > 0, vs / counts, np.float32("nan"))
+  return np.stack([u, v], axis=-1).astype(np.float32)
+
+
 def _stack_image_obs(image_obs_list: list[ObservationImage]) -> dict[str, np.ndarray]:
   """Stack a per-step list of :class:`ObservationImage` into T-stacked arrays.
 
@@ -46,6 +67,10 @@ def _stack_image_obs(image_obs_list: list[ObservationImage]) -> dict[str, np.nda
   stacked along a leading clutter axis under ``segmentation_clutter`` as
   ``(T, K, H, W)`` for convenience (K is the scene's clutter count, fixed
   across the episode).
+
+  Also derives ``object_uv`` ``(T, 2)`` float32 — the pixel centroid of
+  the target mask, in (u, v) order. NaN per-step when the target is not
+  visible in the frame.
   """
   images = np.stack([np.asarray(io.image, dtype=np.uint8) for io in image_obs_list], axis=0)
   target = np.stack([io.target_mask for io in image_obs_list], axis=0).astype(bool)
@@ -55,6 +80,7 @@ def _stack_image_obs(image_obs_list: list[ObservationImage]) -> dict[str, np.nda
     "image":              images,
     "segmentation_target": target,
     "segmentation_goal":   goal,
+    "object_uv":          mask_centroids_uv(target),
   }
 
   arm_list = [io.arm_mask for io in image_obs_list]
