@@ -182,7 +182,12 @@ real:
     port:                          null
     calibration_id:                null
     disable_torque_on_disconnect:  true
-    max_relative_target:           5.0    # degrees per command, safety cap
+    # Per-step delta cap. `null` matches upstream `lerobot-teleoperate`
+    # — at 60 Hz the natural leader→follower sample delta is small
+    # enough that the clamp only adds catch-up lag without adding
+    # safety. For autonomous policies override from the CLI to a low
+    # number (e.g. 5.0) as a kill-switch against a runaway action.
+    max_relative_target:           null
     use_degrees:                   true
 
   # Policy used to control the arm. ``type`` selects the implementation;
@@ -207,8 +212,11 @@ real:
       num_iterations: 4
       discount:       1.0    # geometric reward discount over the plan horizon
 
-  # Control loop pacing.
-  control_dt:        0.1    # seconds between policy steps
+  # Control loop pacing. 60 Hz matches upstream `lerobot-teleoperate`
+  # and is what the leader→follower teleop needs to feel direct;
+  # autonomous (dreamer / cem) policies can override to a slower
+  # cadence from the CLI if their inference dominates.
+  control_dt:        0.0167  # seconds between policy steps (≈60 Hz)
   # Keys captured globally; "s" starts the policy, "q" or ESC quits.
   start_key:         "s"
 

@@ -28,6 +28,7 @@ from dataclasses import dataclass
 
 import cv2  # type: ignore[import-not-found]
 import numpy as np
+from lerobot.utils.robot_utils import precise_sleep
 
 from .arm import Arm, ArmConfig
 from .camera import Camera, CameraConfig
@@ -245,9 +246,11 @@ def run(cfg) -> None:
           break
 
         # Give the OS a sliver of time even when the camera is fast.
-        budget = max(0.0, (1.0 / max(cam_cfg.fps, 1)) - (time.monotonic() - loop_start))
-        if budget > 0:
-          time.sleep(budget)
+        # precise_sleep matches what upstream lerobot-teleoperate uses —
+        # plain time.sleep oversleeps on macOS by 5–15 ms, which jitters
+        # the control cadence visibly at 60 Hz.
+        budget = (1.0 / max(cam_cfg.fps, 1)) - (time.monotonic() - loop_start)
+        precise_sleep(budget)
 
     finally:
       if isinstance(policy, ManualPolicy):

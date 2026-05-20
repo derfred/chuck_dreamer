@@ -40,6 +40,43 @@ JOINT_NAMES = (
   "Jaw",
 )
 
+# Gripper range in the chuck_dreamer sim model (see
+# ``assets/mujoco/so101_arm.xml``, joint class ``Jaw``). The real
+# follower/leader expose the gripper motor in
+# ``MotorNormMode.RANGE_0_100`` — *not* degrees — so the body's
+# rad↔deg conversion must NOT be applied to the gripper channel.
+# Without this special-case the gripper would be scrambled by a
+# factor of (180/π) × (percent units interpreted as degrees), which
+# pegs it against its travel limits on both reads and writes.
+_GRIPPER_RAD_LO = -0.174
+_GRIPPER_RAD_HI =  1.75
+_GRIPPER_RAD_SPAN = _GRIPPER_RAD_HI - _GRIPPER_RAD_LO
+
+
+def _bus_to_rad(vec_bus: np.ndarray, *, use_degrees: bool) -> np.ndarray:
+  """Convert a 6-vector of lerobot motor units to chuck_dreamer radians.
+
+  Body joints (indices 0..4) are degrees when ``use_degrees`` is set;
+  the gripper (index 5) is always a percent in [0, 100] regardless of
+  ``use_degrees`` (the lerobot bus pins it to ``RANGE_0_100``).
+  """
+  out = vec_bus.astype(np.float32, copy=True)
+  if use_degrees:
+    out[:5] = out[:5] * (np.pi / 180.0)
+  pct = float(np.clip(vec_bus[5], 0.0, 100.0))
+  out[5] = _GRIPPER_RAD_LO + (pct / 100.0) * _GRIPPER_RAD_SPAN
+  return out
+
+
+def _rad_to_bus(vec_rad: np.ndarray, *, use_degrees: bool) -> np.ndarray:
+  """Inverse of :func:`_bus_to_rad`."""
+  out = vec_rad.astype(np.float32, copy=True)
+  if use_degrees:
+    out[:5] = out[:5] * (180.0 / np.pi)
+  pct = (float(vec_rad[5]) - _GRIPPER_RAD_LO) / _GRIPPER_RAD_SPAN * 100.0
+  out[5] = float(np.clip(pct, 0.0, 100.0))
+  return out
+
 
 @dataclass
 class ArmConfig:
@@ -116,9 +153,7 @@ class Arm:
     assert self._follower is not None, "Arm.read_joint_qpos() before connect()"
     obs = self._follower.get_observation()
     vec = np.array([obs[f"{m}.pos"] for m in _LEROBOT_MOTORS], dtype=np.float32)
-    if self.config.use_degrees:
-      vec = vec * (np.pi / 180.0)
-    return vec
+    return _bus_to_rad(vec, use_degrees=self.config.use_degrees)
 
   def send_joint_qpos(self, qpos: np.ndarray) -> np.ndarray:
     """Command the follower to ``qpos`` (radians, simulator order).
@@ -135,15 +170,11 @@ class Arm:
       self._virtual_qpos = q.copy()
       return q
     assert self._follower is not None, "Arm.send_joint_qpos() before connect()"
-    out = q
-    if self.config.use_degrees:
-      out = q * (180.0 / np.pi)
+    out = _rad_to_bus(q, use_degrees=self.config.use_degrees)
     action = {f"{m}.pos": float(v) for m, v in zip(_LEROBOT_MOTORS, out)}
     sent = self._follower.send_action(action)
     sent_vec = np.array([sent[f"{m}.pos"] for m in _LEROBOT_MOTORS], dtype=np.float32)
-    if self.config.use_degrees:
-      sent_vec = sent_vec * (np.pi / 180.0)
-    return sent_vec
+    return _bus_to_rad(sent_vec, use_degrees=self.config.use_degrees)
 
 
 @dataclass
@@ -206,6 +237,4 @@ class LeaderArm:
     assert self._leader is not None, "LeaderArm.read_joint_qpos() before connect()"
     action = self._leader.get_action()
     vec = np.array([action[f"{m}.pos"] for m in _LEROBOT_MOTORS], dtype=np.float32)
-    if self.config.use_degrees:
-      vec = vec * (np.pi / 180.0)
-    return vec
+    return _bus_to_rad(vec, use_degrees=self.config.use_degrees)
