@@ -471,5 +471,14 @@ def run_cmd(ctx, policy_type, checkpoint_path, camera_source, arm_port, override
   run_loop(cfg)
 
 
+from chuck_dreamer.real.object_localization.cli import (
+  annotate_mat_cmd,
+  calibrate_intrinsics_cmd,
+)
+
+cli.add_command(calibrate_intrinsics_cmd)
+cli.add_command(annotate_mat_cmd)
+
+
 if __name__ == "__main__":
     cli()

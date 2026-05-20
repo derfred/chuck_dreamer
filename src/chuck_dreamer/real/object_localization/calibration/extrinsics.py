@@ -1,0 +1,223 @@
+"""Per-dataset extrinsics solve from a single mat annotation.
+
+Inputs:
+  - intrinsics (K, dist) already cached for the dataset.
+  - one ``MatDetection`` (4 line endpoints + N circle samples in pixels).
+
+Output: world->camera rotation/translation in millimeters, plus a
+reprojection-RMS quality number that's surfaced to the user before
+anything is persisted.
+
+The non-trivial step is **phase alignment**: ``cv2.fitEllipse``'s
+parametrization starts from the ellipse major axis with an arbitrary
+sign, but our world-side samples start from world theta=0. We sweep
+both phase offset and traversal direction with a 4-point seed PnP,
+pick the lowest-error pair, then re-solve with all 4+N correspondences.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from ..geometry import circle_samples_world, line_world_points
+from ..runtime import ObjectLocalizationConfig
+from ..types import Extrinsics, MatDetection
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ExtrinsicsResult:
+  extrinsics: Extrinsics
+  phase_offset: int
+  reverse: bool
+  seed_rms_px: float
+  refined_rms_px: float
+  world_points: np.ndarray   # (4 + N, 3)
+  image_points: np.ndarray   # (4 + N, 2)
+
+
+def solve_extrinsics(
+  detection: MatDetection,
+  K: np.ndarray, dist: np.ndarray,
+  ol_cfg: ObjectLocalizationConfig,
+) -> ExtrinsicsResult:
+  """Run the full extrinsics solve. Raises ``RuntimeError`` on failure."""
+  import cv2
+
+  line_img = np.stack([
+    detection.line1_near,
+    detection.line1_far,
+    detection.line2_near,
+    detection.line2_far,
+  ], axis=0).astype(np.float64)
+  line_world = line_world_points(ol_cfg.mat_line_length_mm,
+                                 ol_cfg.mat_line_separation_mm)
+  # Re-order line_world to match line_img: (line1_near, line1_far, line2_near, line2_far)
+  # line_world_points returns them already in this order.
+
+  seed_rvec, seed_tvec, seed_rms = _seed_pnp(line_world, line_img, K, dist)
+
+  circle_uv = np.asarray(detection.circle_samples_uv, dtype=np.float64)
+  N = circle_uv.shape[0]
+
+  best = None
+  for reverse in (False, True):
+    for k in range(N):
+      world = circle_samples_world(ol_cfg.mat_circle_radius_mm, N,
+                                   phase_offset=k, reverse=reverse)
+      proj, _ = cv2.projectPoints(world, seed_rvec, seed_tvec, K, dist)
+      diff = proj.reshape(-1, 2) - circle_uv
+      err = float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
+      if best is None or err < best[0]:
+        best = (err, k, reverse)
+  assert best is not None
+  _, k_best, reverse_best = best
+  circle_world = circle_samples_world(ol_cfg.mat_circle_radius_mm, N,
+                                      phase_offset=k_best, reverse=reverse_best)
+
+  world_pts = np.concatenate([line_world, circle_world], axis=0)
+  img_pts   = np.concatenate([line_img, circle_uv], axis=0)
+
+  ok, rvec, tvec = cv2.solvePnP(
+    world_pts.astype(np.float64), img_pts.astype(np.float64),
+    K.astype(np.float64), dist.astype(np.float64),
+    flags=cv2.SOLVEPNP_SQPNP,
+  )
+  if not ok:
+    raise RuntimeError("cv2.solvePnP (SQPNP) failed on the 4+N mat correspondences.")
+
+  refine_criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-8)
+  rvec, tvec = cv2.solvePnPRefineLM(
+    world_pts.astype(np.float64), img_pts.astype(np.float64),
+    K.astype(np.float64), dist.astype(np.float64),
+    rvec, tvec, criteria=refine_criteria,
+  )
+  R, _ = cv2.Rodrigues(rvec)
+
+  proj, _ = cv2.projectPoints(world_pts, rvec, tvec, K, dist)
+  diff = proj.reshape(-1, 2) - img_pts
+  refined_rms = float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
+
+  extrinsics = Extrinsics(
+    R = R.astype(np.float64),
+    t = tvec.astype(np.float64).reshape(3, 1),
+    rms_px = refined_rms,
+  )
+  return ExtrinsicsResult(
+    extrinsics    = extrinsics,
+    phase_offset  = k_best,
+    reverse       = reverse_best,
+    seed_rms_px   = seed_rms,
+    refined_rms_px = refined_rms,
+    world_points  = world_pts,
+    image_points  = img_pts,
+  )
+
+
+def _seed_pnp(world: np.ndarray, image: np.ndarray,
+              K: np.ndarray, dist: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+  """4-point coplanar PnP via IPPE. Returns ``(rvec, tvec, rms_px)``."""
+  import cv2
+  ok, rvecs, tvecs, errs = cv2.solvePnPGeneric(
+    world.astype(np.float64), image.astype(np.float64),
+    K.astype(np.float64), dist.astype(np.float64),
+    flags=cv2.SOLVEPNP_IPPE,
+  )
+  if not ok or len(rvecs) == 0:
+    raise RuntimeError("seed PnP (IPPE) failed on 4 line endpoints.")
+  best = int(np.argmin([float(e) for e in errs]))
+  rvec, tvec = rvecs[best], tvecs[best]
+  proj, _ = cv2.projectPoints(world, rvec, tvec, K, dist)
+  diff = proj.reshape(-1, 2) - image
+  rms = float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
+  return rvec, tvec, rms
+
+
+def render_extrinsics_overlay(
+  frame_rgb: np.ndarray, extrinsics: Extrinsics, K: np.ndarray, dist: np.ndarray,
+  ol_cfg: ObjectLocalizationConfig, detection: MatDetection | None,
+  result: ExtrinsicsResult | None,
+) -> np.ndarray:
+  """Reprojected mat geometry on top of ``frame_rgb`` (BGR canvas out)."""
+  import cv2
+
+  rvec, _ = cv2.Rodrigues(extrinsics.R)
+  tvec = extrinsics.t.reshape(3)
+  canvas = cv2.cvtColor(frame_rgb.copy(), cv2.COLOR_RGB2BGR)
+
+  line_world = line_world_points(ol_cfg.mat_line_length_mm,
+                                 ol_cfg.mat_line_separation_mm)
+  line_proj, _ = cv2.projectPoints(line_world, rvec, tvec, K, dist)
+  line_proj = line_proj.reshape(-1, 2)
+  cv2.line(canvas, _ipt(line_proj[0]), _ipt(line_proj[1]), (0, 255, 0), 2)
+  cv2.line(canvas, _ipt(line_proj[2]), _ipt(line_proj[3]), (0, 0, 255), 2)
+
+  circle_world = circle_samples_world(ol_cfg.mat_circle_radius_mm, 256)
+  circle_proj, _ = cv2.projectPoints(circle_world, rvec, tvec, K, dist)
+  circle_proj = circle_proj.reshape(-1, 2)
+  pts = np.array([_ipt(p) for p in circle_proj], dtype=np.int32)
+  cv2.polylines(canvas, [pts], isClosed=True, color=(0, 165, 255), thickness=2)
+
+  if detection is not None:
+    # Fitted ellipse from the annotation, drawn faintly.
+    ax_w, ax_h = detection.circle_axes
+    cv2.ellipse(canvas,
+                (_ipt(detection.circle_center)),
+                (int(round(ax_w / 2)), int(round(ax_h / 2))),
+                float(detection.circle_angle), 0, 360,
+                (180, 180, 0), 1, cv2.LINE_AA)
+    for name, pt in (("L1n", detection.line1_near), ("L1f", detection.line1_far),
+                     ("L2n", detection.line2_near), ("L2f", detection.line2_far)):
+      cv2.drawMarker(canvas, _ipt(pt), (255, 255, 255), cv2.MARKER_CROSS, 10, 2)
+      cv2.putText(canvas, name, (_ipt(pt)[0] + 6, _ipt(pt)[1] - 6),
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+  if result is not None:
+    for i, (img_pt, world_pt) in enumerate(zip(result.image_points, result.world_points)):
+      proj_pt, _ = cv2.projectPoints(world_pt.reshape(1, 3), rvec, tvec, K, dist)
+      proj_pt = proj_pt.reshape(2)
+      err = float(np.linalg.norm(proj_pt - img_pt))
+      if i < 4 or i % 8 == 0:
+        cv2.putText(canvas, f"{err:.1f}", (_ipt(img_pt)[0] + 4, _ipt(img_pt)[1] + 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1, cv2.LINE_AA)
+
+  return canvas
+
+
+def render_world_axes(
+  frame_rgb: np.ndarray, extrinsics: Extrinsics, K: np.ndarray, dist: np.ndarray,
+  axis_mm: float = 100.0,
+) -> np.ndarray:
+  """Draw a world-frame triad at the origin."""
+  import cv2
+  rvec, _ = cv2.Rodrigues(extrinsics.R)
+  tvec = extrinsics.t.reshape(3)
+  canvas = cv2.cvtColor(frame_rgb.copy(), cv2.COLOR_RGB2BGR)
+  pts3d = np.array([
+    [0, 0, 0],
+    [axis_mm, 0, 0],
+    [0, axis_mm, 0],
+    [0, 0, axis_mm],
+  ], dtype=np.float64)
+  proj, _ = cv2.projectPoints(pts3d, rvec, tvec, K, dist)
+  proj = proj.reshape(-1, 2)
+  origin = _ipt(proj[0])
+  cv2.arrowedLine(canvas, origin, _ipt(proj[1]), (0, 0, 255), 2, tipLength=0.2)
+  cv2.arrowedLine(canvas, origin, _ipt(proj[2]), (0, 255, 0), 2, tipLength=0.2)
+  cv2.arrowedLine(canvas, origin, _ipt(proj[3]), (255, 0, 0), 2, tipLength=0.2)
+  cv2.putText(canvas, "+X", _ipt(proj[1] + np.array([6, -6])),
+              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+  cv2.putText(canvas, "+Y", _ipt(proj[2] + np.array([6, -6])),
+              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+  cv2.putText(canvas, "+Z", _ipt(proj[3] + np.array([6, -6])),
+              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1, cv2.LINE_AA)
+  return canvas
+
+
+def _ipt(p: np.ndarray) -> tuple[int, int]:
+  return int(round(float(p[0]))), int(round(float(p[1])))
