@@ -235,6 +235,16 @@ def render_extrinsics_overlay(
   pts = np.array([_ipt(p) for p in circle_proj], dtype=np.int32)
   cv2.polylines(canvas, [pts], isClosed=True, color=(0, 165, 255), thickness=2)
 
+  # Mat border (configured world bbox) — green polyline. Each edge is
+  # sampled at multiple points so wide-angle lens distortion shows as
+  # the curved projection it actually is, rather than straight chords
+  # between the 4 corner points.
+  border_world = _mat_border_samples_world(ol_cfg, n_per_edge=32)
+  border_proj, _ = cv2.projectPoints(border_world, rvec, tvec, K, dist)
+  border_proj = border_proj.reshape(-1, 2)
+  border_pts = np.array([_ipt(p) for p in border_proj], dtype=np.int32)
+  cv2.polylines(canvas, [border_pts], isClosed=True, color=(80, 255, 80), thickness=2)
+
   if detection is not None:
     # Fitted ellipse from the annotation, drawn faintly.
     ax_w, ax_h = detection.circle_axes
@@ -293,3 +303,29 @@ def render_world_axes(
 
 def _ipt(p: np.ndarray) -> tuple[int, int]:
   return int(round(float(p[0]))), int(round(float(p[1])))
+
+
+def _mat_border_samples_world(ol_cfg: ObjectLocalizationConfig,
+                               n_per_edge: int = 32) -> np.ndarray:
+  """Sample the configured mat bbox as a closed polyline at z=0.
+
+  Returns ``(4 * n_per_edge, 3)`` world points. Sampling along each
+  edge means wide-angle lens distortion shows up as a curved
+  projection instead of straight chords between the 4 corners.
+  """
+  x0 = ol_cfg.mat_extent_xmin_mm
+  x1 = ol_cfg.mat_extent_xmax_mm
+  y0 = ol_cfg.mat_extent_ymin_mm
+  y1 = ol_cfg.mat_extent_ymax_mm
+  ts = np.linspace(0.0, 1.0, n_per_edge, endpoint=False)
+  pts: list[np.ndarray] = []
+  # (x0, y0) -> (x1, y0)
+  pts.append(np.stack([x0 + ts * (x1 - x0), np.full_like(ts, y0)], axis=1))
+  # (x1, y0) -> (x1, y1)
+  pts.append(np.stack([np.full_like(ts, x1), y0 + ts * (y1 - y0)], axis=1))
+  # (x1, y1) -> (x0, y1)
+  pts.append(np.stack([x1 + ts * (x0 - x1), np.full_like(ts, y1)], axis=1))
+  # (x0, y1) -> (x0, y0)
+  pts.append(np.stack([np.full_like(ts, x0), y1 + ts * (y0 - y1)], axis=1))
+  arr = np.concatenate(pts, axis=0)
+  return np.concatenate([arr, np.zeros((arr.shape[0], 1))], axis=1).astype(np.float64)
