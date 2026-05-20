@@ -56,19 +56,74 @@ _RestingFaceClass = Literal["square", "triangle"]
 _PARAM_SCALE_6DOF = np.array([1.0, 1.0, 1.0, 0.01, 0.01, 0.01])
 
 # Finite-difference step for the trf method. Multiplied by `x_scale`
-# under the hood, so 0.5 here = 0.5 mm for positional DOFs and
-# 0.005 rad (~0.3°) for angular DOFs — enough to move silhouette
-# pixels by at least one pixel in most viewing geometries.
-_DIFF_STEP_6DOF   = 0.5
+# under the hood, so 0.05 here = 0.05 mm for positional DOFs and
+# 0.0005 rad (~0.03°) for angular DOFs. Smaller than the silhouette
+# pixel resolution but combined with the trust-region method it
+# produces stable gradient estimates without overshooting into a
+# different local minimum.
+_DIFF_STEP_6DOF   = 0.05
 
-# Soft bounds so the optimizer can't wander into a different rest
-# class. ±20 mm in z, ±15° in tilt, full freedom in yaw + xy. (yaw
-# bounds are wider than 2π so they're effectively unbounded but TRF
-# still needs finite values.)
-_PARAM_BOUNDS_6DOF = (
-  np.array([-np.inf, -np.inf, -20.0, -0.26, -0.26, -10.0]),
-  np.array([ np.inf,  np.inf,  20.0,  0.26,  0.26,  10.0]),
-)
+# Per-call xy bounds: ±50 mm from the back-projected seed (centroid
+# of the segmenter's mask). Keeps the optimizer from sliding the
+# object across the image into a contour belonging to the arm or
+# some other foreground blob. Position bounds for dz / dtilt are
+# fixed because they're already in object-local units.
+_XY_WANDER_MM   = 50.0
+_DZ_BOUND_MM    = 20.0
+_TILT_BOUND_RAD = 0.26    # ±15°
+_YAW_BOUND_RAD  = 10.0    # >2π; finite is required by trf
+
+def _build_bounds_6dof(xy_seed: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+  """Return TRF-compatible (lower, upper) bounds anchored to the seed.
+
+  xy is constrained to a ``±_XY_WANDER_MM`` box around the seed so
+  the optimizer can't escape into an unrelated local minimum
+  elsewhere in the image; the other DOFs use fixed bounds.
+  """
+  lo = np.array([xy_seed[0] - _XY_WANDER_MM, xy_seed[1] - _XY_WANDER_MM,
+                 -_DZ_BOUND_MM, -_TILT_BOUND_RAD, -_TILT_BOUND_RAD, -_YAW_BOUND_RAD])
+  hi = np.array([xy_seed[0] + _XY_WANDER_MM, xy_seed[1] + _XY_WANDER_MM,
+                  _DZ_BOUND_MM,  _TILT_BOUND_RAD,  _TILT_BOUND_RAD,  _YAW_BOUND_RAD])
+  return lo, hi
+
+# Minimum number of points to resample the rendered contour / edges
+# to. The residual vector must be constant-length across optimizer
+# iterations, but the raw render returns variable-length output as
+# the pose changes. Resampling to a fixed count >= max(observed,
+# this) keeps the gradient signal sharp without losing detail.
+_RESAMPLE_MIN = 128
+
+# Edge-residual padding. The rhombicuboctahedron has at most ~30
+# visible edges from any one camera angle, and we sample each at a
+# fixed count. Total residual length is _EDGE_MAX_VISIBLE *
+# _EDGE_SAMPLES_PER_EDGE; missing edges get sentinel-padded so the
+# vector stays constant across optimizer iterations.
+_EDGE_MAX_VISIBLE      = 40
+_EDGE_SAMPLES_PER_EDGE = 16
+
+
+def _resample_contour(contour: np.ndarray, n: int) -> np.ndarray:
+  """Resample a polyline contour to exactly ``n`` evenly-spaced points
+  by arc length.
+
+  Returns ``(n, 2) float64`` (u, v) pixel coordinates. Handles the
+  closed-contour case implicitly because cv2.findContours returns
+  closed polylines and we don't append the wrap-around segment
+  (visually negligible at typical contour lengths > 100).
+  """
+  pts = np.asarray(contour, dtype=np.float64).reshape(-1, 2)
+  if len(pts) <= 1:
+    return np.repeat(pts[:1] if len(pts) else np.zeros((1, 2)), n, axis=0)
+  segs = np.diff(pts, axis=0)
+  seg_len = np.sqrt(np.einsum("ij,ij->i", segs, segs))
+  cumlen = np.concatenate([[0.0], np.cumsum(seg_len)])
+  total = float(cumlen[-1])
+  if total <= 0.0:
+    return np.repeat(pts[:1], n, axis=0)
+  targets = np.linspace(0.0, total, n, endpoint=False)
+  u_resampled = np.interp(targets, cumlen, pts[:, 0])
+  v_resampled = np.interp(targets, cumlen, pts[:, 1])
+  return np.stack([u_resampled, v_resampled], axis=1)
 
 
 @dataclass
@@ -132,7 +187,21 @@ class ObjectPoseEstimator:
       image_size  = calibration.intrinsics.image_size,
     )
 
-    self._rest_classes = _build_rest_classes(self.mesh)
+    # Detect whether the extrinsics put the camera "above" or "below"
+    # the mat plane. For datasets where the mat is mounted such that
+    # the camera ends up on the -Z side of the world frame, we flip
+    # the resting-face hypotheses so the mesh sits on the correct
+    # (camera-visible) side of the mat. Either case is geometrically
+    # valid; we just need the mesh and the camera to agree on which
+    # side of z=0 the object lives on.
+    cam_pos_world = -calibration.extrinsics.R.T @ calibration.extrinsics.t.reshape(3)
+    self._z_sign = -1.0 if cam_pos_world[2] < 0 else +1.0
+    if self._z_sign < 0:
+      logger.info("ObjectPoseEstimator: camera is on -Z side of mat "
+                  "(cam_z_world=%.1fmm); flipping rest-face hypotheses to "
+                  "match.", float(cam_pos_world[2]))
+
+    self._rest_classes = _build_rest_classes(self.mesh, z_sign=self._z_sign)
     self._episode = _EpisodeContext()
 
   # -------------------------------------------------------------------------
@@ -266,24 +335,36 @@ class ObjectPoseEstimator:
       return xy0, dz0, rpy0, None
     obs_dt = _distance_transform(mask, self.camera.image_size)
 
+    # least_squares requires a constant-length residual vector. The
+    # rendered silhouette contour grows/shrinks with mesh pose, so we
+    # resample it to a fixed number of points before computing the
+    # distance transforms.
+    n_ren_samples = max(_RESAMPLE_MIN, len(obs_contour))
+    obs_idx_v = obs_contour[:, 1].astype(int)
+    obs_idx_u = obs_contour[:, 0].astype(int)
+    sentinel  = np.full(len(obs_contour) + n_ren_samples, 1e3, dtype=np.float64)
+
     def residual(params: np.ndarray) -> np.ndarray:
       x, y, dz, droll, dpitch, dyaw = params
       ren_mask, ren_contour = self._render_silhouette_6dof(
         rest, np.array([x, y]), dz, (droll, dpitch, dyaw))
       if ren_contour is None or len(ren_contour) < 5:
-        return np.full(64, 1e3, dtype=np.float64)
+        return sentinel.copy()
       ren_dt = _distance_transform_from_contour(ren_contour, self.camera.image_size)
-      d_obs_to_ren = ren_dt[obs_contour[:, 1].astype(int), obs_contour[:, 0].astype(int)]
-      d_ren_to_obs = obs_dt[ren_contour[:, 1].astype(int), ren_contour[:, 0].astype(int)]
+      ren_resampled = _resample_contour(ren_contour, n_ren_samples)
+      d_obs_to_ren = ren_dt[obs_idx_v, obs_idx_u]
+      d_ren_to_obs = obs_dt[ren_resampled[:, 1].astype(int),
+                             ren_resampled[:, 0].astype(int)]
       return np.concatenate([d_obs_to_ren, d_ren_to_obs]).astype(np.float64)
 
     x0 = np.array([xy0[0], xy0[1], dz0, rpy0[0], rpy0[1], rpy0[2]],
                   dtype=np.float64)
+    bounds = _build_bounds_6dof(xy0)
     try:
       sol = least_squares(residual, x0, method="trf",
                           x_scale=_PARAM_SCALE_6DOF,
                           diff_step=_DIFF_STEP_6DOF,
-                          bounds=_PARAM_BOUNDS_6DOF,
+                          bounds=bounds,
                           max_nfev=self.chamfer_max_iter * 2,
                           xtol=1e-6, ftol=1e-6)
     except Exception as e:
@@ -313,34 +394,49 @@ class ObjectPoseEstimator:
 
     W, H = self.camera.image_size
 
+    # Constant-length residual: every iteration must report
+    # _EDGE_TOTAL_SAMPLES distances, regardless of how many visible
+    # edges the current mesh pose has. Each edge contributes
+    # `n_per_edge` samples; we pad with sentinels if the pose has
+    # fewer edges than at first eval. The cap on edge count limits
+    # the worst case so the optimizer's Jacobian stays small.
+    n_edge_cap   = _EDGE_MAX_VISIBLE
+    n_per_edge   = _EDGE_SAMPLES_PER_EDGE
+    n_total      = n_edge_cap * n_per_edge
+    sentinel_edges = np.full(n_total, 1e3, dtype=np.float64)
+    ts_template  = np.linspace(0.0, 1.0, n_per_edge)
+
     def residual(params: np.ndarray) -> np.ndarray:
       x, y, dz, droll, dpitch, dyaw = params
       edges_proj = self._render_edges_6dof(
         rest, np.array([x, y]), dz, (droll, dpitch, dyaw))
       if not edges_proj:
-        return np.full(64, 1e3, dtype=np.float64)
-      sample_pts: list[np.ndarray] = []
-      for p0, p1 in edges_proj:
-        n = max(2, int(np.linalg.norm(p1 - p0) / 4.0))
-        ts = np.linspace(0.0, 1.0, n)
-        seg = p0[None, :] * (1 - ts[:, None]) + p1[None, :] * ts[:, None]
-        sample_pts.append(seg)
-      pts = np.concatenate(sample_pts, axis=0)
-      u = np.clip(np.round(pts[:, 0]).astype(int), 0, W - 1)
-      v = np.clip(np.round(pts[:, 1]).astype(int), 0, H - 1)
-      return edge_dt[v, u].astype(np.float64)
+        return sentinel_edges.copy()
+      out = np.full(n_total, 1e3, dtype=np.float64)
+      n_edges = min(n_edge_cap, len(edges_proj))
+      for i in range(n_edges):
+        p0, p1 = edges_proj[i]
+        seg = p0[None, :] * (1 - ts_template[:, None]) + p1[None, :] * ts_template[:, None]
+        u = np.clip(np.round(seg[:, 0]).astype(int), 0, W - 1)
+        v = np.clip(np.round(seg[:, 1]).astype(int), 0, H - 1)
+        out[i * n_per_edge:(i + 1) * n_per_edge] = edge_dt[v, u]
+      return out
 
     x0 = np.array([xy0[0], xy0[1], dz0, rpy0[0], rpy0[1], rpy0[2]],
                   dtype=np.float64)
+    bounds = _build_bounds_6dof(xy0)
     try:
       sol = least_squares(residual, x0, method="trf",
                           x_scale=_PARAM_SCALE_6DOF,
                           diff_step=_DIFF_STEP_6DOF,
-                          bounds=_PARAM_BOUNDS_6DOF,
+                          bounds=bounds,
                           max_nfev=self.edges_max_iter * 2,
                           xtol=1e-6, ftol=1e-6)
-    except Exception:
+    except Exception as e:
+      logger.warning("edges 6dof refinement failed: %s", e)
       return xy0, dz0, rpy0, None
+    logger.debug("edges 6dof: nfev=%d status=%d cost=%.3f x=%s",
+                  sol.nfev, sol.status, float(sol.cost), sol.x)
     res_norm = float(np.sqrt(np.mean(sol.fun ** 2))) if sol.fun.size else None
     return (np.asarray(sol.x[:2]), float(sol.x[2]),
             (float(sol.x[3]), float(sol.x[4]), float(sol.x[5])),
@@ -349,6 +445,12 @@ class ObjectPoseEstimator:
   def _refine_silhouette(self, mask: np.ndarray, rest: _RestHypothesis,
                           xy0: np.ndarray, yaw0: float
                           ) -> tuple[np.ndarray, float, float | None]:
+    """3-DOF silhouette refinement used by the rest-class search.
+
+    Constant-length residual (same trick as ``_refine_silhouette_6dof``)
+    so the optimizer doesn't crash when the rendered contour length
+    changes across iterations.
+    """
     from scipy.optimize import least_squares
 
     obs_contour = _mask_contour(mask)
@@ -356,14 +458,21 @@ class ObjectPoseEstimator:
       return xy0, yaw0, None
     obs_dt = _distance_transform(mask, self.camera.image_size)
 
+    n_ren_samples = max(_RESAMPLE_MIN, len(obs_contour))
+    obs_idx_v = obs_contour[:, 1].astype(int)
+    obs_idx_u = obs_contour[:, 0].astype(int)
+    sentinel  = np.full(len(obs_contour) + n_ren_samples, 1e3, dtype=np.float64)
+
     def residual(params: np.ndarray) -> np.ndarray:
       x, y, yaw = params
       ren_mask, ren_contour = self._render_silhouette(rest, np.array([x, y]), yaw)
       if ren_contour is None or len(ren_contour) < 5:
-        return np.full(64, 1e3, dtype=np.float64)
+        return sentinel.copy()
       ren_dt = _distance_transform_from_contour(ren_contour, self.camera.image_size)
-      d_obs_to_ren = ren_dt[obs_contour[:, 1].astype(int), obs_contour[:, 0].astype(int)]
-      d_ren_to_obs = obs_dt[ren_contour[:, 1].astype(int), ren_contour[:, 0].astype(int)]
+      ren_resampled = _resample_contour(ren_contour, n_ren_samples)
+      d_obs_to_ren = ren_dt[obs_idx_v, obs_idx_u]
+      d_ren_to_obs = obs_dt[ren_resampled[:, 1].astype(int),
+                             ren_resampled[:, 0].astype(int)]
       return np.concatenate([d_obs_to_ren, d_ren_to_obs]).astype(np.float64)
 
     x0 = np.array([xy0[0], xy0[1], yaw0], dtype=np.float64)
@@ -378,6 +487,11 @@ class ObjectPoseEstimator:
   def _refine_edges(self, image: np.ndarray, mask: np.ndarray, rest: _RestHypothesis,
                      xy0: np.ndarray, yaw0: float
                      ) -> tuple[np.ndarray, float, float | None]:
+    """3-DOF edge refinement used by the rest-class search.
+
+    Constant-length residual (same fixed-edge-count trick as
+    ``_refine_edges_6dof``).
+    """
     import cv2
     from scipy.optimize import least_squares
 
@@ -387,21 +501,26 @@ class ObjectPoseEstimator:
 
     W, H = self.camera.image_size
 
+    n_edge_cap = _EDGE_MAX_VISIBLE
+    n_per_edge = _EDGE_SAMPLES_PER_EDGE
+    n_total    = n_edge_cap * n_per_edge
+    sentinel_edges = np.full(n_total, 1e3, dtype=np.float64)
+    ts_template = np.linspace(0.0, 1.0, n_per_edge)
+
     def residual(params: np.ndarray) -> np.ndarray:
       x, y, yaw = params
       edges_proj = self._render_edges(rest, np.array([x, y]), yaw)
       if not edges_proj:
-        return np.full(64, 1e3, dtype=np.float64)
-      sample_pts: list[np.ndarray] = []
-      for p0, p1 in edges_proj:
-        n = max(2, int(np.linalg.norm(p1 - p0) / 4.0))
-        ts = np.linspace(0.0, 1.0, n)
-        seg = p0[None, :] * (1 - ts[:, None]) + p1[None, :] * ts[:, None]
-        sample_pts.append(seg)
-      pts = np.concatenate(sample_pts, axis=0)
-      u = np.clip(np.round(pts[:, 0]).astype(int), 0, W - 1)
-      v = np.clip(np.round(pts[:, 1]).astype(int), 0, H - 1)
-      return edge_dt[v, u].astype(np.float64)
+        return sentinel_edges.copy()
+      out = np.full(n_total, 1e3, dtype=np.float64)
+      n_edges = min(n_edge_cap, len(edges_proj))
+      for i in range(n_edges):
+        p0, p1 = edges_proj[i]
+        seg = p0[None, :] * (1 - ts_template[:, None]) + p1[None, :] * ts_template[:, None]
+        u = np.clip(np.round(seg[:, 0]).astype(int), 0, W - 1)
+        v = np.clip(np.round(seg[:, 1]).astype(int), 0, H - 1)
+        out[i * n_per_edge:(i + 1) * n_per_edge] = edge_dt[v, u]
+      return out
 
     x0 = np.array([xy0[0], xy0[1], yaw0], dtype=np.float64)
     try:
@@ -458,28 +577,36 @@ class ObjectPoseEstimator:
 # ---------------------------------------------------------------------------
 
 
-def _build_rest_classes(mesh: Mesh) -> list[_RestHypothesis]:
+def _build_rest_classes(mesh: Mesh, z_sign: float = +1.0
+                         ) -> list[_RestHypothesis]:
   """Enumerate every distinct face-orientation as a rest hypothesis.
 
-  The previous implementation picked a single representative per
-  ``cls`` (square / triangle), which is wrong for the
-  rhombicuboctahedron: there are 18 square faces split into two
-  symmetry classes (6 axis-aligned squares with normals along
-  ±X/±Y/±Z, and 12 diagonal squares whose normals point along
-  face-diagonals like (±1, ±1, 0)/√2). The two classes have
-  different face-to-centroid distances and very different rendered
-  silhouettes, so picking only one means the optimizer can never
-  recover the other. Same kind of trap exists for any non-uniform
-  polyhedron.
+  ``z_sign`` controls which world-frame half-space the mesh sits in.
+  +1 = the usual convention ("mat at z=0, object above"); -1 = the
+  mirrored convention used when PnP recovered a camera-below-mat
+  extrinsics (the world frame's +Z is flipped relative to the
+  camera's view, so the object needs to be on -Z to match the
+  observed silhouette). For each rest hypothesis we rotate the
+  face normal to ``(0, 0, -z_sign)`` so the face faces away from
+  the camera, and we translate by ``z_mm * z_sign`` so the object
+  sits on the visible side of the mat.
 
-  This version returns one hypothesis per coplanar face group. The
-  outer pose search iterates them all; the ``cls`` label is kept for
-  the public ObjectPose API but no longer collapses the search space.
+  The rhombicuboctahedron has 18 square faces split into two
+  symmetry classes (6 axis-aligned with normals along ±X/±Y/±Z,
+  and 12 diagonal squares whose normals point along face-diagonals
+  like (±1, ±1, 0)/√2). Each class has a distinct rendered
+  silhouette, so all candidates are needed for the search.
   """
   centers = (mesh.vertices_mm[mesh.triangles[:, 0]]
              + mesh.vertices_mm[mesh.triangles[:, 1]]
              + mesh.vertices_mm[mesh.triangles[:, 2]]) / 3.0
   centroid = mesh.vertices_mm.mean(axis=0)
+
+  # In the standard +Z convention the resting face's outward normal
+  # points to -Z (face down on the mat). In the flipped convention
+  # the face's outward normal points to +Z (face "up" toward the
+  # mat plane from below).
+  target_normal = np.array([0.0, 0.0, -float(z_sign)])
 
   groups = _group_coplanar_faces(mesh.face_normals, centers)
   hypotheses: list[_RestHypothesis] = []
@@ -487,8 +614,8 @@ def _build_rest_classes(mesh: Mesh) -> list[_RestHypothesis]:
     n = mesh.face_normals[g].mean(axis=0)
     n = n / (np.linalg.norm(n) + 1e-9)
     face_center = centers[g].mean(axis=0)
-    z_mm = abs(float(np.dot(face_center - centroid, n)))
-    R_tilt = _rotation_align(n, np.array([0.0, 0.0, -1.0]))
+    z_mm = abs(float(np.dot(face_center - centroid, n))) * float(z_sign)
+    R_tilt = _rotation_align(n, target_normal)
     cls: _RestingFaceClass = "square" if len(g) >= 2 else "triangle"
     hypotheses.append(_RestHypothesis(cls=cls, z_mm=z_mm, R_tilt=R_tilt))
 

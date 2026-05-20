@@ -15,12 +15,20 @@ import numpy as np
 
 from ..runtime import active
 from ..types import MatDetection
+from ._refine import refine_line_endpoints, subpixel_snap_clicks
 
 _CV2_WINDOW = "calibration"
 _BANNER_H   = 36
 _BUTTONS_H  = 44
 _MAX_W      = 1280
 _MAX_H      = 760
+
+# Click gating: 4 line endpoints + N circle samples >= _MIN_CIRCLE_CLICKS.
+# More circle clicks make the ellipse fit better (each individual click can
+# be rough; fitEllipse aggregates the noise out). 8 is the minimum that
+# gives a noticeably stable fit at typical resolutions.
+_MIN_CIRCLE_CLICKS = 8
+_MIN_TOTAL_CLICKS  = 4 + _MIN_CIRCLE_CLICKS
 
 
 def reset_popup_state() -> None:
@@ -112,7 +120,7 @@ def annotate_mat_cv2(rgb: np.ndarray) -> Optional[MatDetection]:
       return
     for b in buttons:
       if b.hit(x, y):
-        if b.label == "Finish" and len(clicks) >= 9:
+        if b.label == "Finish" and len(clicks) >= _MIN_TOTAL_CLICKS:
           accepted["value"] = True
         elif b.label == "Undo" and clicks:
           clicks.pop()
@@ -145,7 +153,7 @@ def annotate_mat_cv2(rgb: np.ndarray) -> Optional[MatDetection]:
 
     cv2.imshow(_CV2_WINDOW, canvas)
     key = cv2.waitKey(16) & 0xFF
-    if key in (13, 10) and len(clicks) >= 9:
+    if key in (13, 10) and len(clicks) >= _MIN_TOTAL_CLICKS:
       accepted["value"] = True
     elif key in (ord("u"), ord("U")) and clicks:
       clicks.pop()
@@ -157,28 +165,41 @@ def annotate_mat_cv2(rgb: np.ndarray) -> Optional[MatDetection]:
     if cancelled["value"]:
       return None
 
-  return _finalize(clicks, n_circle_samples)
+  return _finalize(clicks, n_circle_samples, rgb)
 
 
-def _finalize(clicks: list[tuple[float, float]], n_samples: int) -> Optional[MatDetection]:
+def _finalize(clicks: list[tuple[float, float]], n_samples: int,
+              rgb: np.ndarray) -> Optional[MatDetection]:
   import cv2
 
-  if len(clicks) < 9:
+  if len(clicks) < _MIN_TOTAL_CLICKS:
     return None
-  line_pts = np.asarray(clicks[:4], dtype=np.float64)
+  raw_line_pts = np.asarray(clicks[:4], dtype=np.float64)
   circle_clicks = np.asarray(clicks[4:], dtype=np.float64)
   try:
     (cx, cy), (ax_w, ax_h), angle_deg = cv2.fitEllipse(circle_clicks.astype(np.float32))
   except cv2.error:
     return None
 
+  # Refine the 4 endpoint clicks. First a cornerSubPix snap to nudge
+  # each click toward the strongest local image feature; then a
+  # line-fit pass per painted line that walks perpendicular brightness
+  # peaks to locate the line center precisely and tracks back to the
+  # tips. Falls back to the raw click for any step that fails.
+  snapped = subpixel_snap_clicks(rgb, raw_line_pts)
+  # clicks[0..3] order: (L1_far, L1_near, L2_near, L2_far) per the UI prompts.
+  l1_near_ref, l1_far_ref = refine_line_endpoints(
+    rgb, near_click=snapped[1], far_click=snapped[0])
+  l2_near_ref, l2_far_ref = refine_line_endpoints(
+    rgb, near_click=snapped[2], far_click=snapped[3])
+
   samples = _sample_ellipse((cx, cy), (ax_w, ax_h), float(angle_deg), n_samples)
 
   return MatDetection(
-    line1_near        = line_pts[1],
-    line1_far         = line_pts[0],
-    line2_near        = line_pts[2],
-    line2_far         = line_pts[3],
+    line1_near        = l1_near_ref,
+    line1_far         = l1_far_ref,
+    line2_near        = l2_near_ref,
+    line2_far         = l2_far_ref,
     circle_center     = np.array([cx, cy], dtype=np.float64),
     circle_axes       = (float(ax_w), float(ax_h)),
     circle_angle      = float(angle_deg),
@@ -233,7 +254,7 @@ def _draw_overlays(canvas: np.ndarray, clicks: list[tuple[float, float]],
     cv2.putText(canvas, "expected circle center", (mxw + 8, myw - 8),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
 
-  if n >= 9:
+  if n >= _MIN_TOTAL_CLICKS:
     try:
       circle_clicks = np.asarray(clicks[4:], dtype=np.float32)
       (cx, cy), (ax_w, ax_h), angle_deg = cv2.fitEllipse(circle_clicks)
@@ -249,16 +270,18 @@ def _draw_overlays(canvas: np.ndarray, clicks: list[tuple[float, float]],
 def _draw_banner(canvas: np.ndarray, clicks: list[tuple[float, float]]) -> None:
   import cv2
   n = len(clicks)
+  total = _MIN_TOTAL_CLICKS
   prompts = [
-    "Click 1/9: Line 1 (bottom) FAR endpoint",
-    "Click 2/9: Line 1 (bottom) NEAR endpoint",
-    "Click 3/9: Line 2 (top) NEAR endpoint",
-    "Click 4/9: Line 2 (top) FAR endpoint",
+    f"Click 1/{total}: Line 1 (bottom) FAR endpoint",
+    f"Click 2/{total}: Line 1 (bottom) NEAR endpoint",
+    f"Click 3/{total}: Line 2 (top) NEAR endpoint",
+    f"Click 4/{total}: Line 2 (top) FAR endpoint",
   ]
   if n < 4:
     msg = prompts[n]
-  elif n < 9:
-    msg = f"Click {n+1}/9: at least 5 points on the circle, then Enter"
+  elif n < total:
+    msg = (f"Click {n+1}/{total}: at least {_MIN_CIRCLE_CLICKS} points on the "
+           f"circle, then Enter (more clicks => better fit)")
   else:
     msg = f"Have {n} clicks. Enter / Finish to accept, Undo to revise, Quit to cancel."
   cv2.putText(canvas, msg, (10, 24), cv2.FONT_HERSHEY_SIMPLEX,
@@ -269,7 +292,7 @@ def _draw_buttons(canvas: np.ndarray, buttons: list[_ButtonRect], n_clicks: int)
   import cv2
   for b in buttons:
     if b.label == "Finish":
-      enabled = n_clicks >= 9
+      enabled = n_clicks >= _MIN_TOTAL_CLICKS
     elif b.label == "Undo":
       enabled = n_clicks >= 1
     else:

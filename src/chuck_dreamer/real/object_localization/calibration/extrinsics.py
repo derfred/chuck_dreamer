@@ -91,6 +91,29 @@ def solve_extrinsics(
   if not ok:
     raise RuntimeError("cv2.solvePnP (SQPNP) failed on the 4+N mat correspondences.")
 
+  # Disambiguate SQPNP: ensure it converged to the same twin as the
+  # IPPE seed (rather than flipping to the mirror image). The two twins
+  # share reprojection RMS so SQPNP can pick either; we check by
+  # comparing camera positions and, if they differ in sign, fall back
+  # to ITERATIVE seeded with the IPPE solution to lock the basin.
+  R_sq, _ = cv2.Rodrigues(rvec)
+  cam_pos_sq = -R_sq.T @ tvec.reshape(3)
+  R_seed, _  = cv2.Rodrigues(seed_rvec)
+  cam_pos_seed = -R_seed.T @ seed_tvec.reshape(3)
+  if cam_pos_sq[2] * cam_pos_seed[2] < 0:
+    logger.warning("SQPNP picked the mirror twin of the IPPE seed "
+                   "(SQPNP cam_z=%.1fmm, seed cam_z=%.1fmm); falling back "
+                   "to ITERATIVE seeded by IPPE.",
+                   float(cam_pos_sq[2]), float(cam_pos_seed[2]))
+    ok2, rvec2, tvec2 = cv2.solvePnP(
+      world_pts.astype(np.float64), img_pts.astype(np.float64),
+      K.astype(np.float64), dist.astype(np.float64),
+      rvec=seed_rvec.copy(), tvec=seed_tvec.copy(),
+      useExtrinsicGuess=True, flags=cv2.SOLVEPNP_ITERATIVE,
+    )
+    if ok2:
+      rvec, tvec = rvec2, tvec2
+
   refine_criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-8)
   rvec, tvec = cv2.solvePnPRefineLM(
     world_pts.astype(np.float64), img_pts.astype(np.float64),
@@ -98,6 +121,14 @@ def solve_extrinsics(
     rvec, tvec, criteria=refine_criteria,
   )
   R, _ = cv2.Rodrigues(rvec)
+
+  # Final sanity log: report which side of the mat the camera ended
+  # up on. Negative = the world frame's +Z is flipped relative to the
+  # camera, which is fine for downstream code that detects + handles
+  # it; positive = the +Z-up convention worked as designed.
+  cam_pos_final = -R.T @ tvec.reshape(3)
+  logger.info("extrinsics solved: camera_z_world=%+.1fmm (negative is OK; "
+              "indicates flipped +Z convention).", float(cam_pos_final[2]))
 
   proj, _ = cv2.projectPoints(world_pts, rvec, tvec, K, dist)
   diff = proj.reshape(-1, 2) - img_pts
@@ -121,7 +152,18 @@ def solve_extrinsics(
 
 def _seed_pnp(world: np.ndarray, image: np.ndarray,
               K: np.ndarray, dist: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
-  """4-point coplanar PnP via IPPE. Returns ``(rvec, tvec, rms_px)``."""
+  """4-point coplanar PnP via IPPE. Returns ``(rvec, tvec, rms_px)``.
+
+  IPPE on coplanar points returns two solutions (the "twin" or "mirror"
+  ambiguity inherent to planar-target PnP). Both solutions reproject
+  the input points equally well, so picking the one with lower
+  reprojection RMS is a numerical coin-flip — and a wrong choice
+  produces a flipped world frame where the camera sits below the
+  mat. We pick the physically valid solution (camera above mat,
+  cam_pos_world.z > 0). If both have z > 0 we fall back to the lower
+  RMS; if both have z < 0 the world-frame convention is upside down
+  and we raise.
+  """
   import cv2
   ok, rvecs, tvecs, errs = cv2.solvePnPGeneric(
     world.astype(np.float64), image.astype(np.float64),
@@ -130,8 +172,38 @@ def _seed_pnp(world: np.ndarray, image: np.ndarray,
   )
   if not ok or len(rvecs) == 0:
     raise RuntimeError("seed PnP (IPPE) failed on 4 line endpoints.")
-  best = int(np.argmin([float(e) for e in errs]))
-  rvec, tvec = rvecs[best], tvecs[best]
+
+  candidates: list[tuple[float, int, float]] = []   # (cam_z, index, rms)
+  for i, (rvec_i, tvec_i, err_i) in enumerate(zip(rvecs, tvecs, errs)):
+    R_i, _ = cv2.Rodrigues(rvec_i)
+    cam_pos = -R_i.T @ tvec_i.reshape(3)
+    candidates.append((float(cam_pos[2]), i, float(err_i)))
+
+  above = [c for c in candidates if c[0] > 0.0]
+  if above:
+    # Pick the above-mat solution with the lower reprojection error.
+    above.sort(key=lambda c: c[2])
+    chosen_idx = above[0][1]
+  else:
+    # Both IPPE solutions have the camera "below" the mat plane. That
+    # means the world-frame convention (origin at circle, +Z out of mat
+    # toward where the camera is "supposed" to be) doesn't match how
+    # this mat is physically mounted. Pick the lower-RMS solution and
+    # let downstream object-pose code detect the flipped Z and flip
+    # the resting-face hypothesis accordingly.
+    candidates.sort(key=lambda c: c[2])
+    chosen_idx = candidates[0][1]
+    logger.warning(
+      "PnP: both twin solutions have camera-below-mat (cam_z values: %s). "
+      "Picking lower-RMS twin (rms=%.2fpx, cam_z=%.1fmm). World-frame +Z "
+      "is inverted relative to the camera; object-pose code should detect "
+      "this and flip its resting-face hypothesis. If you intended +Z to "
+      "be 'up toward camera', re-annotate with NEAR/FAR clicks swapped on "
+      "one line.",
+      [round(c[0], 1) for c in candidates],
+      candidates[0][2], candidates[0][0])
+
+  rvec, tvec = rvecs[chosen_idx], tvecs[chosen_idx]
   proj, _ = cv2.projectPoints(world, rvec, tvec, K, dist)
   diff = proj.reshape(-1, 2) - image
   rms = float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
