@@ -262,38 +262,62 @@ class ObjectPoseEstimator:
   # -------------------------------------------------------------------------
   def _fit_pose(self, image: np.ndarray, mask: np.ndarray,
                 prev_pose: ObjectPose | None) -> ObjectPose | None:
+    """Fit the object pose to one frame.
+
+    Two code paths, by far the dominant cost is the silhouette/edge
+    rasterizer (CPU) inside the LM optimizer:
+
+      * **First frame of an episode (cold start).** Run the 2×N rest-
+        class search, then a 6-DOF silhouette refinement (recovers any
+        small tilt/dz the rest hypothesis can't), then a 6-DOF edge
+        refinement (sub-pixel precision on yaw). This costs many seconds
+        but only happens once per episode.
+
+      * **Warm-started frames.** The object can't move far between
+        consecutive frames, the rest class is settled, and tilt/dz
+        physically don't change. Run only a quick 3-DOF silhouette
+        refinement on (x, y, yaw), seeded from the previous frame.
+        ~5-10 LM evaluations, sub-second.
+
+    The cached resting hypothesis (``self._episode.resting``) is what
+    distinguishes the two paths. ``estimate_episode`` resets it; single-
+    frame ``estimate`` calls re-search every time.
+    """
     xy0 = _back_project_centroid(mask, self.camera)
     if xy0 is None:
       return None
 
-    if prev_pose is not None and self._episode.resting is not None:
-      rest = self._episode.resting
-      yaw  = prev_pose.yaw_rad
-      xy   = prev_pose.xy_mm.copy()
-      # Warm-start the 6-DOF state from the previous frame.
-      dz0  = float(prev_pose.xyz_mm[2] - rest.z_mm)
-      rpy0 = (0.0, 0.0, yaw)  # roll, pitch carry no episode-level memory yet
-    else:
+    cold_start = (prev_pose is None or self._episode.resting is None)
+    if cold_start:
       rest, yaw, xy = self._search_rest_class(image, mask, xy0)
       if rest is None:
         return None
       self._episode.resting = rest
+      # Cold start: full 6-DOF silhouette + 6-DOF edge refinement.
       dz0  = 0.0
       rpy0 = (0.0, 0.0, yaw)
+      xy_ref, dz_ref, rpy_ref, sil_rms = self._refine_silhouette_6dof(
+        mask, rest, xy, dz0, rpy0)
+      xy_ed, dz_ed, rpy_ed, edge_rms = self._refine_edges_6dof(
+        image, mask, rest, xy_ref, dz_ref, rpy_ref)
+      return _make_pose(
+        self.mesh, rest, xy_ed, dz_ed, rpy_ed,
+        residual_px=edge_rms if edge_rms is not None else sil_rms,
+        mask=mask, camera=self.camera,
+      )
 
-    # Coarse refinement: silhouette in 6-DOF, seeded from the rest
-    # hypothesis (or the previous frame in warm-start). The rest-class
-    # search above was already 3-DOF; this run lets the optimizer
-    # recover small tilts + height offsets the rest hypothesis can't.
-    xy_ref, dz_ref, rpy_ref, sil_rms = self._refine_silhouette_6dof(
-      mask, rest, xy, dz0, rpy0)
-    # Fine refinement: edges in 6-DOF, seeded from silhouette result.
-    xy_ed, dz_ed, rpy_ed, edge_rms = self._refine_edges_6dof(
-      image, mask, rest, xy_ref, dz_ref, rpy_ref)
-
+    # Warm-started frame: pull rest hypothesis + tilt/dz from the
+    # episode-locked cache (rest) and the previous frame's pose
+    # (xy, yaw, tilt encoded in xyz_mm[2] - rest.z_mm).
+    rest = self._episode.resting
+    yaw  = prev_pose.yaw_rad
+    xy   = prev_pose.xy_mm.copy()
+    prev_dz  = float(prev_pose.xyz_mm[2] - rest.z_mm)
+    prev_rpy = (0.0, 0.0, yaw)  # tilt isn't tracked frame-to-frame
+    xy_ref, yaw_ref, sil_rms = self._refine_silhouette(mask, rest, xy, yaw)
     return _make_pose(
-      self.mesh, rest, xy_ed, dz_ed, rpy_ed,
-      residual_px=edge_rms if edge_rms is not None else sil_rms,
+      self.mesh, rest, xy_ref, prev_dz, (0.0, 0.0, yaw_ref),
+      residual_px=sil_rms,
       mask=mask, camera=self.camera,
     )
 

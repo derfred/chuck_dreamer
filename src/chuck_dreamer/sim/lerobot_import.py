@@ -253,6 +253,8 @@ def import_dataset(
   derive_target_mask: bool = True,
   tags: tuple[str, ...] = (),
   processors: tuple[EpisodeFn, ...] = (),
+  name_prefix: str | None = None,
+  episode_filter: set[int] | None = None,
 ) -> Iterator[tuple[int, Path]]:
   """Yield ``(episode_index, output_path)`` per converted episode.
 
@@ -298,6 +300,8 @@ def import_dataset(
   resolved_video_key = _select_video_key(repo_id, video_key, resolver)
   slices             = _read_episodes_meta(
     repo_id, resolved_video_key, resolver, list_meta)
+  if episode_filter is not None:
+    slices = [s for s in slices if s.episode_index in episode_filter]
   if max_episodes is not None:
     slices = slices[:max_episodes]
   if not slices:
@@ -376,6 +380,10 @@ def import_dataset(
       metadata["tags"] = tuple(tags)
     for fn in processors:
       episode = fn(episode, metadata)
+    if name_prefix:
+      suffix = f"{name_prefix}-{sl.episode_index:05d}"
+    else:
+      suffix = f"{sl.episode_index:05d}"
     out_path = writer.write_episode(
-      episode, metadata=metadata, name_suffix=f"{sl.episode_index:05d}")
+      episode, metadata=metadata, name_suffix=suffix)
     yield sl.episode_index, out_path

@@ -27,15 +27,26 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SceneBackground:
-  """Per-pixel reference scene built from the empty episode."""
+  """Per-pixel reference scene built from the empty episode.
+
+  ``mat_mask`` (optional) is a binary image-space ROI restricting where
+  the foreground may live — typically the projection of the painted
+  mat polygon. The white wall/table behind the mat differs from the
+  reference too (lighting drift, etc.) but lies outside the mat ROI,
+  so the foreground mask correctly excludes it. Compute it once from
+  the camera extrinsics + mat geometry and attach it to the cached
+  scene_bg; see ``build_mat_mask``.
+  """
   median: np.ndarray   # (H, W, 3) uint8 — per-pixel median across samples
   std:    np.ndarray   # (H, W, 3) float32 — per-pixel std across samples
   n_frames: int
+  mat_mask: np.ndarray | None = None   # (H, W) bool, optional ROI
 
   def foreground_mask(self, rgb: np.ndarray,
                        k: float = 3.0, floor: float = 15.0,
                        open_radius: int = 1) -> np.ndarray:
-    """Binary mask where ``rgb`` differs from the reference.
+    """Binary mask where ``rgb`` differs from the reference (and lies
+    inside ``mat_mask`` if one is attached).
 
     ``threshold = max(k*std, floor)`` per pixel + channel. A pixel is
     foreground iff the max-channel difference exceeds the threshold.
@@ -53,6 +64,8 @@ class SceneBackground:
       m = cv2.morphologyEx(m, cv2.MORPH_OPEN, kernel)
       m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel)
       fg = m.astype(bool)
+    if self.mat_mask is not None:
+      fg = fg & self.mat_mask
     return fg
 
 
@@ -101,7 +114,14 @@ def save_scene_bg(cache_dir: Path | str, dataset_id: str,
                   bg: SceneBackground) -> Path:
   p = scene_bg_path(cache_dir, dataset_id)
   p.parent.mkdir(parents=True, exist_ok=True)
-  np.savez_compressed(p, median=bg.median, std=bg.std, n_frames=bg.n_frames)
+  payload: dict[str, np.ndarray] = {
+    "median":   bg.median,
+    "std":      bg.std,
+    "n_frames": np.asarray(bg.n_frames),
+  }
+  if bg.mat_mask is not None:
+    payload["mat_mask"] = bg.mat_mask.astype(bool)
+  np.savez_compressed(p, **payload)
   return p
 
 
@@ -111,22 +131,96 @@ def load_scene_bg(cache_dir: Path | str, dataset_id: str
   if not p.exists():
     return None
   with np.load(p) as f:
+    mat_mask = np.asarray(f["mat_mask"], dtype=bool) if "mat_mask" in f else None
     return SceneBackground(
       median   = np.asarray(f["median"], dtype=np.uint8),
       std      = np.asarray(f["std"], dtype=np.float32),
       n_frames = int(f["n_frames"]),
+      mat_mask = mat_mask,
     )
 
 
 def ensure_scene_bg(
   cache_dir: Path | str, dataset_id: str, camera_key: str,
   episode_idx: int, n_samples: int = 16, rebuild: bool = False,
+  calibration: "Any | None" = None,
+  ol_cfg: "Any | None" = None,
+  margin_mm: float = 60.0,
 ) -> SceneBackground:
-  """Load cached scene_bg, or build + save it. Idempotent."""
+  """Load cached scene_bg, or build + save it. Idempotent.
+
+  When ``calibration`` and ``ol_cfg`` are provided, attach a mat-region
+  mask projected from the configured L/D/r geometry. Cached scene_bg
+  files without a mat_mask are upgraded in-place on the next call
+  that supplies the calibration.
+  """
+  bg: SceneBackground | None = None
   if not rebuild:
-    cached = load_scene_bg(cache_dir, dataset_id)
-    if cached is not None:
-      return cached
-  bg = build_scene_bg(dataset_id, camera_key, episode_idx, n_samples)
+    bg = load_scene_bg(cache_dir, dataset_id)
+  if bg is None:
+    bg = build_scene_bg(dataset_id, camera_key, episode_idx, n_samples)
+  # Attach (or upgrade) the mat mask whenever the caller provides the
+  # bits we need to compute it.
+  if bg.mat_mask is None and calibration is not None and ol_cfg is not None:
+    try:
+      mat_mask = build_mat_mask(
+        image_size = bg.median.shape[1::-1],   # (W, H) from (H, W, 3)
+        calibration = calibration,
+        L_mm = ol_cfg.mat_line_length_mm,
+        D_mm = ol_cfg.mat_line_separation_mm,
+        r_mm = ol_cfg.mat_circle_radius_mm,
+        margin_mm = margin_mm,
+      )
+      bg.mat_mask = mat_mask
+      logger.info("[bg] %s: attached mat_mask (%d/%d pixels in ROI = %.1f%%)",
+                  dataset_id, int(mat_mask.sum()), mat_mask.size,
+                  100.0 * mat_mask.sum() / mat_mask.size)
+    except Exception as e:
+      logger.warning("[bg] %s: could not build mat_mask (%s); proceeding without ROI.",
+                     dataset_id, e)
   save_scene_bg(cache_dir, dataset_id, bg)
   return bg
+
+
+def build_mat_mask(
+  image_size: tuple[int, int],
+  calibration: "Any",
+  L_mm: float, D_mm: float, r_mm: float,
+  margin_mm: float = 60.0,
+) -> np.ndarray:
+  """Compute a binary image mask of the mat region.
+
+  Projects a margin-expanded mat polygon (line endpoints + the +X side
+  of the circle) into image space using ``calibration``'s intrinsics +
+  extrinsics, then fills the convex hull as the ROI. Returns
+  ``(H, W) bool``.
+  """
+  import cv2
+
+  W, H = image_size
+  K    = np.asarray(calibration.intrinsics.K,    dtype=np.float64)
+  dist = np.asarray(calibration.intrinsics.dist, dtype=np.float64)
+  R    = np.asarray(calibration.extrinsics.R,    dtype=np.float64)
+  t    = np.asarray(calibration.extrinsics.t,    dtype=np.float64).reshape(3)
+  rvec, _ = cv2.Rodrigues(R)
+
+  # World-frame points outlining the painted mat plus a margin in the
+  # +X direction (where the circle lives) and a small extra on the
+  # opposite side past the line tips.
+  m = float(margin_mm)
+  corners_world = np.array([
+    [-L_mm - m, +D_mm / 2 + m, 0.0],   # far + bottom corner
+    [-L_mm - m, -D_mm / 2 - m, 0.0],   # far + top corner
+    [+r_mm + m, -D_mm / 2 - m, 0.0],   # near (circle side) + top
+    [+r_mm + m, +D_mm / 2 + m, 0.0],   # near (circle side) + bottom
+  ], dtype=np.float64)
+  uv, _ = cv2.projectPoints(corners_world, rvec, t, K, dist)
+  pts = uv.reshape(-1, 2)
+
+  # Use the convex hull of the projected corners. For wide-angle lenses
+  # with distortion the projected rectangle isn't strictly convex, but
+  # the hull is a safe superset.
+  hull = cv2.convexHull(pts.astype(np.float32))
+  mask = np.zeros((H, W), dtype=np.uint8)
+  cv2.fillConvexPoly(mask, hull.astype(np.int32), 1)
+  return mask.astype(bool)

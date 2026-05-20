@@ -170,7 +170,7 @@ def generate_scenes(ctx, episodes, output, seed, fmt, workers, min_steps, overri
 
 
 @cli.command("import-lerobot")
-@click.argument("repo_id", type=str)
+@click.argument("repo_id", type=str, metavar="REPO_ID[#EPISODES]")
 @click.option("--output", required=True, type=str, help="Output directory")
 @click.option("--format", "fmt", default="rerun", type=click.Choice(["hdf5", "rerun"]),
               help="Episode output format (hdf5 or rerun)")
@@ -194,14 +194,26 @@ def generate_scenes(ctx, episodes, output, seed, fmt, workers, min_steps, overri
                    "Repeatable; processors run in order as the final step before "
                    "the episode is written. Use for rescaling joint values, computing "
                    "ee_pos via forward kinematics, image cropping, etc.")
+@click.option("--name-prefix", default=None, type=str,
+              help="String prepended to each written episode's filename. "
+                   "Use to import multiple datasets into the same --output "
+                   "directory without filename collisions (default "
+                   "names are episode-00000, etc. — identical across "
+                   "datasets). Typical: --name-prefix task_2_1805_2")
 @click.pass_context
 def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
-                   derive_target_mask, tags, processor_paths):
+                   derive_target_mask, tags, processor_paths, name_prefix):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
 
   Pulls the parquet + MP4 from Hugging Face, slices per episode using
   ``meta/episodes/*.parquet``, decodes the matching video range, and
   writes one episode file per LeRobot episode under --output.
+
+  ``REPO_ID`` accepts the same ``DATASET[#EPISODES]`` syntax used by
+  ``calibrate-intrinsics`` and ``prompt-episodes`` — e.g.
+  ``user/dataset#8-99`` to import only episodes 8 onward. ``:FRAMES``
+  syntax is rejected here (frame-range filtering doesn't make sense
+  for the importer).
 
   Fields the repo's format needs but LeRobot teleop data lacks (reward,
   ee_pos, ee_quat, object_xy) are zero-filled — fine for image-mode
@@ -209,25 +221,45 @@ def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
   """
   from tqdm import tqdm
 
+  from chuck_dreamer.real.object_localization.calibration.spec_parser import (
+    parse_calibration_source,
+  )
   from chuck_dreamer.sim.lerobot_import import import_dataset, load_processor
+
+  try:
+    spec = parse_calibration_source(repo_id)
+  except ValueError as e:
+    raise click.ClickException(str(e))
+  if spec.frames is not None:
+    raise click.ClickException(
+      "import-lerobot doesn't accept the :FRAMES portion of the spec "
+      "(only #EPISODES is meaningful). Got: "
+      f"{repo_id!r}")
+  parsed_repo_id = spec.dataset_id
+  episode_filter: set[int] | None = (
+    set(spec.episodes) if spec.episodes is not None else None
+  )
 
   processors = tuple(load_processor(p) for p in processor_paths)
 
   click.echo(
-    f"Importing {repo_id} → {output}  (format={fmt}, "
+    f"Importing {parsed_repo_id} → {output}  (format={fmt}, "
     f"derive_target_mask={derive_target_mask}, tags={list(tags)}, "
-    f"processors={list(processor_paths)})"
+    f"processors={list(processor_paths)}, name_prefix={name_prefix!r}, "
+    f"episodes={'all' if episode_filter is None else sorted(episode_filter)})"
   )
   count = 0
   for ep_idx, out_path in tqdm(
     import_dataset(
-      repo_id, output,
+      parsed_repo_id, output,
       format=fmt, video_key=video_key, max_episodes=max_episodes,
       derive_target_mask=derive_target_mask, tags=tuple(tags),
+      name_prefix=name_prefix,
       processors=processors,
+      episode_filter=episode_filter,
     ),
     desc="Episodes",
-    total=max_episodes,
+    total=(len(episode_filter) if episode_filter is not None else max_episodes),
   ):
     count += 1
     logger.info("episode %d → %s", ep_idx, out_path)
@@ -561,12 +593,14 @@ def run_cmd(ctx, policy_type, checkpoint_path, camera_source, arm_port, override
 from chuck_dreamer.real.object_localization.cli import (
   annotate_mat_cmd,
   calibrate_intrinsics_cmd,
+  prompt_episodes_cmd,
   test_calibration_cmd,
   test_object_pose_cmd,
 )
 
 cli.add_command(calibrate_intrinsics_cmd)
 cli.add_command(annotate_mat_cmd)
+cli.add_command(prompt_episodes_cmd)
 cli.add_command(test_calibration_cmd)
 cli.add_command(test_object_pose_cmd)
 
