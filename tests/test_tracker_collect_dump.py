@@ -18,6 +18,7 @@ class _FakeScene:
   """Minimal dataclass shaped like SceneConfig so asdict() works."""
   goal_pos: list[float] = field(default_factory=lambda: [0.1, 0.2])
   max_steps: int = 100
+  mat_centre: list[float] | None = None
 
 
 class _FakeWriter:
@@ -152,12 +153,13 @@ def test_metadata_payload_shape(patch_writer):
   assert len(writer.calls) == 1
   ep_arg, meta, _ = writer.calls[0]
   assert ep_arg is episode
-  assert meta["config"]    == {"goal_pos": [0.3, -0.4], "max_steps": 77}
-  assert meta["seed"]      == 7
-  assert meta["source"]    == "collect"
-  assert meta["outcome"]   == "timeout"
-  assert meta["goal_xy"]   == [0.3, -0.4]
-  assert meta["iteration"] == 12
+  assert meta["config"]     == {"goal_pos": [0.3, -0.4], "max_steps": 77, "mat_centre": None}
+  assert meta["seed"]       == 7
+  assert meta["source"]     == "collect"
+  assert meta["outcome"]    == "timeout"
+  assert meta["goal_xy"]    == [0.3, -0.4]
+  assert meta["mat_centre"] is None
+  assert meta["iteration"]  == 12
 
 
 def test_extra_data_does_not_clobber_required_metadata(patch_writer):

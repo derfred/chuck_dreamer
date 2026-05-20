@@ -210,32 +210,36 @@ def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
 @click.option("--cache-dir", default=None, type=click.Path(),
               help="Directory under which calibrations + verify overlays are stored. "
                    "Defaults to cfg.object_localization.calibration_cache.")
-@click.option("--doctor-interactive/--doctor-no-interactive",
-              "doctor_interactive", default=True,
-              help="Open matplotlib review windows for every detection step "
-                   "(per-frame checkerboard accept/reject/click-fallback, "
-                   "mat detection auto-then-edit, final verify-overlay sign-off). "
-                   "Default: on. Pass --doctor-no-interactive for headless / batch runs.")
 @click.option("--force", is_flag=True,
               help="Recompute calibrations even if a cached entry exists.")
 @click.option("--intrinsic-samples", default=60, type=int,
-              help="How many frames to sample from the checkerboard episode for intrinsics.")
+              help="How many frames to sample from each dataset's checkerboard "
+                   "episode. Frames from all --dataset arguments are pooled into "
+                   "a single intrinsic fit (one shared K/dist for the whole run, "
+                   "stored as <cache-dir>/intrinsics.json). With a static "
+                   "checkerboard pose per dataset, you need multiple datasets to "
+                   "give the fit enough view diversity.")
+@click.option("--intrinsics-only", is_flag=True,
+              help="Phase 1: fit only the shared intrinsics from the pooled "
+                   "checkerboard frames and write <cache-dir>/intrinsics.json. "
+                   "Skip per-dataset mat / extrinsic fitting. Pair with a "
+                   "second run (without --intrinsics-only) to do extrinsics "
+                   "later — that run will reuse the cached intrinsics.json.")
 @click.option("--doctor", is_flag=True,
-              help="Diagnostic mode: inspect the datasets without fitting anything. "
-                   "Reports image dims, which expected episodes are present, "
-                   "whether checkerboards are detectable, and whether the mat "
-                   "auto-detector finds the fiducials. Diagnostic PNGs are "
-                   "written under <cache-dir>/doctor/<dataset>/ unless "
-                   "--doctor-no-images is set.")
+              help="Open matplotlib review windows at every detection step "
+                   "(mat editor with buttons, object-highlight click-to-seed, "
+                   "final verify-overlay sign-off). Without --doctor, the "
+                   "pipeline runs headless and writes calibration + diagnostic "
+                   "PNGs straight to disk. Either way, calibration.json is "
+                   "written when the user accepts (or unconditionally in the "
+                   "headless path).")
 @click.option("--doctor-dir", default=None, type=click.Path(),
-              help="Where to write doctor diagnostic PNGs. Defaults to "
-                   "<cache-dir>/doctor/. Only used when --doctor is set.")
-@click.option("--doctor-no-images", is_flag=True,
-              help="Skip writing diagnostic PNGs in --doctor mode.")
+              help="Where to write diagnostic verify PNGs. Defaults to "
+                   "<cache-dir>/<dataset>/verify/. Applies in both modes.")
 @override_option
 @click.pass_context
-def analyze_cameras(ctx, dataset_ids, cache_dir, doctor_interactive, force,
-                    intrinsic_samples, doctor, doctor_dir, doctor_no_images,
+def analyze_cameras(ctx, dataset_ids, cache_dir, force,
+                    intrinsic_samples, intrinsics_only, doctor, doctor_dir,
                     overrides):
   """Calibrate cameras from LeRobot calibration datasets (one per camera position).
 
@@ -245,53 +249,40 @@ def analyze_cameras(ctx, dataset_ids, cache_dir, doctor_interactive, force,
     episodes 2-4 — object placements (used for verify overlays)
 
   Writes ``calibration.json`` per dataset under ``--cache-dir`` along with
-  verify overlays under ``<cache-dir>/<dataset>/verify/*.png``.
-
-  Use ``--doctor`` to dry-run the inspection. Diagnostic PNGs land under
-  ``<cache-dir>/doctor/<dataset>/`` so a user can eyeball the inputs.
+  diagnostic verify overlays under ``<cache-dir>/<dataset>/verify/*.png``.
+  With ``--doctor``, the pipeline pauses for interactive review at each
+  detection step.
   """
   from pathlib import Path as _Path
 
   from chuck_dreamer.real.object_localization import init_from_config
-  from chuck_dreamer.real.object_localization.calibration import (
-    analyze_datasets, diagnose_datasets,
-  )
+  from chuck_dreamer.real.object_localization.calibration import analyze_datasets
 
   cfg = load_config(ctx.obj["config_path"], overrides=overrides)
   ol_cfg = init_from_config(cfg)
   resolved_cache = _Path(cache_dir) if cache_dir else _Path(ol_cfg.calibration_cache)
+  resolved_verify_dir = _Path(doctor_dir) if doctor_dir else None
 
-  if doctor:
-    resolved_image_dir: _Path | None
-    if doctor_no_images:
-      resolved_image_dir = None
-    elif doctor_dir:
-      resolved_image_dir = _Path(doctor_dir)
-    else:
-      resolved_image_dir = resolved_cache / "doctor"
-    where = "no PNGs (--doctor-no-images)" if resolved_image_dir is None else str(resolved_image_dir)
-    click.echo(f"Doctor: inspecting {len(dataset_ids)} dataset(s) — diagnostic images: {where}")
-    reports = diagnose_datasets(list(dataset_ids), image_dir=resolved_image_dir)
-    for r in reports:
-      click.echo(r.format())
-    failed = [r for r in reports if not r.loaded]
-    if failed:
-      raise click.ClickException(
-        f"{len(failed)} dataset(s) failed to load — see report above")
-    return
-
+  mode_msg = "intrinsics-only" if intrinsics_only else "intrinsics + extrinsics"
   click.echo(f"Calibrating {len(dataset_ids)} dataset(s) → {resolved_cache} "
-             f"(doctor_interactive={doctor_interactive}, force={force})")
+             f"(mode={mode_msg}, interactive={doctor}, force={force})")
   results = analyze_datasets(
     list(dataset_ids),
     cache_dir=resolved_cache,
-    interactive=doctor_interactive,
+    interactive=doctor,
     force=force,
+    intrinsic_samples=intrinsic_samples,
+    intrinsics_only=intrinsics_only,
+    verify_dir_override=resolved_verify_dir,
   )
-  for did, cal in results.items():
-    click.echo(f"  {did}: intrinsic RMS={cal.intrinsic_rms_px:.3f}px  "
-               f"extrinsic RMS={cal.extrinsic_rms_px:.2f}px  "
-               f"image={cal.image_size}")
+  if intrinsics_only:
+    click.echo(f"Wrote shared intrinsics to {resolved_cache / 'intrinsics.json'}. "
+               f"Re-run without --intrinsics-only to fit per-dataset extrinsics.")
+  else:
+    for did, cal in results.items():
+      click.echo(f"  {did}: intrinsic RMS={cal.intrinsic_rms_px:.3f}px  "
+                 f"extrinsic RMS={cal.extrinsic_rms_px:.2f}px  "
+                 f"image={cal.image_size}")
   click.echo("Done.")
 
 
@@ -330,6 +321,13 @@ def show_scene(ctx, seed, step_delay, overrides):
 
   click.echo("Launching MuJoCo viewer — close the window to exit.")
   with mujoco.viewer.launch_passive(env.model, env.data, key_callback=key_callback) as v:
+    # Switch the viewer from its free orbit camera to the scene's main_camera
+    # so randomised positions (e.g. the "real" preset's 110° front arc) are
+    # actually what the user sees.
+    main_cam_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_CAMERA, "main_camera")
+    if main_cam_id >= 0:
+      v.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+      v.cam.fixedcamid = main_cam_id
     while v.is_running():
       prev_state = policy.state
       action = policy.act(obs)

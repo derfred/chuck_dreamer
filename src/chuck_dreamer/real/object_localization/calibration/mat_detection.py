@@ -239,7 +239,10 @@ def detect_mat_markings(rgb: np.ndarray) -> MatDetection | None:
   L_over_r = cfg.mat_line_length_mm / cfg.mat_circle_radius_mm
 
   n_angles = 72   # 5° steps
-  n_offsets = 5   # how far behind the circle the lines' near ends sit
+  # The circle's midpoint should lie on the segment connecting the two lines'
+  # near endpoints — i.e. the circle's offset along the line direction should
+  # be ~0 (it sits next to the near ends, not behind them). We sweep a small
+  # range around zero and bias the score toward small absolute offsets.
   thetas = np.linspace(0.0, np.pi, n_angles, endpoint=False)
   min_on_mat_fraction = 0.6
   best = None
@@ -255,10 +258,13 @@ def detect_mat_markings(rgb: np.ndarray) -> MatDetection | None:
     L_px = cr * L_over_r
     half_D = D_px / 2.0
     n_line_samples = max(20, int(L_px / 4))
+    # Offset sweep: ± half_D, but the scoring bias makes small offsets win.
+    offset_range = 0.5 * half_D
+    offsets = np.linspace(-offset_range, +offset_range, 5)
     for theta in thetas:
       direction = np.array([np.cos(theta), np.sin(theta)])
       normal = np.array([-direction[1], direction[0]])
-      for offset in np.linspace(0.0, half_D, n_offsets):
+      for offset in offsets:
         near = center - offset * direction
         l1_near = near + half_D * normal
         l2_near = near - half_D * normal
@@ -273,7 +279,11 @@ def detect_mat_markings(rgb: np.ndarray) -> MatDetection | None:
         if max(r1, r2) < 0.15:
           continue
         line_score = 0.5 * (r1 + r2) + 0.5 * max(r1, r2)
-        score = line_score * central
+        # Penalise offsets that pull the circle off the connecting line of
+        # the two lines' near endpoints. A Gaussian with sigma = half_D/3
+        # peaks at offset=0 and decays smoothly.
+        on_line_bonus = float(np.exp(-(offset ** 2) / (2 * (half_D / 3.0) ** 2)))
+        score = line_score * central * on_line_bonus
         if score > best_score:
           best_score = score
           best = (l1_near, l1_far, l2_near, l2_far, center, float(cr))

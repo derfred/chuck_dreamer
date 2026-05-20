@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 
@@ -52,25 +51,12 @@ def _detect_corners(gray: np.ndarray) -> np.ndarray | None:
   return corners
 
 
-FrameReviewer = Callable[[np.ndarray, np.ndarray | None, int, int, str], tuple[str, np.ndarray | None]]
-
-
-def calibrate_intrinsics(
-  frames:   list[np.ndarray],
-  reviewer: "FrameReviewer | None" = None,
-) -> IntrinsicResult:
+def calibrate_intrinsics(frames: list[np.ndarray]) -> IntrinsicResult:
   """Run :func:`cv2.calibrateCamera` over checkerboard detections.
 
   ``frames`` is a list of HxWx3 uint8 RGB images. The returned result
   carries the detected corners and the input indices that survived
   detection + filtering, so callers can save them for debugging.
-
-  If ``reviewer`` is provided, it is invoked once per frame as
-  ``reviewer(frame, auto_corners_or_None, cols, rows, label)`` and
-  must return ``(decision, corners)`` where ``decision`` is
-  ``"accept"`` or ``"reject"`` and ``corners`` is the (rows*cols, 1, 2)
-  array to use when accepted (typically the auto-detection unmodified,
-  or a clicked-corner fallback).
   """
   import cv2
 
@@ -79,7 +65,6 @@ def calibrate_intrinsics(
 
   H, W = frames[0].shape[:2]
   obj_template = _world_grid()
-  cols, rows = constants.checkerboard_inner_corners()
 
   obj_pts:    list[np.ndarray] = []
   img_pts:    list[np.ndarray] = []
@@ -93,30 +78,14 @@ def calibrate_intrinsics(
       continue
     gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
     corners = _detect_corners(gray)
-    auto_passed_spans = False
-    if corners is not None:
-      pts = corners.reshape(-1, 2)
-      span_x = (pts[:, 0].max() - pts[:, 0].min()) / W
-      span_y = (pts[:, 1].max() - pts[:, 1].min()) / H
-      auto_passed_spans = span_x >= 0.15 and span_y >= 0.15
-
-    if reviewer is None:
-      # Non-interactive: auto detection must pass the span filter, else skip.
-      if corners is None or not auto_passed_spans:
-        continue
-    else:
-      # Interactive: hand the frame + auto result to the reviewer. The
-      # reviewer can accept, reject, or supply user-clicked corners.
-      decision, reviewed = reviewer(
-        frame,
-        corners if auto_passed_spans else None,
-        cols, rows,
-        f"frame {i + 1}/{len(frames)}",
-      )
-      if decision != "accept" or reviewed is None:
-        continue
-      corners = reviewed
+    if corners is None:
+      continue
     pts = corners.reshape(-1, 2)
+    span_x = (pts[:, 0].max() - pts[:, 0].min()) / W
+    span_y = (pts[:, 1].max() - pts[:, 1].min()) / H
+    if span_x < 0.15 or span_y < 0.15:
+      logger.debug("frame %d: rejected (span %.2f x %.2f)", i, span_x, span_y)
+      continue
     obj_pts.append(obj_template.copy())
     img_pts.append(corners.astype(np.float32))
     used_idxs.append(i)
