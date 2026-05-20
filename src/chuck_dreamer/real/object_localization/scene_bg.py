@@ -145,39 +145,43 @@ def ensure_scene_bg(
   episode_idx: int, n_samples: int = 16, rebuild: bool = False,
   calibration: "Any | None" = None,
   ol_cfg: "Any | None" = None,
-  margin_mm: float = 60.0,
+  rebuild_mat_mask: bool = False,
 ) -> SceneBackground:
   """Load cached scene_bg, or build + save it. Idempotent.
 
   When ``calibration`` and ``ol_cfg`` are provided, attach a mat-region
-  mask projected from the configured L/D/r geometry. Cached scene_bg
-  files without a mat_mask are upgraded in-place on the next call
-  that supplies the calibration.
+  mask projected from the configured mat_extent_* bounds. Pass
+  ``rebuild_mat_mask=True`` to force recomputation of an existing
+  cached mat_mask (use this once after changing the extent values).
   """
   bg: SceneBackground | None = None
   if not rebuild:
     bg = load_scene_bg(cache_dir, dataset_id)
   if bg is None:
     bg = build_scene_bg(dataset_id, camera_key, episode_idx, n_samples)
-  # Attach (or upgrade) the mat mask whenever the caller provides the
-  # bits we need to compute it.
-  if bg.mat_mask is None and calibration is not None and ol_cfg is not None:
+  needs_mat = (bg.mat_mask is None) or rebuild_mat_mask
+  if needs_mat and calibration is not None and ol_cfg is not None:
     try:
       mat_mask = build_mat_mask(
         image_size = bg.median.shape[1::-1],   # (W, H) from (H, W, 3)
         calibration = calibration,
-        L_mm = ol_cfg.mat_line_length_mm,
-        D_mm = ol_cfg.mat_line_separation_mm,
-        r_mm = ol_cfg.mat_circle_radius_mm,
-        margin_mm = margin_mm,
+        extent_xmin_mm = ol_cfg.mat_extent_xmin_mm,
+        extent_xmax_mm = ol_cfg.mat_extent_xmax_mm,
+        extent_ymin_mm = ol_cfg.mat_extent_ymin_mm,
+        extent_ymax_mm = ol_cfg.mat_extent_ymax_mm,
       )
       bg.mat_mask = mat_mask
-      logger.info("[bg] %s: attached mat_mask (%d/%d pixels in ROI = %.1f%%)",
-                  dataset_id, int(mat_mask.sum()), mat_mask.size,
+      logger.info("[bg] %s: attached mat_mask from world bbox "
+                  "x=[%.0f, %.0f] y=[%.0f, %.0f] mm "
+                  "(%d/%d pixels in ROI = %.1f%%)",
+                  dataset_id,
+                  ol_cfg.mat_extent_xmin_mm, ol_cfg.mat_extent_xmax_mm,
+                  ol_cfg.mat_extent_ymin_mm, ol_cfg.mat_extent_ymax_mm,
+                  int(mat_mask.sum()), mat_mask.size,
                   100.0 * mat_mask.sum() / mat_mask.size)
     except Exception as e:
-      logger.warning("[bg] %s: could not build mat_mask (%s); proceeding without ROI.",
-                     dataset_id, e)
+      logger.warning("[bg] %s: could not build mat_mask (%s); proceeding "
+                     "without ROI.", dataset_id, e)
   save_scene_bg(cache_dir, dataset_id, bg)
   return bg
 
@@ -185,15 +189,16 @@ def ensure_scene_bg(
 def build_mat_mask(
   image_size: tuple[int, int],
   calibration: "Any",
-  L_mm: float, D_mm: float, r_mm: float,
-  margin_mm: float = 60.0,
+  extent_xmin_mm: float, extent_xmax_mm: float,
+  extent_ymin_mm: float, extent_ymax_mm: float,
 ) -> np.ndarray:
-  """Compute a binary image mask of the mat region.
+  """Compute a binary image mask of the physical mat region.
 
-  Projects a margin-expanded mat polygon (line endpoints + the +X side
-  of the circle) into image space using ``calibration``'s intrinsics +
-  extrinsics, then fills the convex hull as the ROI. Returns
-  ``(H, W) bool``.
+  Projects the four corners of the world-frame mat rectangle into
+  image space using ``calibration``'s intrinsics + extrinsics, then
+  fills the convex hull. The world bbox should describe the physical
+  mat (the entire dark region the object can travel on), not just
+  the painted fiducial pattern.
   """
   import cv2
 
@@ -204,23 +209,90 @@ def build_mat_mask(
   t    = np.asarray(calibration.extrinsics.t,    dtype=np.float64).reshape(3)
   rvec, _ = cv2.Rodrigues(R)
 
-  # World-frame points outlining the painted mat plus a margin in the
-  # +X direction (where the circle lives) and a small extra on the
-  # opposite side past the line tips.
-  m = float(margin_mm)
   corners_world = np.array([
-    [-L_mm - m, +D_mm / 2 + m, 0.0],   # far + bottom corner
-    [-L_mm - m, -D_mm / 2 - m, 0.0],   # far + top corner
-    [+r_mm + m, -D_mm / 2 - m, 0.0],   # near (circle side) + top
-    [+r_mm + m, +D_mm / 2 + m, 0.0],   # near (circle side) + bottom
+    [extent_xmin_mm, extent_ymin_mm, 0.0],
+    [extent_xmin_mm, extent_ymax_mm, 0.0],
+    [extent_xmax_mm, extent_ymax_mm, 0.0],
+    [extent_xmax_mm, extent_ymin_mm, 0.0],
   ], dtype=np.float64)
   uv, _ = cv2.projectPoints(corners_world, rvec, t, K, dist)
   pts = uv.reshape(-1, 2)
-
-  # Use the convex hull of the projected corners. For wide-angle lenses
-  # with distortion the projected rectangle isn't strictly convex, but
-  # the hull is a safe superset.
+  # Clip projected corners to the image bounds. Wide-angle lens
+  # distortion can push corner points to inf when they fall outside
+  # the camera FOV; the convex hull then becomes invalid.
+  pts = np.clip(pts, [-1e6, -1e6], [W + 1e6, H + 1e6])
+  pts = np.nan_to_num(pts, nan=0.0, posinf=1e6, neginf=-1e6)
+  pts = np.clip(pts, [-W, -H], [2 * W, 2 * H])
   hull = cv2.convexHull(pts.astype(np.float32))
   mask = np.zeros((H, W), dtype=np.uint8)
   cv2.fillConvexPoly(mask, hull.astype(np.int32), 1)
   return mask.astype(bool)
+
+
+def detect_mat_mask(median_rgb: np.ndarray,
+                     erode_px: int = 4, dilate_px: int = 4,
+                     min_area_frac: float = 0.05) -> np.ndarray:
+  """Detect the physical mat region (large dark area) from the empty-
+  mat median frame.
+
+  Steps:
+    1. Convert median to grayscale.
+    2. Otsu-threshold to split dark vs bright.
+    3. Take the *darker* class as the mat candidate.
+    4. Open + close to smooth, then keep only connected components
+       larger than ``min_area_frac`` of the image.
+    5. Fill the convex hull of those components.
+
+  Falls back to an all-True mask (no ROI restriction) if no dark
+  region passes the area threshold. Returns ``(H, W) bool``.
+  """
+  import cv2
+
+  H, W = median_rgb.shape[:2]
+  gray = cv2.cvtColor(median_rgb, cv2.COLOR_RGB2GRAY)
+  # Otsu picks the split that maximises between-class variance.
+  _, binary = cv2.threshold(gray, 0, 255,
+                              cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+  # We want the darker class to be foreground (= mat). Otsu marks
+  # bright pixels as 255 so invert.
+  dark = (binary == 0).astype(np.uint8)
+
+  # Smooth: close (fill small fiducial gaps inside the mat) then
+  # open (drop carpet edges + thin dark strips).
+  k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                       (2 * dilate_px + 1, 2 * dilate_px + 1))
+  k_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                       (2 * erode_px + 1, 2 * erode_px + 1))
+  dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, k_close)
+  dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN,  k_open)
+
+  num, labels, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
+  if num <= 1:
+    logger.warning("detect_mat_mask: no dark component found; falling back to "
+                   "all-True mask.")
+    return np.ones((H, W), dtype=bool)
+
+  min_area = float(min_area_frac) * float(H * W)
+  big = np.zeros((H, W), dtype=np.uint8)
+  found = 0
+  for i in range(1, num):
+    if stats[i, cv2.CC_STAT_AREA] >= min_area:
+      big |= (labels == i).astype(np.uint8)
+      found += 1
+  if found == 0:
+    logger.warning(
+      "detect_mat_mask: largest dark component (%d px) below %d-px threshold "
+      "(%.0f%% of image); falling back to all-True mask.",
+      int(stats[1:, cv2.CC_STAT_AREA].max()), int(min_area), min_area_frac * 100)
+    return np.ones((H, W), dtype=bool)
+
+  # Convex hull of the union, to absorb small holes where fiducial
+  # paint or the object's shadow sat during the empty-mat episode.
+  ys, xs = np.where(big > 0)
+  if xs.size == 0:
+    return np.ones((H, W), dtype=bool)
+  pts = np.stack([xs, ys], axis=1).astype(np.int32).reshape(-1, 1, 2)
+  hull = cv2.convexHull(pts)
+  mat = np.zeros((H, W), dtype=np.uint8)
+  cv2.fillConvexPoly(mat, hull, 1)
+  return mat.astype(bool)

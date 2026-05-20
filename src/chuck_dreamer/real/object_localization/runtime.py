@@ -37,6 +37,10 @@ class ObjectLocalizationConfig:
   mat_line_separation_mm: float        # D
   mat_circle_radius_mm: float          # r
   mat_circle_samples: int              # N
+  mat_extent_xmin_mm: float            # black-mat ROI in world frame
+  mat_extent_xmax_mm: float
+  mat_extent_ymin_mm: float
+  mat_extent_ymax_mm: float
 
   intrinsics_n_frames_target: int
   intrinsics_n_frames_min:    int
@@ -141,6 +145,10 @@ def _parse(raw: dict[str, Any]) -> ObjectLocalizationConfig:
     mat_line_separation_mm = D,
     mat_circle_radius_mm   = r,
     mat_circle_samples     = int(mat.get("circle_samples", 64)),
+    mat_extent_xmin_mm     = float(mat.get("extent_xmin_mm", -L - 200.0)),
+    mat_extent_xmax_mm     = float(mat.get("extent_xmax_mm", r + 200.0)),
+    mat_extent_ymin_mm     = float(mat.get("extent_ymin_mm", -D / 2 - 200.0)),
+    mat_extent_ymax_mm     = float(mat.get("extent_ymax_mm",  D / 2 + 200.0)),
 
     intrinsics_n_frames_target   = int(intrinsics.get("n_frames_target", 64)),
     intrinsics_n_frames_min      = int(intrinsics.get("n_frames_min", 5)),

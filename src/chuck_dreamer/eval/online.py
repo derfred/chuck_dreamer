@@ -129,6 +129,11 @@ class OnlineEvaluator:
     per_episode_prior:     list[np.ndarray] = []
     reward_prior_curves:   list[np.ndarray] = []
     zero_dyn_curves:       list[np.ndarray] = []
+    # Linear-probe inputs: per-episode (latent, target) pairs, pooled at
+    # phase end into a single ridge fit. Episode-level train/test split
+    # prevents the probe from cheating by interpolating consecutive
+    # frames within an episode. See _fit_linear_probe below.
+    probe_records: list[dict[str, np.ndarray]] = []
 
     ep_count   = 0
     global_idx = 0
@@ -218,6 +223,13 @@ class OnlineEvaluator:
           },
         )
 
+        # Stash latents + privileged targets for the phase-level linear
+        # probes. Window = post-action open-loop, matching the recon
+        # target slice (raw[t] for t in burn_in+1 .. T_window+1).
+        probe_rec = self._extract_probe_record(episode.raw, result, burn_in)
+        if probe_rec is not None:
+          probe_records.append(probe_rec)
+
         ep_count   += 1
         global_idx += 1
 
@@ -263,6 +275,16 @@ class OnlineEvaluator:
       summary["recon/prior_over_zero_dyn"] = (
         prior_mean / max(float(np.nanmean(zd_curve)), 1e-9)
       )
+
+    # Linear "probe-lite": three closed-form ridge fits over pooled
+    # (latent, privileged-target) pairs. R² > 0 means the probe beats
+    # predicting the mean. The post→object_xy probe says "does the
+    # encoder extract ball position from the image"; the prior probe
+    # says "does the dynamics module preserve it across the open-loop
+    # rollout". ee_xy_prior is the control: action-conditional, should
+    # be ~1.0 in a healthy model.
+    summary.update(self._compute_probe_metrics(probe_records))
+
     eval_tracker.log(summary)
 
   def _episode_artifacts(self, result: RolloutOutputs) -> dict[str, Any]:
@@ -276,3 +298,104 @@ class OnlineEvaluator:
       "h_prior":         result.h_prior,
       "s_prior":         result.s_prior,
     }
+
+  # ---------- linear probe ----------
+
+  def _extract_probe_record(
+    self,
+    raw:     dict[str, Any],
+    result:  RolloutOutputs,
+    burn_in: int,
+  ) -> dict[str, np.ndarray] | None:
+    """Build the (latent, target) arrays for the linear probe.
+
+    Both latent and target are sliced to the open-loop window
+    ``[burn_in+1 : T_window+1]`` so they align with the rollout outputs
+    that already use that same window. Returns ``None`` if the episode
+    is missing a privileged target key (the probe is sim-only — real
+    data without object_xy / ee_pos simply doesn't contribute).
+    """
+    if "object_xy" not in raw or "ee_pos" not in raw:
+      return None
+    horizon = int(result.horizon)
+    T_window = burn_in + horizon
+    object_xy = np.asarray(raw["object_xy"], dtype=np.float32)[burn_in + 1 : T_window + 1]
+    ee_xy     = np.asarray(raw["ee_pos"],    dtype=np.float32)[burn_in + 1 : T_window + 1, :2]
+    if object_xy.shape[0] != horizon or ee_xy.shape[0] != horizon:
+      # Privileged target arrays shorter than the rollout — episode
+      # truncated mid-window. Skip rather than misalign.
+      return None
+    return {
+      "post":      np.concatenate([result.h_posterior, result.s_posterior], axis=-1),
+      "prior":     np.concatenate([result.h_prior,     result.s_prior],     axis=-1),
+      "object_xy": object_xy,
+      "ee_xy":     ee_xy,
+    }
+
+  def _compute_probe_metrics(
+    self,
+    records: list[dict[str, np.ndarray]],
+  ) -> dict[str, float]:
+    """Episode-level train/test split → three closed-form ridge probes."""
+    if len(records) < 2:
+      # Need at least one episode each side of the split.
+      return {}
+    rng = np.random.default_rng(0)  # deterministic so the same eval set
+    # produces the same split — apples-to-apples across phases.
+    n = len(records)
+    perm = rng.permutation(n)
+    n_test = max(1, n // 4)
+    test_idx = set(perm[:n_test].tolist())
+    train_idx = [i for i in range(n) if i not in test_idx]
+    test_idx_list = sorted(test_idx)
+
+    def _pool(idx_list: list[int], latent_key: str, target_key: str):
+      X = np.concatenate([records[i][latent_key] for i in idx_list], axis=0)
+      Y = np.concatenate([records[i][target_key] for i in idx_list], axis=0)
+      return X.astype(np.float32), Y.astype(np.float32)
+
+    out: dict[str, float] = {}
+    for latent_key, target_key, name in [
+      ("post",  "object_xy", "eval/probe/object_xy_post_linear_r2"),
+      ("prior", "object_xy", "eval/probe/object_xy_prior_linear_r2"),
+      ("prior", "ee_xy",     "eval/probe/ee_xy_prior_linear_r2"),
+    ]:
+      Xtr, Ytr = _pool(train_idx,      latent_key, target_key)
+      Xte, Yte = _pool(test_idx_list,  latent_key, target_key)
+      out[name] = _fit_linear_probe_r2(Xtr, Ytr, Xte, Yte)
+    return out
+
+
+def _fit_linear_probe_r2(
+  Xtr: np.ndarray,
+  Ytr: np.ndarray,
+  Xte: np.ndarray,
+  Yte: np.ndarray,
+  alpha: float = 1e-3,
+) -> float:
+  """Closed-form ridge in standardized space; return test R².
+
+  ``alpha`` is small — for diagnostic probes we want to measure how
+  much information is *present*, not how much survives heavy
+  regularization. Bias is unpenalized (last column of the design
+  matrix has its ridge term zeroed).
+  """
+  xm = Xtr.mean(0, keepdims=True)
+  xs = Xtr.std(0,  keepdims=True) + 1e-6
+  ym = Ytr.mean(0, keepdims=True)
+  ys = Ytr.std(0,  keepdims=True) + 1e-6
+  Xtr_n = (Xtr - xm) / xs
+  Ytr_n = (Ytr - ym) / ys
+  Xb = np.concatenate([Xtr_n, np.ones((Xtr_n.shape[0], 1), dtype=Xtr_n.dtype)], axis=1)
+  d  = Xb.shape[1]
+  A  = Xb.T @ Xb + alpha * np.eye(d, dtype=Xb.dtype)
+  A[-1, -1] -= alpha  # unpenalized bias
+  W  = np.linalg.solve(A, Xb.T @ Ytr_n)
+
+  Xte_n = (Xte - xm) / xs
+  Xb_te = np.concatenate([Xte_n, np.ones((Xte_n.shape[0], 1), dtype=Xte_n.dtype)], axis=1)
+  pred  = (Xb_te @ W) * ys + ym
+
+  ss_res = float(((Yte - pred) ** 2).sum())
+  ss_tot = float(((Yte - Yte.mean(0, keepdims=True)) ** 2).sum())
+  return 1.0 - ss_res / max(ss_tot, 1e-12)

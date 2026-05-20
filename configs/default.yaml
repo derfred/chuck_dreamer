@@ -275,6 +275,23 @@ object_localization:
     line_separation_mm: 160.0   # D: perpendicular distance between the two lines
     circle_radius_mm:   50.0    # r: radius of the white circle
     circle_samples:     64      # N, matched to the UI's ellipse sample count
+    # Black-mat extent in world coords. The mat origin (circle center)
+    # is at the world origin; the fiducial assembly extends from
+    # x = -L (far line tips) to x = +r (circle's +X edge). Lines sit
+    # at y = ±D/2.
+    #
+    # Margins (measured on the physical mat, edges measured from the
+    # nearest fiducial extent):
+    #   * 70 mm past the circle's +X edge   (robot-side margin)
+    #   * 140 mm past the far line tips     (back side)
+    #   * 140 mm past each line             (sides)
+    #
+    # Gives world bbox: x in [-L - 140, r + 70] = [-440, +120]
+    #                   y in [-D/2 - 140, D/2 + 140] = [-220, +220].
+    extent_xmin_mm:     -440.0
+    extent_xmax_mm:     +120.0
+    extent_ymin_mm:     -220.0
+    extent_ymax_mm:     +220.0
 
   intrinsics:
     n_frames_target:   5       # sample this many frames from the checkerboard episode

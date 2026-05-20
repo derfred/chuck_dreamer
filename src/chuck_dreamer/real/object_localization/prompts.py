@@ -34,10 +34,35 @@ def sidecar_path(cache_dir: Path | str, dataset_id: str) -> Path:
   return dataset_cache_dir(cache_dir, dataset_id) / _SIDECAR_NAME
 
 
+# Sidecar schema (current): per episode, a map of {frame_idx -> prompt}.
+# Each episode's first-frame click lives under frame_idx 0; additional
+# keyframe clicks (e.g. the last frame for end-anchor) sit under their
+# global frame index inside the episode. The legacy schema (per-episode
+# single prompt without a frame_idx wrapper) is auto-migrated on read.
+
+def _episode_entry(blob: dict[str, Any], episode_index: int
+                   ) -> dict[int, "Prompt"] | None:
+  """Normalize the per-episode entry to ``{frame_idx: prompt}`` or None."""
+  raw = blob.get(str(episode_index))
+  if raw is None:
+    return None
+  if isinstance(raw, dict):
+    out: dict[int, "Prompt"] = {}
+    for k, v in raw.items():
+      try:
+        fi = int(k)
+      except (TypeError, ValueError):
+        continue
+      out[fi] = _coerce_prompt(v)
+    return out
+  # Legacy single-prompt form: treat as frame 0 click.
+  return {0: _coerce_prompt(raw)}
+
+
 def load_prompt(
   cache_dir: Path | str, dataset_id: str, episode_index: int,
 ) -> Prompt | None:
-  """Return the cached prompt for one episode, or ``None`` if missing."""
+  """Return the first-frame (frame 0) cached prompt for an episode."""
   p = sidecar_path(cache_dir, dataset_id)
   if not p.exists():
     return None
@@ -45,20 +70,45 @@ def load_prompt(
     blob = json.loads(p.read_text())
   except (json.JSONDecodeError, OSError):
     return None
-  raw = blob.get(str(episode_index))
-  if raw is None:
+  entry = _episode_entry(blob, episode_index)
+  if entry is None:
     return None
-  return _coerce_prompt(raw)
+  return entry.get(0)
+
+
+def load_keyframe_prompts(
+  cache_dir: Path | str, dataset_id: str, episode_index: int,
+) -> dict[int, Prompt]:
+  """Return the full per-frame prompt map for an episode (may be empty)."""
+  p = sidecar_path(cache_dir, dataset_id)
+  if not p.exists():
+    return {}
+  try:
+    blob = json.loads(p.read_text())
+  except (json.JSONDecodeError, OSError):
+    return {}
+  entry = _episode_entry(blob, episode_index)
+  return entry or {}
 
 
 def save_prompt(
   cache_dir: Path | str, dataset_id: str, episode_index: int, prompt: Prompt,
 ) -> Path:
-  """Atomically merge ``prompt`` into the sidecar for ``dataset_id``.
+  """Save a first-frame (frame 0) prompt for an episode. Back-compat
+  wrapper around ``save_keyframe_prompt(..., frame_index=0)``.
+  """
+  return save_keyframe_prompt(cache_dir, dataset_id, episode_index, 0, prompt)
 
-  Atomic write + rename so concurrent importers don't shred each other's
-  entries. We re-read inside the function rather than caching to keep
-  the merge correct across multiple worker processes.
+
+def save_keyframe_prompt(
+  cache_dir: Path | str, dataset_id: str,
+  episode_index: int, frame_index: int, prompt: Prompt,
+) -> Path:
+  """Atomically merge a ``(episode, frame_index) -> prompt`` keyframe
+  into the sidecar.
+
+  Per-episode entries are normalized into the new ``{frame_idx: prompt}``
+  shape on merge; legacy single-prompt entries get migrated transparently.
   """
   p = sidecar_path(cache_dir, dataset_id)
   p.parent.mkdir(parents=True, exist_ok=True)
@@ -68,7 +118,11 @@ def save_prompt(
       blob = json.loads(p.read_text())
     except (json.JSONDecodeError, OSError):
       blob = {}
-  blob[str(episode_index)] = _prompt_to_json(prompt)
+
+  ep_key = str(episode_index)
+  existing = _episode_entry(blob, episode_index) or {}
+  existing[int(frame_index)] = _coerce_prompt(prompt)
+  blob[ep_key] = {str(fi): _prompt_to_json(pr) for fi, pr in sorted(existing.items())}
 
   fd, tmp = tempfile.mkstemp(prefix=".prompts-", suffix=".json", dir=str(p.parent))
   try:

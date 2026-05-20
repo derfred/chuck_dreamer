@@ -232,26 +232,56 @@ class ObjectPoseEstimator:
     self,
     frames: Iterable[np.ndarray],
     first_frame_prompt: tuple[int, int] | list[tuple[int, int]] | None = None,
+    keyframe_prompts: dict[int, "tuple[int, int] | list[tuple[int, int]]"] | None = None,
   ) -> list[ObjectPose | None]:
-    """Estimate poses across a whole episode (sequence of frames)."""
+    """Estimate poses across a whole episode.
+
+    ``first_frame_prompt`` is the click at frame 0 (required if no
+    ``keyframe_prompts`` is given). ``keyframe_prompts`` is an
+    ``{episode_relative_frame_idx: prompt}`` map; at each keyframe the
+    estimator re-runs the cold-start path (rest hypothesis stays
+    cached, but the (x, y) is re-anchored to the prompt's
+    back-projection) so the warm-start chain can't drift forever.
+
+    If both are given, ``keyframe_prompts[0]`` wins for frame 0.
+    """
     frame_list = list(frames)
     if not frame_list:
       return []
-    if first_frame_prompt is None:
-      raise ValueError("estimate_episode(): first_frame_prompt is required.")
 
-    masks = segment_video(frame_list, first_frame_prompt, self.use_sam2,
+    kfs: dict[int, Any] = dict(keyframe_prompts or {})
+    if 0 not in kfs and first_frame_prompt is not None:
+      kfs[0] = first_frame_prompt
+    if 0 not in kfs:
+      raise ValueError(
+        "estimate_episode(): a frame-0 prompt is required (pass via "
+        "first_frame_prompt or keyframe_prompts[0]).")
+
+    masks = segment_video(frame_list, kfs[0], self.use_sam2,
                           self.sam2_checkpoint, self.device,
                           scene_bg=self.scene_bg)
 
     out: list[ObjectPose | None] = []
     prev: ObjectPose | None = None
     self._episode = _EpisodeContext()
-    for img, mask in zip(frame_list, masks):
+    for t, (img, mask) in enumerate(zip(frame_list, masks)):
       if mask is None:
         out.append(None)
         continue
-      pose = self._fit_pose(img, mask, prev)
+      is_keyframe = (t in kfs)
+      if is_keyframe and t != 0:
+        # Cold-start at this keyframe: bypass the warm-start path by
+        # passing prev=None. The cached rest hypothesis stays so we
+        # don't re-run the 8-fit rest-class search, but xy/dz/tilt/yaw
+        # all get re-derived from the current frame's mask.
+        pose = self._fit_pose(img, mask, prev_pose=None)
+      else:
+        pose = self._fit_pose(img, mask, prev)
+      if pose is not None and is_keyframe:
+        # Flag keyframe poses as maximally confident so the smoother's
+        # observation-noise heuristic treats them as anchors and pulls
+        # warm-started frames toward them.
+        pose.confidence = 1.0
       out.append(pose)
       if pose is not None:
         prev = pose
@@ -307,14 +337,22 @@ class ObjectPoseEstimator:
       )
 
     # Warm-started frame: pull rest hypothesis + tilt/dz from the
-    # episode-locked cache (rest) and the previous frame's pose
-    # (xy, yaw, tilt encoded in xyz_mm[2] - rest.z_mm).
+    # episode-locked cache (rest). Yaw warm-starts from the previous
+    # frame (the object can't rotate far between frames). For (x, y)
+    # we re-seed from the current frame's mask-centroid back-projected
+    # to the mesh-centroid plane (z = prev_pose.xyz_mm[2]). The
+    # polyhedron is nearly spherical in silhouette, so silhouette
+    # gradient w.r.t. (x, y) is weak: if we seeded at the previous
+    # frame's xy the optimizer would converge immediately on the
+    # already-overlapping render and never actually track the object.
     rest = self._episode.resting
     yaw  = prev_pose.yaw_rad
-    xy   = prev_pose.xy_mm.copy()
-    prev_dz  = float(prev_pose.xyz_mm[2] - rest.z_mm)
-    prev_rpy = (0.0, 0.0, yaw)  # tilt isn't tracked frame-to-frame
-    xy_ref, yaw_ref, sil_rms = self._refine_silhouette(mask, rest, xy, yaw)
+    prev_z_world = float(prev_pose.xyz_mm[2])
+    xy_seed = _back_project_centroid(mask, self.camera, z_plane=prev_z_world)
+    if xy_seed is None:
+      xy_seed = prev_pose.xy_mm.copy()
+    prev_dz = float(prev_pose.xyz_mm[2] - rest.z_mm * self._z_sign)
+    xy_ref, yaw_ref, sil_rms = self._refine_silhouette(mask, rest, xy_seed, yaw)
     return _make_pose(
       self.mesh, rest, xy_ref, prev_dz, (0.0, 0.0, yaw_ref),
       residual_px=sil_rms,
@@ -767,7 +805,14 @@ def _small_tilt(roll: float, pitch: float) -> np.ndarray:
   return Ry @ Rx
 
 
-def _back_project_centroid(mask: np.ndarray, cam: Camera) -> np.ndarray | None:
+def _back_project_centroid(mask: np.ndarray, cam: Camera,
+                            z_plane: float = 0.0) -> np.ndarray | None:
+  """Back-project the mask centroid onto the world plane at z=``z_plane``.
+
+  Defaults to the mat plane (z=0). Pass ``z_plane = rest.z_mm`` to land
+  at the height of the mesh centroid instead, which is what warm-started
+  per-frame fits should seed from.
+  """
   import cv2
   ys, xs = np.where(mask)
   if xs.size == 0:
@@ -783,7 +828,7 @@ def _back_project_centroid(mask: np.ndarray, cam: Camera) -> np.ndarray | None:
   origin_world = -cam.R_world_cam.T @ cam.t_world_cam.reshape(3)
   if abs(ray_world[2]) < 1e-9:
     return None
-  s = -origin_world[2] / ray_world[2]
+  s = (z_plane - origin_world[2]) / ray_world[2]
   hit = origin_world + s * ray_world
   return hit[:2]
 
