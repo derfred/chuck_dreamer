@@ -38,12 +38,18 @@ class Controller:
     """Start the policy. The first call resets the underlying policy.
 
     Subsequent ``start()`` calls while running are no-ops so a stray
-    keypress doesn't reset latent state mid-run.
+    keypress doesn't reset latent state mid-run. When the wrapped
+    policy is a :class:`~chuck_dreamer.policy.GatedPolicy` we also
+    release its gate so :meth:`act` starts delegating to the inner
+    planner / actor instead of returning the hold action.
     """
     if self.state == "running":
       return
     if not self._started:
       self.policy.reset(initial_obs)
+      release = getattr(self.policy, "release", None)
+      if callable(release):
+        release()
       self._started = True
     self.state = "running"
 

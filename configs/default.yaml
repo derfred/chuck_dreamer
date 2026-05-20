@@ -11,16 +11,19 @@ model:
   encoder:
     embed_size: 200
     mlp_hidden: [200, 200]
-    cnn_channels: [32, 64, 128, 256]
-    cnn_kernels:  [4, 4, 4, 4]
-    cnn_strides:  [2, 2, 2, 2]
+    # Wider early channels + 128×128 input so a ~3 px ball survives more
+    # conv stages before going sub-pixel. Five stride-2 stages bottleneck
+    # at 4×4 spatial as before.
+    cnn_channels: [96, 192, 256, 256, 256]
+    cnn_kernels:  [4, 4, 4, 4, 4]
+    cnn_strides:  [2, 2, 2, 2, 2]
     # Derived: 4 * prod(cnn_strides) so the encoder bottlenecks at 4×4 spatial.
     image_size: ${derive_image_size:${.cnn_strides}}
   decoder:
     mlp_hidden: [200, 200]
-    cnn_channels: [32, 64, 128, 256]
-    cnn_kernels:  [4, 4, 4, 4]
-    cnn_strides:  [2, 2, 2, 2]
+    cnn_channels: [96, 192, 256, 256, 256]
+    cnn_kernels:  [4, 4, 4, 4, 4]
+    cnn_strides:  [2, 2, 2, 2, 2]
   reward:
     hidden: [200, 200]
   aux:
@@ -137,7 +140,7 @@ eval:
     horizon: 15              # Open-loop horizon length (steps after burn_in).
 
 hardware:
-  device: "mlx"  # "auto", "mlx", "cpu", "gpu", "mps"
+  device: "mlx"  # "auto", "mlx", "cpu", "cuda", "mps"
 
 real:
   # Camera opened via cv2.VideoCapture. ``source`` accepts an integer index
@@ -186,6 +189,7 @@ real:
       num_samples:    256
       num_elites:     32
       num_iterations: 4
+      discount:       1.0    # geometric reward discount over the plan horizon
 
   # Control loop pacing.
   control_dt:        0.1    # seconds between policy steps

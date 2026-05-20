@@ -57,13 +57,30 @@ class RunSettings:
 # ---------------------------------------------------------------------------
 
 
+def _hold_qpos(obs: dict) -> np.ndarray:
+  """Hold-action for the real arm: command the current joint qpos.
+
+  Used by :class:`~chuck_dreamer.policy.GatedPolicy` when wrapping a
+  model-based policy on the real arm — the gate isn't actually called
+  in practice (``Controller`` keeps the runner from sending anything
+  while idle), but the wrapper still needs a sane default in case a
+  caller does invoke ``act`` before release.
+  """
+  return np.asarray(obs["arm_qpos"], dtype=np.float32)
+
+
 def _build_policy(cfg) -> RealPolicy:
   """Pick and construct the policy advertised by ``cfg.real.policy``.
 
-  The manual policy is self-contained. The checkpoint-based policies
-  (Dreamer actor, CEM) load a trained world model via the eval
-  ``load_checkpoint`` path so the rebuild matches the trainer.
+  The manual policy is self-contained and runs immediately on start.
+  The checkpoint-based policies (Dreamer actor, CEM) load a trained
+  world model via the eval ``load_checkpoint`` path and are wrapped in
+  :class:`~chuck_dreamer.policy.GatedPolicy` so the inner planner /
+  actor only sees observations from the moment the operator hits the
+  start key.
   """
+  from ...policy import GatedPolicy
+
   ptype = cfg.real.policy.type
   if ptype == "manual":
     m = cfg.real.policy.manual
@@ -80,22 +97,34 @@ def _build_policy(cfg) -> RealPolicy:
     if not d.checkpoint:
       raise ValueError("real.policy.dreamer.checkpoint must be set")
     loaded = load_checkpoint(str(d.checkpoint))
-    return DreamerPolicyAdapter(loaded.model, sample=bool(d.sample))
+    return GatedPolicy(
+      DreamerPolicyAdapter(loaded.model, sample=bool(d.sample)),
+      hold_action=_hold_qpos,
+    )
   if ptype == "cem":
     from ...eval.checkpoint import load_checkpoint
     c = cfg.real.policy.cem
     if not c.checkpoint:
       raise ValueError("real.policy.cem.checkpoint must be set")
     loaded = load_checkpoint(str(c.checkpoint))
-    return CEMPolicyAdapter(
-      loaded.model,
-      CEMRunConfig(
-        checkpoint=str(c.checkpoint),
-        horizon=int(c.horizon),
-        num_samples=int(c.num_samples),
-        num_elites=int(c.num_elites),
-        num_iterations=int(c.num_iterations),
+    # Action bounds come from the env that was rebuilt alongside the
+    # checkpoint — that's the env CEM is implicitly planning for.
+    action_space = loaded.env.action_space
+    return GatedPolicy(
+      CEMPolicyAdapter(
+        loaded.model,
+        CEMRunConfig(
+          checkpoint=str(c.checkpoint),
+          horizon=int(c.horizon),
+          num_samples=int(c.num_samples),
+          num_elites=int(c.num_elites),
+          num_iterations=int(c.num_iterations),
+          discount=float(c.get("discount", 1.0)) if hasattr(c, "get") else 1.0,
+          action_low=action_space.low,
+          action_high=action_space.high,
+        ),
       ),
+      hold_action=_hold_qpos,
     )
   raise ValueError(f"unknown real.policy.type: {ptype!r}")
 

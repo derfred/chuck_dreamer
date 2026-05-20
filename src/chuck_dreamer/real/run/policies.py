@@ -155,12 +155,19 @@ class CEMRunConfig:
   num_samples:    int = 256
   num_elites:     int = 32
   num_iterations: int = 4
+  discount:       float = 1.0
+  action_low:     np.ndarray | None = None
+  action_high:    np.ndarray | None = None
 
 
 class CEMPolicyAdapter:
   def __init__(self, model, run_cfg: CEMRunConfig) -> None:
     from ...dreamer.cem_policy import CEMPolicy
 
+    if run_cfg.action_low is None or run_cfg.action_high is None:
+      raise ValueError(
+        "CEMRunConfig requires action_low/action_high — pass env.action_space bounds."
+      )
     self.model = model
     self._cem  = CEMPolicy(
       model,
@@ -168,6 +175,9 @@ class CEMPolicyAdapter:
       num_samples=run_cfg.num_samples,
       num_elites=run_cfg.num_elites,
       num_iterations=run_cfg.num_iterations,
+      discount=run_cfg.discount,
+      action_low=run_cfg.action_low,
+      action_high=run_cfg.action_high,
     )
 
   def reset(self, initial_obs: dict) -> None:

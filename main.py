@@ -219,34 +219,93 @@ def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
 @cli.command("show-scene")
 @click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
 @click.option("--step-delay", default=0.05, type=float, help="Seconds to sleep between steps (default 0.05)")
+@click.option("--policy", "policy_type", default="scripted",
+              type=click.Choice(["scripted", "cem", "dreamer"]),
+              help="Which policy to drive the scene with. cem/dreamer load a "
+                   "trained world model from --checkpoint and are wrapped in a "
+                   "GatedPolicy that holds the arm still until you press Space, "
+                   "then hands off control.")
+@click.option("--checkpoint", "checkpoint_path", default=None, type=str,
+              help="Path to a trained .safetensors checkpoint. Required for "
+                   "--policy cem and --policy dreamer.")
+@click.option("--close", "close_on_done", is_flag=True, default=False,
+              help="Close the viewer as soon as the episode terminates. "
+                   "Default: leave the window open so you can inspect the final state.")
 @override_option
 @click.pass_context
-def show_scene(ctx, seed, step_delay, overrides):
+def show_scene(ctx, seed, step_delay, policy_type, checkpoint_path, close_on_done, overrides):
   """Generate a scene and run it in the interactive MuJoCo viewer.
 
-  Drives the scripted policy directly so the user can press Space to
-  advance from ``ready`` → ``approach`` and see the heuristic push play
-  out, with hint geoms drawn while the policy is in ``ready``.
+  With ``--policy scripted`` (default) the user presses Space to advance
+  the heuristic policy from ``ready`` → ``approach``. With ``--policy
+  cem`` or ``--policy dreamer`` the policy is wrapped in
+  :class:`~chuck_dreamer.policy.GatedPolicy`, which holds the arm in its
+  initial pose until Space is pressed, then hands off to the underlying
+  planner / actor.
+
+  After the episode terminates the window stays open by default so the
+  final state can be inspected; pass ``--close`` to exit immediately.
   """
   import time
   import mujoco
   import mujoco.viewer
+  import numpy as np
 
+  from chuck_dreamer.policy import GatedPolicy
   from chuck_dreamer.sim import PushingEnv, ScriptedPolicy
 
   cfg = load_config(ctx.obj["config_path"], overrides=overrides, aliases={"seed": seed})
 
-  click.echo(f"difficulty={cfg.env.difficulty}  seed={cfg.seed}")
+  click.echo(f"difficulty={cfg.env.difficulty}  seed={cfg.seed}  policy={policy_type}")
   env    = PushingEnv(cfg)
-  policy = ScriptedPolicy()
   scene  = env.generate_scene()
   obs, _ = env.reset(scene=scene)
-  policy.reset(scene)
+
+  if policy_type == "scripted":
+    policy = ScriptedPolicy()
+    policy.reset(scene)
+  else:
+    if not checkpoint_path:
+      raise click.BadParameter(f"--checkpoint is required for --policy {policy_type}")
+    from chuck_dreamer.eval.checkpoint import load_checkpoint
+
+    loaded = load_checkpoint(checkpoint_path)
+    if policy_type == "cem":
+      from chuck_dreamer.dreamer import CEMPolicy
+      c = cfg.real.policy.cem
+      inner = CEMPolicy(
+        loaded.model,
+        horizon=int(c.horizon),
+        num_samples=int(c.num_samples),
+        num_elites=int(c.num_elites),
+        num_iterations=int(c.num_iterations),
+        discount=float(c.get("discount", 1.0)),
+        action_low=env.action_space.low,
+        action_high=env.action_space.high,
+      )
+    else:
+      from chuck_dreamer.dreamer import DreamerPolicy
+      inner = DreamerPolicy(loaded.model, act_mode=env.act_mode)
+    def _hold_action(o):
+      if env.act_mode == "joint":
+        return np.asarray(o["arm_qpos"], dtype=np.float32)
+      return np.concatenate([
+        np.asarray(o["ee_pos"],  dtype=np.float32),
+        np.asarray(o["ee_quat"], dtype=np.float32),
+      ])
+
+    policy = GatedPolicy(inner, hold_action=_hold_action, project=env.policy_obs)
+    policy.reset(scene)
 
   def key_callback(keycode):
-    if keycode == 32 and policy.state == "ready":  # Space bar
+    if keycode != 32:  # Space bar
+      return True
+    if isinstance(policy, ScriptedPolicy) and policy.state == "ready":
       policy.advance_from_ready()
       print("Policy state changed: ready → approach")
+    elif isinstance(policy, GatedPolicy) and not policy.released:
+      policy.release()
+      print(f"Released gated policy → {policy_type} now in control")
     return True
 
   click.echo("Launching MuJoCo viewer — close the window to exit.")
@@ -258,20 +317,30 @@ def show_scene(ctx, seed, step_delay, overrides):
     if main_cam_id >= 0:
       v.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
       v.cam.fixedcamid = main_cam_id
-    while v.is_running():
-      prev_state = policy.state
-      action = policy.act(obs)
-      obs, _, terminated, truncated, _ = env.step(action)
-      if policy.state != prev_state:
-        print(f"Policy state changed: {prev_state} → {policy.state}")
 
-      policy.insert_hints(v)
+    done = False
+    while v.is_running():
+      if not done:
+        prev_state = policy.state if isinstance(policy, ScriptedPolicy) else None
+        action = policy.act(obs)
+        obs, _, terminated, truncated, _ = env.step(action)
+
+        if isinstance(policy, ScriptedPolicy):
+          if policy.state != prev_state:
+            print(f"Policy state changed: {prev_state} → {policy.state}")
+          policy.insert_hints(v)
+
+        if terminated or truncated or (
+          isinstance(policy, ScriptedPolicy) and policy.state == "done"
+        ):
+          done = True
+          if close_on_done:
+            break
+          click.echo("Episode finished — window stays open; close it (or pass --close) to exit.")
+
       v.sync()
       if step_delay > 0:
         time.sleep(step_delay)
-
-      if terminated or truncated or policy.state == "done":
-        break
 
   env.close()
 
