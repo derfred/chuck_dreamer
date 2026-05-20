@@ -262,6 +262,7 @@ class DeepEvalRunner:
       "burn_in":         int(burn_in),
       "horizon":         int(horizon),
       "seed":            int(self.config.seed),
+      "device":          str(self.config.hardware.device),
     }
     base_parameters.update(extra_params)
 
@@ -298,7 +299,7 @@ class DeepEvalRunner:
     from .core import load_eval_episodes, run_split_rollout
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    ckpt = load_checkpoint(checkpoint_path)
+    ckpt = load_checkpoint(checkpoint_path, device=str(self.config.hardware.device))
 
     fmt = str(self.config.logging.episodes.dump_format)
     writer = EpisodeWriter(str(output_dir), format=fmt)

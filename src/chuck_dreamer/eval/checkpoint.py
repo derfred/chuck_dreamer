@@ -30,12 +30,17 @@ class LoadedCheckpoint:
   path:      str
 
 
-def load_checkpoint(path: str) -> LoadedCheckpoint:
+def load_checkpoint(path: str, *, device: str | None = None) -> LoadedCheckpoint:
   """Reload a safetensors checkpoint into a runnable model.
 
   Pulls the embedded config from the file, rebuilds the env to derive
   obs/action shapes, builds the model with those shapes, switches it to
   eval mode, and loads the weights.
+
+  ``device``, if given, overrides ``hardware.device`` in the embedded
+  config — used to re-evaluate a CUDA-trained checkpoint on an MLX
+  machine (or vice versa). The on-disk weight format is cross-backend
+  by design (see :mod:`chuck_dreamer.dreamer.torch_model`).
 
   Raises ``RuntimeError`` if the checkpoint has no embedded config — old
   checkpoints from before the metadata block was added would need to be
@@ -51,6 +56,8 @@ def load_checkpoint(path: str) -> LoadedCheckpoint:
       f"checkpoint {path!r} has no embedded config metadata; "
       "re-save with a current Trainer to embed the config."
     )
+  if device is not None:
+    config.hardware.device = device
 
   env        = PushingEnv(config)
   obs_shape  = env.model_obs_shape
