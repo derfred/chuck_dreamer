@@ -139,6 +139,32 @@ class Arm:
     self.disconnect()
 
   # ------------------------------------------------------------------
+  # Torque control
+  # ------------------------------------------------------------------
+
+  def compliant(self):
+    """Context manager that disables motor torque while inside the block.
+
+    With torque off the SO-101's Feetech servos free-spin under hand
+    force, so the operator can back-drive the arm to a target pose. Reads
+    via :meth:`read_joint_qpos` keep working — the bus still reports
+    encoder positions even with torque disabled. On exit the bus
+    re-enables torque, locking the arm at whatever pose it ended up in.
+
+    In dry-run mode this is a no-op so calibration code can be exercised
+    without hardware. Use::
+
+        with arm.compliant():
+            q = arm.read_joint_qpos()    # operator-positioned pose
+    """
+    import contextlib
+
+    if self.is_dry_run:
+      return contextlib.nullcontext()
+    assert self._follower is not None, "Arm.compliant() before connect()"
+    return self._follower.bus.torque_disabled()
+
+  # ------------------------------------------------------------------
   # I/O
   # ------------------------------------------------------------------
 
