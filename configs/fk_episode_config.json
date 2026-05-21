@@ -1,0 +1,64 @@
+{
+  "prototypes": {
+    "three_touch": ["left-middle", "origin", "right-middle"],
+    "seven_touch": ["left-middle", "origin", "right-middle",
+                    "left-far", "left-near", "right-near", "right-far"]
+  },
+  "datasets": [
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_3",
+      "prototype":  "three_touch",
+      "episodes":   [5, 6, 7]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_2",
+      "prototype":  "three_touch",
+      "episodes":   [5, 6, 7]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_2_1805_1",
+      "prototype":  "three_touch",
+      "episodes":   [5, 6, 7]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_6",
+      "prototype":  "three_touch",
+      "episodes":   [5, 6, 7]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_5",
+      "prototype":  "three_touch",
+      "episodes":   [5, 6, 7]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_4",
+      "prototype":  "three_touch",
+      "episodes":   [5, 6, 7]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_3",
+      "prototype":  "three_touch",
+      "episodes":   [5, 6, 7]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task_1_1805_2",
+      "prototype":  "three_touch",
+      "episodes":   [5, 6, 7]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task1_2005_3_20260520_195038",
+      "prototype":  "seven_touch",
+      "episodes":   [4, 5, 6, 7, 8, 9, 10]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task1_2005_2_20260520_191951",
+      "prototype":  "seven_touch",
+      "episodes":   [4, 5, 6, 7, 8, 9, 10]
+    },
+    {
+      "dataset_id": "chorfiyoussef/task1_2005_1_20260520_181642",
+      "prototype":  "seven_touch",
+      "episodes":   [4, 5, 6, 7, 8, 9, 10]
+    }
+  ]
+}
