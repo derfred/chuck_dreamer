@@ -189,6 +189,91 @@ class CEMPolicyAdapter:
 
 
 # ---------------------------------------------------------------------------
+# Corner-touch demo policy: cycle through 4 mat-frame waypoints via IK
+# ---------------------------------------------------------------------------
+
+
+# Gripper-down quaternion (wxyz). 180° rotation about the world x-axis so
+# the gripper z-axis points into the mat. Matches `_EE_QUAT_DOWN` used by
+# the lerobot import pipeline.
+_EE_QUAT_DOWN_WXYZ: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 0.0)
+
+
+@dataclass
+class CornerTouchConfig:
+  """Cycle through the four mat corners by IK on world-frame targets.
+
+  Targets are XY pairs in **mat-frame mm** relative to the origin touch.
+  ``hover_z_mm`` lifts the gripper above z=0 so we don't drive into the
+  mat. ``dwell_s`` is how long to hold each waypoint before stepping to
+  the next.
+  """
+  corners_xy_mm: tuple[tuple[float, float], ...] = (
+    (-150.0, -80.0),
+    (+150.0, -80.0),
+    (+150.0, +80.0),
+    (-150.0, +80.0),
+  )
+  hover_z_mm:  float = 30.0
+  dwell_s:     float = 1.5
+
+
+class CornerTouchPolicy:
+  """Emits 7-D EE actions cycling through mat-frame corner waypoints.
+
+  The waypoints are given in the mat/world frame relative to the
+  ``origin`` touch point. They're transformed once at construction into
+  the arm base frame via the calibrated ``T_world_arm``; from then on
+  each ``act()`` returns the current waypoint as
+  ``[x, y, z, qw, qx, qy, qz]`` (metres, gripper-down quaternion) — the
+  same shape the CEM/Dreamer EE policies emit, so the existing IK
+  adapter in the runner handles it without changes.
+
+  Advances to the next waypoint after ``dwell_s`` seconds of wallclock
+  time at the current one. Loops indefinitely.
+  """
+
+  def __init__(self, R_world_arm: np.ndarray, t_world_arm_mm: np.ndarray,
+               config: CornerTouchConfig) -> None:
+    # T_world_arm: p_world = R @ p_arm + t  (mm). Invert for world → arm.
+    R = np.asarray(R_world_arm, dtype=np.float64)
+    t = np.asarray(t_world_arm_mm, dtype=np.float64).reshape(3)
+    if R.shape != (3, 3):
+      raise ValueError(f"R_world_arm must be (3, 3), got {R.shape}")
+
+    targets_arm_m: list[np.ndarray] = []
+    for cx_mm, cy_mm in config.corners_xy_mm:
+      # World-frame target (mm). The corners are XY offsets from the
+      # origin touch (which is the world frame origin by construction);
+      # z is the hover height above the mat.
+      p_world_mm = np.array([cx_mm, cy_mm, config.hover_z_mm], dtype=np.float64)
+      p_arm_mm   = R.T @ (p_world_mm - t)
+      targets_arm_m.append((p_arm_mm * 1e-3).astype(np.float32))
+    self._targets_arm_m = targets_arm_m
+    self._quat = np.asarray(_EE_QUAT_DOWN_WXYZ, dtype=np.float32)
+    self._dwell_s = float(config.dwell_s)
+    self._idx = 0
+    self._waypoint_t0: float | None = None
+
+  def reset(self, initial_obs: dict) -> None:
+    self._idx = 0
+    self._waypoint_t0 = None
+
+  def act(self, obs: dict) -> np.ndarray:
+    import time as _time
+
+    now = _time.monotonic()
+    if self._waypoint_t0 is None:
+      self._waypoint_t0 = now
+    elif now - self._waypoint_t0 >= self._dwell_s:
+      self._idx = (self._idx + 1) % len(self._targets_arm_m)
+      self._waypoint_t0 = now
+
+    pos = self._targets_arm_m[self._idx]
+    return np.concatenate([pos, self._quat]).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
 # Probe-based CEM adapter
 # ---------------------------------------------------------------------------
 

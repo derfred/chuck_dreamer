@@ -200,7 +200,7 @@ real:
   # Policy used to control the arm. ``type`` selects the implementation;
   # the matching subsection feeds its kwargs.
   policy:
-    type: "manual"   # "manual" | "dreamer" | "cem"
+    type: "manual"   # "manual" | "dreamer" | "cem" | "corner_touch"
     manual:
       # Serial port for the SO-101 *leader* arm (the one the operator
       # moves by hand). The manual policy reads its joint positions
@@ -218,6 +218,28 @@ real:
       num_elites:     32
       num_iterations: 4
       discount:       1.0    # geometric reward discount over the plan horizon
+    # Scripted demo policy: cycle through corner waypoints expressed in
+    # mat/world-frame mm (relative to the `origin` touch). Requires
+    # T_world_arm to be present in the calibration bundle (i.e. you
+    # ran `annotate-live` with the arm step) and `--calibration` to
+    # point at it. Goes through IK → joints just like CEM/Dreamer EE
+    # actions, so the runner's IK adapter is reused.
+    corner_touch:
+      # XY corners in mat-frame mm relative to the origin touch point.
+      corners_xy_mm: [[-150, -80], [150, -80], [150, 80], [-150, 80]]
+      hover_z_mm:    30.0   # height above the mat plane (z=0) per waypoint
+      dwell_s:       1.5    # seconds to hold each waypoint before advancing
+
+  # Safety guards applied by the runner around the policy → arm path.
+  # These are last-line-of-defence clamps; the policy should normally
+  # already respect them on its own.
+  safety:
+    # World-frame z floor for EE-mode actions (mm). Any 7-D EE action
+    # commanding a z below this gets clipped back up before IK. Only
+    # active when the calibration bundle carries T_world_arm. Set
+    # generously above the actual mat thickness — the gripper is at the
+    # ee_tip frame, not the contact patch.
+    min_hover_z_mm:    10.0
 
   # Control loop pacing. 60 Hz matches upstream `lerobot-teleoperate`
   # and is what the leader→follower teleop needs to feel direct;

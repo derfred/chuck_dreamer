@@ -36,6 +36,8 @@ from .controller import Controller
 from .policies import (
   CEMPolicyAdapter,
   CEMRunConfig,
+  CornerTouchConfig,
+  CornerTouchPolicy,
   DreamerPolicyAdapter,
   ManualPolicy,
   ManualPolicyConfig,
@@ -206,7 +208,27 @@ def _hold_qpos(obs: dict) -> np.ndarray:
   return np.asarray(obs["arm_qpos"], dtype=np.float32)
 
 
-def _build_policy(cfg) -> RealPolicy:
+def _read_t_world_arm(calibration_path) -> tuple[np.ndarray, np.ndarray] | None:
+  """Return ``(R_world_arm, t_world_arm_mm)`` from a calib bundle JSON.
+
+  ``CalibrationBundle`` only carries the camera fields; the arm-to-world
+  block was added later and lives in the raw JSON as ``T_world_arm``.
+  Returns ``None`` if the file lacks it (e.g. ``annotate-live --skip-arm``).
+  """
+  import json
+  from pathlib import Path
+  if calibration_path is None:
+    return None
+  blob = json.loads(Path(calibration_path).read_text())
+  twa = blob.get("T_world_arm")
+  if not twa or twa.get("R") is None:
+    return None
+  R = np.asarray(twa["R"], dtype=np.float64)
+  t = np.asarray(twa["t"], dtype=np.float64).reshape(3)
+  return R, t
+
+
+def _build_policy(cfg, calibration_path=None) -> RealPolicy:
   """Pick and construct the policy advertised by ``cfg.real.policy``.
 
   The manual policy is self-contained and runs immediately on start.
@@ -219,6 +241,25 @@ def _build_policy(cfg) -> RealPolicy:
   from ...policy import GatedPolicy
 
   ptype = cfg.real.policy.type
+  if ptype == "corner_touch":
+    twa = _read_t_world_arm(calibration_path)
+    if twa is None:
+      raise ValueError(
+        "real.policy.corner_touch requires T_world_arm in the "
+        "calibration bundle. Run `annotate-live` (with the arm step) "
+        "and pass --calibration <bundle.json>.")
+    R, t = twa
+    ct = cfg.real.policy.get("corner_touch", {}) if hasattr(cfg.real.policy, "get") else {}
+    corners_raw = ct.get("corners_xy_mm", None) if hasattr(ct, "get") else None
+    if corners_raw is None:
+      corners = CornerTouchConfig().corners_xy_mm
+    else:
+      corners = tuple((float(x), float(y)) for x, y in corners_raw)
+    hover_z = float(ct.get("hover_z_mm", 30.0)) if hasattr(ct, "get") else 30.0
+    dwell   = float(ct.get("dwell_s",    1.5))  if hasattr(ct, "get") else 1.5
+    return CornerTouchPolicy(R, t, CornerTouchConfig(
+      corners_xy_mm=corners, hover_z_mm=hover_z, dwell_s=dwell,
+    ))
   if ptype == "manual":
     m = cfg.real.policy.manual
     if not m.port:
@@ -380,7 +421,7 @@ def run(cfg) -> None:
     use_degrees=bool(cfg.real.arm.use_degrees),
   )
 
-  policy = _build_policy(cfg)
+  policy = _build_policy(cfg, calibration_path=calibration_path)
   controller = Controller(policy)
 
   # Build the IK adapter once if the configured policy can emit
@@ -388,9 +429,29 @@ def run(cfg) -> None:
   # the action loop) so the URDF parse + placo init don't add per-step
   # latency. ``ManualPolicy`` already emits joint qpos so we skip it.
   ik: _EEToJointsIK | None = None
-  if str(cfg.real.policy.type) in ("cem", "dreamer"):
+  if str(cfg.real.policy.type) in ("cem", "dreamer", "corner_touch"):
     ik = _EEToJointsIK()
     logger.info("IK adapter built (URDF=%s)", _URDF_PATH)
+
+  # World-frame z-floor for EE actions. Defends against a runaway policy
+  # commanding the gripper into the mat. Engaged only for 7-D EE actions
+  # and only when T_world_arm is available; without calibration we can't
+  # define the world-z axis. Set via real.safety.min_hover_z_mm; default
+  # 10 mm above the mat plane.
+  min_hover_z_m = float(cfg.real.get("safety", {}).get("min_hover_z_mm", 10.0)
+                        if hasattr(cfg.real, "get") else 10.0) * 1e-3
+  t_world_arm_state: tuple[np.ndarray, np.ndarray] | None = None
+  twa = _read_t_world_arm(calibration_path)
+  if twa is not None:
+    # Stored as mm; the runtime works in metres so convert t.
+    R_wa, t_wa_mm = twa
+    t_world_arm_state = (R_wa, t_wa_mm * 1e-3)
+    logger.info("EE z-floor clamp armed at world z = %.1f mm", min_hover_z_m * 1e3)
+  elif str(cfg.real.policy.type) in ("cem", "dreamer", "corner_touch"):
+    logger.warning(
+      "no T_world_arm in calibration bundle — EE z-floor safety clamp "
+      "is DISABLED. Make sure your policy can't command the gripper "
+      "into the mat.")
 
   start_keycode = ord(settings.start_key[0])
 
@@ -454,6 +515,21 @@ def run(cfg) -> None:
             if action.shape == (6,):
               joint_action = action
             elif action.shape == (7,) and ik is not None:
+              # Z-floor safety clamp. Policy emits EE pose in the arm
+              # base frame (metres); the mat plane sits at some
+              # arm-frame z which depends on T_world_arm. We can't know
+              # that floor from inside the runner without re-reading the
+              # bundle, so we clamp in *world frame* by transforming
+              # action.xyz through T_world_arm, clipping z, and
+              # transforming back. No-op when no calibration is loaded
+              # (we then can't define a world z anyway).
+              if t_world_arm_state is not None:
+                R_wa, t_wa_m = t_world_arm_state
+                p_world = R_wa @ action[:3] + t_wa_m
+                if p_world[2] < min_hover_z_m:
+                  p_world[2] = min_hover_z_m
+                  action = action.copy()
+                  action[:3] = R_wa.T @ (p_world - t_wa_m)
               try:
                 joint_action = ik.solve(action, current_qpos)
               except Exception as e:  # noqa: BLE001 — placo errors vary
