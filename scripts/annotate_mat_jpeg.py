@@ -25,8 +25,9 @@ from chuck_dreamer.real.object_localization.runtime import init_from_config
 def main() -> None:
   ap = argparse.ArgumentParser()
   ap.add_argument("image", type=Path)
-  ap.add_argument("--calib", type=Path, default=Path("calib_live.json"),
-                  help="JSON with 'intrinsics.K' and 'intrinsics.dist'.")
+  ap.add_argument("--calib", type=Path,
+                  default=Path("calibration_cache/intrinsics.json"),
+                  help="intrinsics.json from calibration_cache (top-level 'K','dist').")
   ap.add_argument("--config", type=str, default=None,
                   help="Optional config overlay yaml; defaults to package defaults.")
   ap.add_argument("--out", type=Path, default=Path("annotate_mat_out"))
@@ -37,7 +38,7 @@ def main() -> None:
     raise SystemExit(f"could not read {args.image}")
   rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-  calib = json.loads(args.calib.read_text())["intrinsics"]
+  calib = json.loads(args.calib.read_text())
   K = np.asarray(calib["K"], dtype=np.float64)
   dist = np.asarray(calib["dist"], dtype=np.float64)
 
