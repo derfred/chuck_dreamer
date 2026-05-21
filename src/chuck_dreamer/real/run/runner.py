@@ -196,6 +196,27 @@ def _seed_cem_from_current_pose(
     )
 
 
+def _policy_obs_mode_has_ee(policy) -> bool:
+  """Return True if the loaded model's ``obs_mode`` includes ``"ee"``.
+
+  Looks through :class:`~chuck_dreamer.policy.GatedPolicy` wrapping at
+  ``.inner`` and then at ``.model.obs_mode``. Returns ``False`` for
+  policies that don't carry a model (e.g. ``ManualPolicy``,
+  ``CornerTouchPolicy``) — those have nothing to feed observations to.
+  """
+  from chuck_dreamer.policy import GatedPolicy
+  from ...training.observation import EE, normalize_obs_mode
+
+  inner = policy.inner if isinstance(policy, GatedPolicy) else policy
+  model = getattr(inner, "model", None)
+  if model is None:
+    return False
+  obs_mode = getattr(model, "obs_mode", None)
+  if obs_mode is None:
+    return False
+  return EE in normalize_obs_mode(obs_mode)
+
+
 def _hold_qpos(obs: dict) -> np.ndarray:
   """Hold-action for the real arm: command the current joint qpos.
 
@@ -424,14 +445,21 @@ def run(cfg) -> None:
   policy = _build_policy(cfg, calibration_path=calibration_path)
   controller = Controller(policy)
 
-  # Build the IK adapter once if the configured policy can emit
-  # EE-mode (7-D) actions. We instantiate eagerly here (not inside
-  # the action loop) so the URDF parse + placo init don't add per-step
-  # latency. ``ManualPolicy`` already emits joint qpos so we skip it.
+  # Build the IK/FK adapter once if either side needs it:
+  #   * action side — the configured policy can emit EE-mode (7-D)
+  #     actions that need IK before reaching the follower.
+  #   * obs side — the loaded model's ``obs_mode`` includes ``ee``,
+  #     so we have to FK ``arm_qpos`` into a 7-D EE pose each step.
+  # We instantiate eagerly here (not inside the action loop) so the
+  # URDF parse + placo init don't add per-step latency. ``ManualPolicy``
+  # has no model and emits joint qpos, so neither side needs it there.
   ik: _EEToJointsIK | None = None
-  if str(cfg.real.policy.type) in ("cem", "dreamer", "corner_touch"):
+  action_needs_ik = str(cfg.real.policy.type) in ("cem", "dreamer", "corner_touch")
+  obs_needs_fk = _policy_obs_mode_has_ee(policy)
+  if action_needs_ik or obs_needs_fk:
     ik = _EEToJointsIK()
-    logger.info("IK adapter built (URDF=%s)", _URDF_PATH)
+    logger.info("IK adapter built (URDF=%s, action_ik=%s, obs_fk=%s)",
+                _URDF_PATH, action_needs_ik, obs_needs_fk)
 
   # World-frame z-floor for EE actions. Defends against a runaway policy
   # commanding the gripper into the mat. Engaged only for 7-D EE actions
@@ -481,14 +509,17 @@ def run(cfg) -> None:
           fps = 0.9 * fps + 0.1 * (1.0 / dt)
         fps_t = now
 
-        # Build obs from the live state of the world. Without an IK
-        # solver we don't carry an EE pose; policies that need one have
-        # to track it internally.
+        # Build obs from the live state of the world. ``ee`` is only
+        # populated when the FK adapter exists — policies that don't need
+        # it (manual teleop, image/proprio-only checkpoints) never see
+        # the key, so the FK call is skipped entirely for them.
         current_qpos = arm.read_joint_qpos()
         obs = {
           "image":    rgb,
           "arm_qpos": current_qpos.astype(np.float32),
         }
+        if ik is not None and obs_needs_fk:
+          obs["ee"] = ik.current_ee_action(current_qpos)
 
         # Hand off to the controller at control_dt cadence — camera
         # refreshes faster than control to keep the HUD lively.

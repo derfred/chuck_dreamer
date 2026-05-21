@@ -31,7 +31,6 @@ EXCLUDES=(
   --exclude=.git/
   --exclude=__pycache__/
   --exclude='*.safetensors'
-  --exclude=calibration_cache/
   --exclude=.venv/
   --exclude='*.pyc'
 
@@ -44,6 +43,7 @@ EXCLUDES=(
   --exclude=data/warmup-old
   --exclude=checkpoints
   --exclude=data/real_imported
+  --exclude=data/task2_t
 )
 # -----------------------------------------------------------------------------
 
@@ -160,12 +160,30 @@ done
 # Debounce: collect bursts of changes within a short window.
 DEBOUNCE_SECS="${DEBOUNCE_SECS:-0.5}"
 
+# Clean shutdown: kill the whole process group so fswatch + subshells exit on Ctrl-C.
+FSWATCH_PID=""
+cleanup() {
+  trap - INT TERM EXIT
+  [[ -n "$FSWATCH_PID" ]] && kill "$FSWATCH_PID" 2>/dev/null || true
+  echo
+  echo "stopped."
+  exit 0
+}
+trap cleanup INT TERM
+
 if command -v fswatch >/dev/null 2>&1; then
   echo "watching for changes with fswatch (Ctrl-C to stop)..."
+  # Run fswatch in the background so the shell keeps handling signals directly.
   # -o batches events and emits a single line per batch; -l sets latency.
-  fswatch -o -l "$DEBOUNCE_SECS" "${FSWATCH_EXCLUDES[@]}" "$SRC_DIR" | while read -r _; do
+  FIFO="$(mktemp -u /tmp/rsync_watch_fifo.XXXXXX)"
+  mkfifo "$FIFO"
+  fswatch -o -l "$DEBOUNCE_SECS" "${FSWATCH_EXCLUDES[@]}" "$SRC_DIR" > "$FIFO" &
+  FSWATCH_PID=$!
+  # Reading from the FIFO in the main shell means SIGINT reaches us directly.
+  while read -r _ <"$FIFO"; do
     do_sync
   done
+  rm -f "$FIFO"
 else
   echo "fswatch not found; falling back to polling every 2s (brew install fswatch for event-driven mode)"
   LAST_HASH=""

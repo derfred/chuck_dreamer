@@ -355,10 +355,10 @@ class CEMProbePolicyAdapter:
 def _project_obs_for_model(obs: dict, obs_mode: Any) -> dict:
   """Turn the runner's flat obs dict into the per-component dict the model wants.
 
-  The runner provides ``image`` and ``arm_qpos`` only — no EE pose
-  (no IK is run here), no object pose (no detector wired up), so
-  ``ee``, ``object_xy``, and ``object_uv`` checkpoints cannot run on
-  the real arm yet. ``joints`` and ``proprio`` both work because
+  The runner provides ``image`` and ``arm_qpos`` unconditionally and
+  ``ee`` (7-D ``[x, y, z, qw, qx, qy, qz]``) when the FK adapter is
+  built. ``object_xy`` and ``object_uv`` still require a detector that
+  isn't wired up. ``joints`` and ``proprio`` both work because
   ``joint_qpos`` = ``arm_qpos``.
   """
   from ...training.observation import (
@@ -372,10 +372,18 @@ def _project_obs_for_model(obs: dict, obs_mode: Any) -> dict:
       out[c] = np.asarray(obs["image"], dtype=np.uint8)
     elif c in (JOINTS, PROPRIO):
       out[c] = np.asarray(obs["arm_qpos"], dtype=np.float32)
-    elif c in (EE, OBJECT_XY, OBJECT_UV):
+    elif c == EE:
+      if "ee" not in obs:
+        raise ValueError(
+          "obs_mode includes 'ee' but the runner did not populate obs['ee']. "
+          "Ensure the FK adapter is built (it runs automatically when the "
+          "loaded policy needs IK or its obs_mode includes 'ee')."
+        )
+      out[c] = np.asarray(obs["ee"], dtype=np.float32)
+    elif c in (OBJECT_XY, OBJECT_UV):
       raise ValueError(
         f"obs_mode component {c!r} is not supported on the real arm: "
-        f"the runner does not compute ee_pos / ee_quat / object_xy / object_uv."
+        f"the runner does not compute object_xy / object_uv."
       )
     else:
       raise ValueError(f"unknown obs_mode component {c!r}")
