@@ -19,7 +19,7 @@ from chuck_dreamer.training.tracker import Tracker
 def calls(monkeypatch):
   """Capture trackio.log payloads in-process, no real backend involved."""
   recorded: list[dict] = []
-  monkeypatch.setattr(trackio, "log", lambda payload: recorded.append(payload))
+  monkeypatch.setattr(trackio, "log", lambda payload, *, step=None: recorded.append(payload))
   return recorded
 
 
