@@ -56,7 +56,7 @@ class ScriptedPolicy:
   @property
   def goal_xy(self) -> np.ndarray:
     assert self.scene is not None
-    return np.array(self.scene.goal_pos, dtype=np.float64)
+    return np.array(self.scene.goal_xy, dtype=np.float64)
 
   @property
   def goal_xyz(self) -> np.ndarray:

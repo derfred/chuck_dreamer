@@ -148,6 +148,12 @@ _REAL_OBSTACLE_TARGET_CLEARANCE = 0.05
 # position in the "real" preset.
 _REAL_MIN_GOAL_TARGET_DISTANCE = 0.1
 
+# Probability the goal-circle is placed on the "right" side (y_near, towards
+# the arm). 1 − p puts it on the "left" side (y_far) — that matches the
+# original mat layout and is sampled the rest of the time so the policy still
+# sees both configurations.
+_REAL_GOAL_RIGHT_PROBABILITY = 2.0 / 3.0
+
 # Optional camera calibration: if this file exists we derive the "real" preset's
 # camera fovy from its fy and the calibration image height (a scale-invariant
 # ratio — render resolution doesn't have to match the calibration size).
@@ -156,6 +162,63 @@ _REAL_MIN_GOAL_TARGET_DISTANCE = 0.1
 _INTRINSICS_JSON = (
     Path(__file__).parent.parent.parent.parent / "calibration_cache" / "intrinsics.json"
 )
+
+
+def _parse_render_size(render_size: str) -> tuple[int, int]:
+  """Parse the env's ``"WxH"`` render-size string and return ``(H, W)``."""
+  w, h = render_size.lower().split("x")
+  return int(h), int(w)
+
+
+def _project_points_to_pixels(
+    points_world: list[tuple[float, float, float]],
+    cam_pos: list[float],
+    cam_look_at: list[float],
+    fovy_deg: float,
+    image_hw: tuple[int, int],
+) -> list[list[float]]:
+  """Project 3D world points through a centred pinhole into pixel (u, v).
+
+  Uses the same camera basis convention as :func:`_lookat_to_xyaxes`
+  (forward = look_at − pos, world +Z up). MuJoCo's camera looks down its
+  local -Z, so a point in front of the camera has positive *depth* along
+  forward. ``u`` is the column (left→right), ``v`` is the row (top→bottom),
+  matching the convention used by ``mask_centroids_uv``.
+  """
+  H, W = image_hw
+  pos  = np.asarray(cam_pos, dtype=float)
+  look = np.asarray(cam_look_at, dtype=float)
+  fwd  = look - pos
+  n    = float(np.linalg.norm(fwd))
+  if n < 1e-9:
+    fwd = np.array([0.0, 0.0, -1.0])
+  else:
+    fwd = fwd / n
+  world_up = np.array([0.0, 0.0, 1.0])
+  if abs(float(np.dot(fwd, world_up))) > 0.9999:
+    world_up = np.array([0.0, 1.0, 0.0])
+  right = np.cross(fwd, world_up)
+  right /= np.linalg.norm(right)
+  up    = np.cross(right, fwd)
+
+  fy = 0.5 * H / math.tan(math.radians(fovy_deg) / 2.0)
+  fx = fy   # square pixels
+  cx = (W - 1) / 2.0
+  cy = (H - 1) / 2.0
+
+  out: list[list[float]] = []
+  for p in points_world:
+    rel   = np.asarray(p, dtype=float) - pos
+    x_c   = float(np.dot(rel, right))   # camera-right
+    y_c   = float(np.dot(rel, up))      # camera-up (image +y points up in world)
+    depth = float(np.dot(rel, fwd))     # along forward (positive in front)
+    if depth <= 1e-6:
+      out.append([float("nan"), float("nan")])
+      continue
+    u = cx + fx * (x_c / depth)
+    v = cy - fy * (y_c / depth)   # image v grows downward, world up grows upward
+    out.append([u, v])
+  return out
 
 
 def _load_real_camera_fovy_deg() -> float | None:
@@ -395,7 +458,7 @@ class SceneGenerator:
       push_angle     = float(rng.uniform(0.0, 2 * math.pi))
       gx             = target.pos[0] + push_dist * math.cos(push_angle)
       gy             = target.pos[1] + push_dist * math.sin(push_angle)
-      goal_pos       = [gx, gy]
+      goal_xy        = [gx, gy]
       goal_tolerance = 0.04
 
       # Obstacles (colliding distractors). Shapes follow the preset's
@@ -452,7 +515,7 @@ class SceneGenerator:
           robot_base_pos=robot_base_pos,
           robot_initial_qpos=None,
           target=target,
-          goal_pos=goal_pos,
+          goal_xy=goal_xy,
           goal_tolerance=goal_tolerance,
           obstacles=obstacles,
           clutter=clutter,
@@ -488,15 +551,18 @@ class SceneGenerator:
       line_y_far   = _REAL_LINE_Y_FAR   + mat_offset_y
 
       # Mat layout — pattern rotated 90°: lines run along the y-axis, separated
-      # along x by D. The circle sits between the +y endpoints; the camera is
-      # fixed on the same +y side so the operator's view always frames it.
+      # along x by D. The circle sits between one pair of line endpoints —
+      # which side is sampled per-episode (2/3 "right" → y_near end, 1/3 "left"
+      # → y_far end) so the policy doesn't overfit to a single layout.
       half_sep = _REAL_LINE_SEPARATION / 2.0
       line_x_left   = mat_centre_x - half_sep
       line_x_right  = mat_centre_x + half_sep
-      circle_centre = (mat_centre_x, line_y_far)
+      goal_side     = "right" if rng.random() < _REAL_GOAL_RIGHT_PROBABILITY else "left"
+      circle_y      = line_y_near if goal_side == "right" else line_y_far
+      circle_centre = (mat_centre_x, circle_y)
 
       # Goal: the centre of the white circle — fixed by the mat geometry.
-      goal_pos       = [circle_centre[0], circle_centre[1]]
+      goal_xy        = [circle_centre[0], circle_centre[1]]
       goal_tolerance = _REAL_CIRCLE_RADIUS
 
       # Optional central red-cylinder obstacle (10% of episodes). When present
@@ -527,7 +593,7 @@ class SceneGenerator:
         ty = float(rng.uniform(line_y_near + margin, line_y_far - margin))
         if not (_ARM_MIN_REACH <= math.hypot(tx - robot_base_pos[0], ty) <= _ARM_MAX_REACH):
           continue
-        if math.hypot(tx - goal_pos[0], ty - goal_pos[1]) < _REAL_MIN_GOAL_TARGET_DISTANCE:
+        if math.hypot(tx - goal_xy[0], ty - goal_xy[1]) < _REAL_MIN_GOAL_TARGET_DISTANCE:
           continue
         if spawn_obstacle and math.hypot(tx - mat_centre_x, ty - mat_offset_y) < _REAL_OBSTACLE_TARGET_CLEARANCE:
           continue
@@ -612,6 +678,21 @@ class SceneGenerator:
       fovy_deg = _REAL_DEFAULT_FOVY_DEG
       camera = CameraConfig(pos=cam_pos, look_at=look_target, fov=fovy_deg)
 
+      # Project the four line endpoints into pixel coordinates. The lines
+      # sit on the mat surface at line_cz (table top + paint thickness).
+      # Order: [left-far, left-near, right-near, right-far] — a CCW walk
+      # around the rectangle starting from the far end of the left line.
+      line_endpoints_world = [
+          (line_x_left,  line_y_far,  line_cz),
+          (line_x_left,  line_y_near, line_cz),
+          (line_x_right, line_y_near, line_cz),
+          (line_x_right, line_y_far,  line_cz),
+      ]
+      image_hw = _parse_render_size(getattr(self.config.env, "render_size", "512x512"))
+      fiducial_corners = _project_points_to_pixels(
+          line_endpoints_world, cam_pos, look_target, fovy_deg, image_hw,
+      )
+
       lighting = LightingConfig(direction=[0.0, -0.5, -1.0], intensity=0.8, ambient=0.3)
 
       return SceneConfig(
@@ -622,7 +703,7 @@ class SceneGenerator:
           robot_base_pos=robot_base_pos,
           robot_initial_qpos=None,
           target=target,
-          goal_pos=goal_pos,
+          goal_xy=goal_xy,
           goal_tolerance=goal_tolerance,
           obstacles=obstacles,
           clutter=clutter,
@@ -632,6 +713,8 @@ class SceneGenerator:
           control_dt=0.1,
           draw_goal_marker=False,
           mat_centre=[mat_centre_x, mat_offset_y],
+          fiducial_corners=fiducial_corners,
+          goal_side=goal_side,
       )
 
   # ------------------------------------------------------------------
@@ -645,7 +728,7 @@ class SceneGenerator:
       # reachability matters. Also enforce the minimum target↔goal distance
       # so the rejection loop in _sample_real never silently degrades it.
       tx, ty = cfg.target.pos[:2]
-      gx, gy = cfg.goal_pos
+      gx, gy = cfg.goal_xy
       if math.hypot(tx - gx, ty - gy) < _REAL_MIN_GOAL_TARGET_DISTANCE:
         return False
       return self._check_reachability(cfg) and self._check_goal_on_table(cfg)
@@ -667,13 +750,13 @@ class SceneGenerator:
 
   def _check_goal_reachability(self, cfg: SceneConfig) -> bool:
     """Goal must lie within the same reachability annulus as the target."""
-    gx, gy = cfg.goal_pos
+    gx, gy = cfg.goal_xy
     bx, by = cfg.robot_base_pos[:2]
     dist   = math.hypot(gx - bx, gy - by)
     return _ARM_MIN_REACH <= dist <= _ARM_MAX_REACH
 
   def _check_goal_on_table(self, cfg: SceneConfig) -> bool:
-    gx, gy = cfg.goal_pos
+    gx, gy = cfg.goal_xy
     hx, hy = cfg.table_size[:2]
     margin = 0.03
     return (
@@ -683,7 +766,7 @@ class SceneGenerator:
 
   def _check_no_overlaps(self, cfg: SceneConfig) -> bool:
     """No colliding object should overlap with another, the target, or the goal."""
-    gx, gy = cfg.goal_pos
+    gx, gy = cfg.goal_xy
     colliders = [cfg.target] + cfg.obstacles
     for i, a in enumerate(colliders):
       ax, ay = a.pos[:2]
@@ -708,7 +791,7 @@ class SceneGenerator:
     if not cfg.obstacles:
       return True
     tx, ty = cfg.target.pos[:2]
-    gx, gy = cfg.goal_pos
+    gx, gy = cfg.goal_xy
     dx, dy = gx - tx, gy - ty
     length = math.hypot(dx, dy)
     if length < 1e-6:

@@ -16,9 +16,10 @@ from chuck_dreamer.training.tracker import Tracker
 @dataclass
 class _FakeScene:
   """Minimal dataclass shaped like SceneConfig so asdict() works."""
-  goal_pos: list[float] = field(default_factory=lambda: [0.1, 0.2])
+  goal_xy: list[float] = field(default_factory=lambda: [0.1, 0.2])
   max_steps: int = 100
   mat_centre: list[float] | None = None
+  goal_side: str | None = None
 
 
 class _FakeWriter:
@@ -145,7 +146,7 @@ def test_writer_constructed_with_dump_path_and_format(patch_writer):
 def test_metadata_payload_shape(patch_writer):
   tracker = Tracker(_make_config(every_n_collects=1, seed=7))
   writer = patch_writer[0]
-  scene = _FakeScene(goal_pos=[0.3, -0.4], max_steps=77)
+  scene = _FakeScene(goal_xy=[0.3, -0.4], max_steps=77, goal_side="right")
   episode = {"image": np.zeros((1, 4, 4, 3), dtype=np.uint8)}
 
   tracker.maybe_log_collect_episode(episode, scene, outcome="timeout", data={"iteration": 12})
@@ -153,11 +154,17 @@ def test_metadata_payload_shape(patch_writer):
   assert len(writer.calls) == 1
   ep_arg, meta, _ = writer.calls[0]
   assert ep_arg is episode
-  assert meta["config"]     == {"goal_pos": [0.3, -0.4], "max_steps": 77, "mat_centre": None}
+  assert meta["config"]     == {
+      "goal_xy":   [0.3, -0.4],
+      "max_steps": 77,
+      "mat_centre": None,
+      "goal_side": "right",
+  }
   assert meta["seed"]       == 7
   assert meta["source"]     == "collect"
   assert meta["outcome"]    == "timeout"
   assert meta["goal_xy"]    == [0.3, -0.4]
+  assert meta["goal_side"]  == "right"
   assert meta["mat_centre"] is None
   assert meta["iteration"]  == 12
 

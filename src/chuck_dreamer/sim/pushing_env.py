@@ -567,7 +567,7 @@ class PushingEnv(gym.Env):
         "ee_quat": self.controller.get_ee_quat(self.data),
         "arm_qpos": self.controller.get_arm_qpos(self.data),
         "object_xy": self._get_object_pos(),
-        "goal_xy": np.array(self.scene.goal_pos, dtype=np.float32),
+        "goal_xy": np.array(self.scene.goal_xy, dtype=np.float32),
     }
 
   def _build_step_info(self) -> StepInfo:
@@ -576,7 +576,7 @@ class PushingEnv(gym.Env):
       object_xy=self._get_object_pos(),
       ee_pos=self.controller.get_ee_pos(self.data),
       ee_quat=self.controller.get_ee_quat(self.data),
-      goal_xy=np.array(self.scene.goal_pos, dtype=np.float32),
+      goal_xy=np.array(self.scene.goal_xy, dtype=np.float32),
       step=self.step_count,
       time=float(self.data.time),
     )

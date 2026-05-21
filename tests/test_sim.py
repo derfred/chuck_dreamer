@@ -51,7 +51,7 @@ def _make_simple_config(robot_type: str = "so100") -> SceneConfig:
           orientation=0.0,
           color=[1.0, 0.0, 0.0, 1.0],
       ),
-      goal_pos=[0.10, 0.05],
+      goal_xy=[0.10, 0.05],
       goal_tolerance=0.04,
       obstacles=[],
       clutter=[],
@@ -113,7 +113,7 @@ class TestSceneConfig:
     assert cfg.table_size == [0.30, 0.25, 0.02]
     assert cfg.target.shape == "box"
     assert cfg.target.mass == 0.1
-    assert cfg.goal_pos == [0.10, 0.05]
+    assert cfg.goal_xy == [0.10, 0.05]
     assert cfg.max_steps == 50
     assert cfg.obstacles == []
 
@@ -178,7 +178,7 @@ class TestSceneGenerator:
   def test_validity_goal_on_table(self):
     gen = SceneGenerator(_make_env_cfg(difficulty="easy"))
     cfg = gen.sample()
-    cfg.goal_pos = [5.0, 5.0]
+    cfg.goal_xy = [5.0, 5.0]
     assert not gen._check_goal_on_table(cfg)
 
   def test_multiple_samples_are_valid(self):
@@ -377,7 +377,7 @@ class TestPushingEnv:
 
   def test_goal_reached_terminates(self, env):
     cfg = _make_simple_config()
-    cfg.goal_pos = [cfg.target.pos[0], cfg.target.pos[1]]
+    cfg.goal_xy = [cfg.target.pos[0], cfg.target.pos[1]]
     cfg.goal_tolerance = 0.5
     env.reset(scene=cfg)
     action = _zero_joint_action(len(cfg.joint_names))
@@ -476,7 +476,7 @@ class TestPolicyInsertHints:
   def _make_policy(self):
     cfg = _make_simple_config()
     cfg.target.pos = [0.05, 0.00, 0.03]
-    cfg.goal_pos = [0.20, 0.00]
+    cfg.goal_xy = [0.20, 0.00]
     p = ScriptedPolicy()
     p.reset(cfg)
     p.state = "ready"
@@ -543,7 +543,7 @@ class TestEpisodeWriter:
             "seed":    42,
             "source":  "sim",
             "outcome": "done",
-            "goal_xy": cfg.goal_pos,
+            "goal_xy": cfg.goal_xy,
         },
         name_suffix="00000")
 
@@ -617,7 +617,7 @@ class TestEpisodeWriter:
             "seed":    7,
             "source":  "sim",
             "outcome": "done",
-            "goal_xy": cfg.goal_pos,
+            "goal_xy": cfg.goal_xy,
         },
         name_suffix="00000")
     assert path.exists()
@@ -654,7 +654,7 @@ def _policy_obs(ee_pos, qpos=None, n_joints: int = 6, ee_quat: np.ndarray = _IDE
 def _fresh_policy():
   cfg = _make_simple_config()
   cfg.target.pos = [0.05, 0.00, 0.03]
-  cfg.goal_pos = [0.20, 0.00]
+  cfg.goal_xy = [0.20, 0.00]
   p = ScriptedPolicy()
   p.reset(cfg)
   return p

@@ -394,7 +394,7 @@ class SceneBuilder:
             )
             goal_geom.set(
                 "pos",
-                f"{config.goal_pos[0]:.4f} {config.goal_pos[1]:.4f} "
+                f"{config.goal_xy[0]:.4f} {config.goal_xy[1]:.4f} "
                 f"{table_top_z + _GOAL_DISC_HALF_HEIGHT:.5f}",
             )
             goal_geom.set("rgba", "0.95 0.95 0.95 1")

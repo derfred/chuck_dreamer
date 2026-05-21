@@ -48,7 +48,7 @@ class SceneConfig:
     target: ObjectConfig
 
     # Goal
-    goal_pos: list[float]          # [x, y] on table surface
+    goal_xy: list[float]           # [x, y] on table surface
     goal_tolerance: float          # distance threshold for "done"
 
     # Obstacles (objects that block the path but aren't pushed)
@@ -75,6 +75,38 @@ class SceneConfig:
     # a small box, and downstream analysis needs the actual sampled value
     # to disentangle absolute target/goal positions from mat-relative ones.
     mat_centre: list[float] | None = None
+
+    # On-screen pixel coordinates (u, v) of the four endpoints of the two
+    # painted lines on the calibration mat, projected through the episode
+    # camera into the rendered image. Order: [left-far, left-near,
+    # right-near, right-far] where "left/right" matches the mat layout's
+    # ±x sides and "near/far" matches its ±y endpoints. u is the column
+    # coordinate (left→right) and v is the row coordinate (top→bottom),
+    # matching the convention used by `object_uv`. Only the "real" preset
+    # populates this. Index helpers: see ``fiducial_left_far`` etc.
+    fiducial_corners: list[list[float]] | None = None
+
+    # Which side of the painted lines the goal-circle sits on. Sampled
+    # per-episode by SceneGenerator: "right" (the y_near end, towards the
+    # arm) 2/3 of the time, "left" (the y_far end) 1/3 of the time.
+    # Only the "real" preset populates this.
+    goal_side: str | None = None
+
+    @property
+    def fiducial_left_far(self) -> list[float]:
+        return self.fiducial_corners[0]  # type: ignore[index]
+
+    @property
+    def fiducial_left_near(self) -> list[float]:
+        return self.fiducial_corners[1]  # type: ignore[index]
+
+    @property
+    def fiducial_right_near(self) -> list[float]:
+        return self.fiducial_corners[2]  # type: ignore[index]
+
+    @property
+    def fiducial_right_far(self) -> list[float]:
+        return self.fiducial_corners[3]  # type: ignore[index]
 
     @property
     def joint_initial_qpos(self) -> list[float] | None:

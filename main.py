@@ -97,7 +97,8 @@ def _collect_one_episode(cfg, output, fmt, ep_idx, episode_seed, min_steps):
         "seed":    episode_seed,
         "source":  "sim",
         "outcome": outcome,
-        "goal_xy": scene.goal_pos,
+        "goal_xy": scene.goal_xy,
+        "goal_side": scene.goal_side,
       },
       name_suffix=f"{ep_idx:05d}",
     )
