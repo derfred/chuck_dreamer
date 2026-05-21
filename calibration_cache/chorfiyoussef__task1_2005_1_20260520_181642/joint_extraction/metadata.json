@@ -1,0 +1,43 @@
+{
+  "dataset_id": "chorfiyoussef/task1_2005_1_20260520_181642",
+  "joint_names": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll"
+  ],
+  "state_feature_names": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper"
+  ],
+  "stat": "median",
+  "joint_unit": "deg",
+  "drift_threshold_rad": 0.05,
+  "drift_threshold_deg": 2.8647889756541165,
+  "short_segment_frames": 10,
+  "episode_count": 7,
+  "episode_indices": [
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "touch_labels": [
+    "left-far",
+    "left-middle",
+    "left-near",
+    "origin",
+    "right-far",
+    "right-middle",
+    "right-near"
+  ],
+  "timestamp": "2026-05-21T04:55:19.548104+00:00"
+}

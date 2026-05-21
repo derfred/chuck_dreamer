@@ -1,0 +1,23 @@
+{
+  "dataset_id": "chorfiyoussef/task_1_1805_2",
+  "episode_index": 7,
+  "touch_label": "right-middle",
+  "n_frames": 180,
+  "joint_unit": "deg",
+  "stat": "median",
+  "joints": {
+    "shoulder_pan": 41.230770111083984,
+    "shoulder_lift": 30.10988998413086,
+    "elbow_flex": -5.274725437164307,
+    "wrist_flex": 74.37362670898438,
+    "wrist_roll": 12.175824165344238
+  },
+  "spread": {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": 0.1758251190185547,
+    "elbow_flex": 0.0,
+    "wrist_flex": 0.0,
+    "wrist_roll": 0.0
+  },
+  "flags": []
+}
