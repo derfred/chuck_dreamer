@@ -53,19 +53,26 @@ RES_WARN_MM   = 10.0
 def world_positions(L_mm: float, D_mm: float) -> dict[str, np.ndarray]:
   """Canonical mat-frame positions of the 7 named touch points (mm).
 
-  World-frame convention (see object_localization/geometry.py):
-    origin at circle center, +X away from the lines (lines extend toward
-    -X), +Y toward line1, -Y toward line2, +Z out of the mat. The mat
-    sits at z=0.
+  Convention (operator view, robot at the near edge of the mat):
+    - Origin = circle center, directly in front of the robot.
+    - **x** = left/right. +x = right, −x = left. Lines extend ±L/2 in x.
+    - **y** = near/far. −y = near (closer to robot), +y = far. The two
+      painted lines sit at y = ±D/2.
+    - **middle** is the y-midpoint between the two lines (y = 0).
+    - z = 0 (mat plane).
+
+  The seven points form a rectangle centered on the origin: ±L/2 in x,
+  ±D/2 in y. ``left-middle`` and ``right-middle`` sit between the lines
+  at the rectangle's left and right edges.
   """
   return {
-    "origin":       np.array([   0.0,        0.0, 0.0]),
-    "left-near":    np.array([   0.0,  +D_mm / 2.0, 0.0]),
-    "left-middle":  np.array([-L_mm / 2.0, +D_mm / 2.0, 0.0]),
-    "left-far":     np.array([-L_mm,        +D_mm / 2.0, 0.0]),
-    "right-near":   np.array([   0.0,  -D_mm / 2.0, 0.0]),
-    "right-middle": np.array([-L_mm / 2.0, -D_mm / 2.0, 0.0]),
-    "right-far":    np.array([-L_mm,        -D_mm / 2.0, 0.0]),
+    "origin":       np.array([      0.0,         0.0, 0.0]),
+    "right-near":   np.array([+L_mm / 2.0, -D_mm / 2.0, 0.0]),
+    "right-middle": np.array([+L_mm / 2.0,         0.0, 0.0]),
+    "right-far":    np.array([+L_mm / 2.0, +D_mm / 2.0, 0.0]),
+    "left-near":    np.array([-L_mm / 2.0, -D_mm / 2.0, 0.0]),
+    "left-middle":  np.array([-L_mm / 2.0,         0.0, 0.0]),
+    "left-far":     np.array([-L_mm / 2.0, +D_mm / 2.0, 0.0]),
   }
 
 
@@ -351,6 +358,36 @@ def run_arm_touch_calibration(
       f"  REJECT: max_residual {max_res:.2f}mm ≥ {RES_WARN_MM:.0f}mm. "
       "Likely a bad touch, FK joint-offset error, or wrong mat "
       "dimensions in config. Transform NOT persisted.", fg="red"))
+    # Dump every touch's raw inputs + the would-be transform so the
+    # operator can diagnose which point misbehaved without re-running.
+    P_arm   = np.stack([t.p_arm   for t in touches], axis=0)
+    P_world = np.stack([t.p_world for t in touches], axis=0)
+    if is_collinear(P_arm) or is_collinear(P_world):
+      R_dbg, t_dbg = umeyama_planar(P_arm, P_world)
+      solver_dbg = "umeyama_planar"
+    else:
+      R_dbg, t_dbg = umeyama(P_arm, P_world)
+      solver_dbg = "umeyama_3d"
+    pred = P_arm @ R_dbg.T + t_dbg
+
+    click.echo("")
+    click.echo(click.style("  ── rejection details ────────────────────────", fg="red"))
+    click.echo(f"  solver: {solver_dbg}")
+    click.echo("  per-touch:")
+    for tr, p_pred, r in zip(touches, pred, residuals):
+      spread_flag = " [SPREAD>0.05rad]" if np.any(tr.q_spread > SPREAD_WARN_RAD) else ""
+      click.echo(f"    {tr.name:>13s}{spread_flag}")
+      click.echo(f"      q (rad)     = {np.round(tr.q, 4).tolist()}")
+      click.echo(f"      q_spread    = {np.round(tr.q_spread, 4).tolist()}")
+      click.echo(f"      p_arm  (mm) = [{tr.p_arm[0]:+8.2f}, "
+                 f"{tr.p_arm[1]:+8.2f}, {tr.p_arm[2]:+8.2f}]")
+      click.echo(f"      p_world(mm) = [{tr.p_world[0]:+8.2f}, "
+                 f"{tr.p_world[1]:+8.2f}, {tr.p_world[2]:+8.2f}]")
+      click.echo(f"      predicted   = [{p_pred[0]:+8.2f}, {p_pred[1]:+8.2f}, "
+                 f"{p_pred[2]:+8.2f}]  (residual = {r:6.2f} mm)")
+    click.echo("  rejected transform (for inspection only):")
+    click.echo(f"    R = {np.round(R_dbg, 4).tolist()}")
+    click.echo(f"    t = {np.round(t_dbg, 2).tolist()} mm")
     return None
   if max_res >= RES_ACCEPT_MM:
     click.echo(click.style(

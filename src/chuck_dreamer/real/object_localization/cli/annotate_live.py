@@ -38,6 +38,7 @@ from ..calibration.interactive import (
   reset_popup_state,
 )
 from ..runtime import init_from_config
+from ..types import Extrinsics, MatDetection
 from .common import override_option
 
 # SO-101 MJCF used by FK. Mirrors `chuck_dreamer.sim.scene_builder`.
@@ -62,6 +63,10 @@ _PREVIEW_WINDOW = "annotate-live · capture"
               help="Camera index or device path. Overrides cfg.real.camera.source.")
 @click.option("--skip-arm/--with-arm", "skip_arm", default=False,
               help="Skip the arm-to-world (T_world_arm) touch calibration.")
+@click.option("--skip-extrinsics", "skip_extrinsics", is_flag=True, default=False,
+              help="Skip camera capture, mat annotation, and extrinsics solve. "
+                   "Writes a bundle with dummy detection + identity extrinsics. "
+                   "Useful when only the arm-to-world step is needed.")
 @click.option("--arm-port", "arm_port", default=None, type=str,
               help="Serial port for the SO-101 follower. Overrides "
                    "cfg.real.arm.port. With no port (and none in config) "
@@ -70,6 +75,7 @@ _PREVIEW_WINDOW = "annotate-live · capture"
 @click.pass_context
 def annotate_live_cmd(ctx, output_path: Path, intrinsics_path: Path | None,
                       camera_source: str | None, skip_arm: bool,
+                      skip_extrinsics: bool,
                       arm_port: str | None,
                       overrides: tuple[str, ...]) -> None:
   """Capture a frame from the live camera, annotate the mat, save the bundle."""
@@ -91,6 +97,38 @@ def annotate_live_cmd(ctx, output_path: Path, intrinsics_path: Path | None,
       f"Pass --intrinsics PATH to point at one explicitly.")
   click.echo(f"intrinsics: {intrinsics_path} (rms={intrinsics.rms_px:.2f}px, "
              f"image_size={intrinsics.image_size})")
+
+  if skip_extrinsics:
+    click.echo("--skip-extrinsics set; writing bundle with dummy detection "
+               "and identity extrinsics.")
+    dummy_detection = _dummy_detection()
+    dummy_extrinsics = Extrinsics(
+      R = np.eye(3, dtype=np.float64),
+      t = np.zeros((3, 1), dtype=np.float64),
+      rms_px = 0.0,
+    )
+    bundle = CalibrationBundle(
+      intrinsics = intrinsics,
+      extrinsics = dummy_extrinsics,
+      detection  = dummy_detection,
+    )
+    write_bundle(output_path, bundle, extra={
+      "intrinsics_source": str(intrinsics_path),
+      "dummy_extrinsics":  True,
+    })
+    click.echo(f"wrote {output_path}")
+
+    if skip_arm:
+      click.echo("--skip-arm set; T_world_arm not calibrated.")
+      return
+    arm_port_cfg = cfg.real.arm.port
+    if arm_port_cfg is None:
+      click.echo("cfg.real.arm.port is null; running arm in dry-run mode "
+                 "would produce a meaningless T_world_arm. Skipping. Pass "
+                 "--arm-port PATH or set real.arm.port to enable.")
+      return
+    _run_arm_step(cfg, ol_cfg, output_path)
+    return
 
   # Lazy-import so headless test environments without a camera-backed
   # CLI dependency can still import the module for inspection.
@@ -155,17 +193,17 @@ def annotate_live_cmd(ctx, output_path: Path, intrinsics_path: Path | None,
     click.echo(f"rms={rms:.3f}px  phase_offset={result.phase_offset}  "
                f"reverse={result.reverse}")
 
-  overlay = render_extrinsics_overlay(
-    captured_rgb, result.extrinsics, intrinsics.K, intrinsics.dist, ol_cfg,
-    detection, result,
-  )
+  # overlay = render_extrinsics_overlay(
+  #   captured_rgb, result.extrinsics, intrinsics.K, intrinsics.dist, ol_cfg,
+  #   detection, result,
+  # )
   axes_overlay = render_world_axes(
     captured_rgb, result.extrinsics, intrinsics.K, intrinsics.dist,
   )
   preview_window = "annotate-live · verify (press any key)"
   cv2.namedWindow(preview_window, cv2.WINDOW_AUTOSIZE)
   try:
-    cv2.imshow(preview_window, np.hstack([overlay, axes_overlay]))
+    cv2.imshow(preview_window, axes_overlay)
     cv2.waitKey(0)
   finally:
     cv2.destroyWindow(preview_window)
@@ -205,14 +243,38 @@ def annotate_live_cmd(ctx, output_path: Path, intrinsics_path: Path | None,
   _run_arm_step(cfg, ol_cfg, output_path)
 
 
+def _dummy_detection() -> MatDetection:
+  """Placeholder detection for --skip-extrinsics. Values are not geometrically meaningful."""
+  return MatDetection(
+    line1_near        = np.zeros(2, dtype=np.float64),
+    line1_far         = np.zeros(2, dtype=np.float64),
+    line2_near        = np.zeros(2, dtype=np.float64),
+    line2_far         = np.zeros(2, dtype=np.float64),
+    circle_center     = np.zeros(2, dtype=np.float64),
+    circle_axes       = (0.0, 0.0),
+    circle_angle      = 0.0,
+    circle_samples_uv = np.zeros((0, 2), dtype=np.float64),
+    circle_clicks     = np.zeros((0, 2), dtype=np.float64),
+  )
+
 def _run_arm_step(cfg, ol_cfg, output_path: Path) -> None:
   """Run the 4-touch arm-to-world calibration and merge into the bundle."""
   from ...run.arm import Arm, ArmConfig
-  from ...fk_calibration.fk import FK
+  from ...fk_calibration.fk import FK, load_fk_dq
 
   if not _FK_MODEL_PATH.exists():
     raise click.ClickException(f"FK model not found at {_FK_MODEL_PATH}")
   fk = FK(_FK_MODEL_PATH)
+  fk_dq = load_fk_dq(ol_cfg.cache_dir)
+  if np.any(fk_dq != 0):
+    click.echo(f"using fk_dq from {ol_cfg.cache_dir}/fk_dq.json: "
+               f"{np.round(fk_dq, 3).tolist()}")
+  else:
+    click.echo(click.style(
+      "no fk_dq.json found — using zero joint offsets. If the live arm's "
+      "encoder zeros differ from the MJCF home (they usually do), the "
+      "calibration will reject. See calibration_cache/fk_dq.json.",
+      fg="yellow"))
 
   arm_cfg = ArmConfig(
     port=str(cfg.real.arm.port),
@@ -225,14 +287,20 @@ def _run_arm_step(cfg, ol_cfg, output_path: Path) -> None:
   )
 
   with Arm(arm_cfg) as arm:
-    arm_block = run_arm_touch_calibration(
-      arm=arm,
-      fk=fk,
-      L_mm=ol_cfg.mat_line_length_mm,
-      D_mm=ol_cfg.mat_line_separation_mm,
-      fk_model_path=_FK_MODEL_PATH,
-      touch_sequence=DEFAULT_TOUCH_SEQUENCE,
-    )
+    click.echo(click.style(
+      "Disabling motor torque for the touch sequence — you can now "
+      "move the arm by hand. Torque will re-engage when the sequence "
+      "ends (or you abort), locking the arm in place.", fg="cyan"))
+    with arm.compliant():
+      arm_block = run_arm_touch_calibration(
+        arm=arm,
+        fk=fk,
+        L_mm=ol_cfg.mat_line_length_mm,
+        D_mm=ol_cfg.mat_line_separation_mm,
+        fk_dq=fk_dq,
+        fk_model_path=_FK_MODEL_PATH,
+        touch_sequence=DEFAULT_TOUCH_SEQUENCE,
+      )
 
   if arm_block is None:
     click.echo("T_world_arm not persisted.")

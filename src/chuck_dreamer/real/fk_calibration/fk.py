@@ -26,6 +26,28 @@ CANONICAL_JOINT_NAMES = [
 Q_HOME = np.array([0.0, -3.14, 3.14, 0.0, 0.0], dtype=np.float64)
 
 
+def load_fk_dq(cache_dir: str | Path) -> np.ndarray:
+  """Load per-joint zero offsets ``dq`` from ``<cache_dir>/fk_dq.json``.
+
+  Returns the 5-vector that must be added to a real-arm joint reading
+  before FK so the FK output lands in the MJCF's frame:
+  ``p_arm = fk(q_real, dq=load_fk_dq(...))``.
+
+  Returns zeros if the file doesn't exist — i.e. uncalibrated arms still
+  work, they just inherit the MJCF's encoder-zero choice.
+  """
+  import json
+
+  p = Path(cache_dir) / "fk_dq.json"
+  if not p.exists():
+    return np.zeros(5, dtype=np.float64)
+  blob = json.loads(p.read_text())
+  dq = np.asarray(blob["dq"], dtype=np.float64)
+  if dq.shape != (5,):
+    raise ValueError(f"{p}: dq must be shape (5,), got {dq.shape}")
+  return dq
+
+
 def _load_model(model_path: str | Path) -> mujoco.MjModel:
   """Load an SO-101 MJCF, injecting meshdir if the fragment lacks one."""
   model_path = Path(model_path)

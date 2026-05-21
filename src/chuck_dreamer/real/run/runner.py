@@ -263,13 +263,6 @@ def _build_policy(cfg, calibration_path=None) -> RealPolicy:
 
   ptype = cfg.real.policy.type
   if ptype == "corner_touch":
-    twa = _read_t_world_arm(calibration_path)
-    if twa is None:
-      raise ValueError(
-        "real.policy.corner_touch requires T_world_arm in the "
-        "calibration bundle. Run `annotate-live` (with the arm step) "
-        "and pass --calibration <bundle.json>.")
-    R, t = twa
     ct = cfg.real.policy.get("corner_touch", {}) if hasattr(cfg.real.policy, "get") else {}
     corners_raw = ct.get("corners_xy_mm", None) if hasattr(ct, "get") else None
     if corners_raw is None:
@@ -278,7 +271,7 @@ def _build_policy(cfg, calibration_path=None) -> RealPolicy:
       corners = tuple((float(x), float(y)) for x, y in corners_raw)
     hover_z = float(ct.get("hover_z_mm", 30.0)) if hasattr(ct, "get") else 30.0
     dwell   = float(ct.get("dwell_s",    1.5))  if hasattr(ct, "get") else 1.5
-    return CornerTouchPolicy(R, t, CornerTouchConfig(
+    return CornerTouchPolicy(CornerTouchConfig(
       corners_xy_mm=corners, hover_z_mm=hover_z, dwell_s=dwell,
     ))
   if ptype == "manual":
@@ -504,6 +497,21 @@ def run(cfg) -> None:
 
   start_keycode = ord(settings.start_key[0])
 
+  # Per-policy step throttle. corner_touch defaults to 1 Hz so the
+  # operator can read the per-step debug print and abort on a bad
+  # waypoint; other policies stay at settings.control_dt.
+  policy_step_period_s = settings.control_dt
+  debug_corner_touch = False
+  if str(cfg.real.policy.type) == "corner_touch":
+    ct = (cfg.real.policy.get("corner_touch", {})
+          if hasattr(cfg.real.policy, "get") else {})
+    dbg = (ct.get("debug_period_s", None)
+           if hasattr(ct, "get") else None)
+    if dbg is not None and float(dbg) > 0.0:
+      policy_step_period_s = float(dbg)
+      debug_corner_touch = True
+      logger.info("corner_touch debug throttle: %.2f s/step", policy_step_period_s)
+
   with Camera(cam_cfg) as camera, Arm(arm_cfg) as arm:
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
 
@@ -513,97 +521,133 @@ def run(cfg) -> None:
         "Camera and policy will run; joint commands are swallowed."
       )
 
-    last_step_t = time.monotonic()
-    fps_t       = last_step_t
-    fps         = 0.0
-    last_action: np.ndarray | None = None
+    # Enter compliant (torque-off) mode before the operator presses start.
+    # This lets the arm be hand-positioned safely. Torque is re-enabled
+    # when the start key is pressed (the compliant ctx is exited there).
+    _compliant_ctx = arm.compliant()
+    _compliant_ctx.__enter__()
+    _compliant_active = [True]   # list so the closure can mutate it
+    logger.info("arm is compliant — press '%s' to enable torque and start",
+                settings.start_key)
+
+    # Two-rate control:
+    #   control_dt  — policy query rate (e.g. 10 Hz).  The controller is
+    #                 stepped and a new joint target is computed.
+    #   act_dt      — servo send rate = control_dt / 4.  Between policy
+    #                 steps we linearly interpolate toward the latest target
+    #                 so the arm moves smoothly.  Each interpolated step is
+    #                 further clamped to ±max_step_frac of a full revolution
+    #                 so a sudden large target jump can't produce a violent
+    #                 single-tick motion.
+    act_dt          = settings.control_dt / 4.0
+    max_step_frac   = 0.025          # max change per act tick, as fraction of 2π
+    max_step_rad    = max_step_frac * 2.0 * np.pi
+
+    last_policy_t   = time.monotonic()
+    last_act_t      = last_policy_t
+    fps_t           = last_policy_t
+    fps             = 0.0
+    last_action:    np.ndarray | None = None
+    # ``target_joints`` — the most recent IK-solved joint qpos (rad).
+    # ``sent_joints``   — what we last physically sent; used as the
+    #                     interpolation start so we always blend from
+    #                     where the arm actually is, not from policy output.
+    target_joints:  np.ndarray | None = None
+    sent_joints:    np.ndarray | None = None
+    # Keep last obs + qpos accessible outside the policy-step block so the
+    # start-key CEM seed and object-tracker handlers can reference them.
+    current_qpos:   np.ndarray = arm.read_joint_qpos()
+    obs:            dict       = {"image": np.zeros((1, 1, 3), dtype=np.uint8),
+                                  "arm_qpos": current_qpos.astype(np.float32)}
 
     try:
       while True:
         loop_start = time.monotonic()
 
         bgr, rgb = camera.read()
-        # FPS is a smoothed window over the camera read cadence.
         now = time.monotonic()
         dt = now - fps_t
         if dt > 0:
           fps = 0.9 * fps + 0.1 * (1.0 / dt)
         fps_t = now
 
-        # Build obs from the live state of the world. ``ee`` is only
-        # populated when the FK adapter exists — policies that don't need
-        # it (manual teleop, image/proprio-only checkpoints) never see
-        # the key, so the FK call is skipped entirely for them.
-        current_qpos = arm.read_joint_qpos()
-        obs = {
-          "image":    rgb,
-          "arm_qpos": current_qpos.astype(np.float32),
-        }
-        if ik is not None and obs_needs_fk:
-          obs["ee"] = ik.current_ee_action(current_qpos)
-        if object_tracker is not None:
-          # Hand the worker the freshest frame (drop-on-arrival) and
-          # read whatever the last completed inference produced. Before
-          # the operator hits start the tracker isn't running and
-          # latest_uv() returns NaNs; the controller is idle then anyway
-          # so the obs is never consumed by the model.
-          object_tracker.submit_frame(rgb)
-          obs["object_uv"] = object_tracker.latest_uv()
+        # ── Policy step (control_dt) ─────────────────────────────────────
+        if now - last_policy_t >= settings.control_dt:
+          current_qpos = arm.read_joint_qpos()
+          obs = {
+            "image":    rgb,
+            "arm_qpos": current_qpos.astype(np.float32),
+          }
+          if ik is not None and obs_needs_fk:
+            obs["ee"] = ik.current_ee_action(current_qpos)
+          if object_tracker is not None:
+            object_tracker.submit_frame(rgb)
+            obs["object_uv"] = object_tracker.latest_uv()
 
-        # Hand off to the controller at control_dt cadence — camera
-        # refreshes faster than control to keep the HUD lively.
-        if now - last_step_t >= settings.control_dt:
-          # Re-seed CEM each step so the planning distribution stays
-          # anchored on the live arm pose. Without this, ``_mean``
-          # warm-starts from the previous step and drifts under the
-          # reward-head's gradient noise — over many ticks the mean
-          # walks off into unreachable territory and the follower
-          # tries to teleport to a workspace-edge pose, slamming the
-          # table. No-op for non-CEM/non-EE policies.
           if ik is not None and controller.state == "running":
             _seed_cem_from_current_pose(policy, ik, current_qpos)
+
           action = controller.step(obs)
-          last_step_t = now
+          print(f"policy action: {action.round(3) if action is not None else None}")
+          last_policy_t = now
+
           if action is not None:
             last_action = action
-            # The manual policy emits (6,) joint qpos directly; CEM /
-            # Dreamer policies trained with ``act_mode=ee`` emit a (7,)
-            # ``[x, y, z, qw, qx, qy, qz]`` EE pose that has to go
-            # through IK before reaching the follower. Anything else
-            # is logged and dropped (placeholder for future shapes).
+
+            # Resolve EE action → joint qpos via IK (with z-floor clamp).
             joint_action: np.ndarray | None = None
             if action.shape == (6,):
               joint_action = action
             elif action.shape == (7,) and ik is not None:
-              # Z-floor safety clamp. Policy emits EE pose in the arm
-              # base frame (metres); the mat plane sits at some
-              # arm-frame z which depends on T_world_arm. We can't know
-              # that floor from inside the runner without re-reading the
-              # bundle, so we clamp in *world frame* by transforming
-              # action.xyz through T_world_arm, clipping z, and
-              # transforming back. No-op when no calibration is loaded
-              # (we then can't define a world z anyway).
+              # action[:3] is in world frame (metres). Clamp z, then
+              # convert to arm frame before handing to IK.
+              p_world = action[:3].copy().astype(np.float64)
+              if p_world[2] < min_hover_z_m:
+                p_world[2] = min_hover_z_m
+              ee = action.copy()
               if t_world_arm_state is not None:
                 R_wa, t_wa_m = t_world_arm_state
-                p_world = R_wa @ action[:3] + t_wa_m
-                if p_world[2] < min_hover_z_m:
-                  p_world[2] = min_hover_z_m
-                  action = action.copy()
-                  action[:3] = R_wa.T @ (p_world - t_wa_m)
+                ee[:3] = (R_wa.T @ (p_world - t_wa_m)).astype(np.float32)
+              else:
+                logger.warning("no T_world_arm — cannot convert world→arm for IK")
               try:
-                joint_action = ik.solve(action, current_qpos)
-              except Exception as e:  # noqa: BLE001 — placo errors vary
+                joint_action = ik.solve(ee, current_qpos)
+              except Exception as e:  # noqa: BLE001
                 logger.warning("IK solve failed: %s — holding pose", e)
             else:
-              logger.warning(
-                "unsupported action shape %s; holding pose", action.shape,
-              )
+              logger.warning("unsupported action shape %s; holding pose", action.shape)
+
+            # In manual mode skip the target update entirely so the arm
+            # holds its current position between 'n' presses.
+            if getattr(policy, "is_waiting", False):
+              joint_action = None
 
             if joint_action is not None:
-              try:
-                arm.send_joint_qpos(joint_action)
-              except Exception as e:  # noqa: BLE001 — serial faults vary
-                logger.warning("send_joint_qpos failed: %s — holding pose", e)
+              target_joints = joint_action
+              # Seed sent_joints on first valid target so the interpolator
+              # has a start point that matches where the arm actually is.
+              if sent_joints is None:
+                sent_joints = current_qpos.astype(np.float32).copy()
+
+        # ── Act step (act_dt) ────────────────────────────────────────────
+        # Interpolate from sent_joints toward target_joints and send.
+        # Each tick steps at most max_step_rad per joint so large target
+        # jumps are smoothed over several ticks.
+        if (now - last_act_t >= act_dt
+            and target_joints is not None
+            and sent_joints  is not None
+            and controller.state == "running"):
+          last_act_t = now
+          delta = target_joints - sent_joints
+          # Clamp each joint's step independently.
+          step  = np.clip(delta, -max_step_rad, max_step_rad)
+          next_joints = sent_joints + step
+          sent_joints = next_joints
+          try:
+            # print(f"commanding joints: {next_joints.round(3)}")
+            arm.send_joint_qpos(next_joints)
+          except Exception as e:  # noqa: BLE001
+            logger.warning("send_joint_qpos failed: %s — holding pose", e)
 
         # Draw + window event pump. Overlay the calibration first (so the
         # HUD text stays readable on top of it), then the HUD.
@@ -653,6 +697,10 @@ def run(cfg) -> None:
             # Refresh obs["object_uv"] with the synchronous warm result so
             # the very first controller tick sees a real centroid.
             obs["object_uv"] = object_tracker.latest_uv()
+          if _compliant_active[0]:
+            _compliant_ctx.__exit__(None, None, None)
+            _compliant_active[0] = False
+            logger.info("torque enabled")
           controller.start(obs)
           logger.info("controller started")
           # Seed CEM's action distribution from the current EE pose so
@@ -673,6 +721,8 @@ def run(cfg) -> None:
         precise_sleep(budget)
 
     finally:
+      if _compliant_active[0]:
+        _compliant_ctx.__exit__(None, None, None)
       if isinstance(policy, ManualPolicy):
         policy.stop_listener()
       if object_tracker is not None:

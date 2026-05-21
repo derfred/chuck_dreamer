@@ -162,11 +162,12 @@ def calibrate_arm_from_episodes_cmd(ctx, episode_config: Path, force: bool,
   from ..object_localization.calibration.arm import (
     calibrate_from_lerobot_dataset,
   )
-  from .fk import FK
+  from .fk import FK, load_fk_dq
 
   cfg = load_config(ctx.obj["config_path"], overrides=overrides)
   ol_cfg = init_from_config(cfg)
   cache_root = Path(ol_cfg.cache_dir)
+  fk_dq = load_fk_dq(cache_root)
 
   try:
     config = ej.load_episode_config(episode_config)
@@ -186,6 +187,12 @@ def calibrate_arm_from_episodes_cmd(ctx, episode_config: Path, force: bool,
   click.echo(f"FK model:       {fk_model_path}")
   click.echo(f"Mat geometry:   L={ol_cfg.mat_line_length_mm}mm "
              f"D={ol_cfg.mat_line_separation_mm}mm")
+  import numpy as _np
+  if _np.any(fk_dq != 0):
+    click.echo(f"FK joint offsets (dq): "
+               f"{_np.round(fk_dq, 3).tolist()}")
+  else:
+    click.echo("FK joint offsets (dq): zeros (no calibration_cache/fk_dq.json)")
   click.echo(f"Datasets:       {len(config)}")
 
   n_ok = 0
@@ -204,6 +211,7 @@ def calibrate_arm_from_episodes_cmd(ctx, episode_config: Path, force: bool,
         fk=fk,
         L_mm=ol_cfg.mat_line_length_mm,
         D_mm=ol_cfg.mat_line_separation_mm,
+        fk_dq=fk_dq,
         fk_model_path=fk_model_path,
       )
     except (ValueError, FileNotFoundError) as e:

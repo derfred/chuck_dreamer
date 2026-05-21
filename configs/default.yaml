@@ -227,8 +227,19 @@ real:
     corner_touch:
       # XY corners in mat-frame mm relative to the origin touch point.
       corners_xy_mm: [[-150, -80], [150, -80], [150, 80], [-150, 80]]
-      hover_z_mm:    30.0   # height above the mat plane (z=0) per waypoint
-      dwell_s:       1.5    # seconds to hold each waypoint before advancing
+      hover_z_mm:    30.0     # height above the mat plane (z=0) per waypoint
+      dwell_s:       15
+      # Path shape. Each A→B leg is broken into N linearly-interpolated
+      # EE poses so the IK stays in one solution branch and the arm
+      # moves smoothly instead of teleporting. Total time per leg is
+      # roughly interpolation_steps * debug_period_s.
+      interpolation_steps: 30
+      advance_mode:        "auto"
+      # Step throttle. With interpolation_steps=30 and 0.1 s/step that
+      # is 3 s per leg — slow enough to read the print, fast enough to
+      # not be tedious. Set to null/0 to use the runner's default
+      # cadence (60 Hz, way too fast for visual inspection).
+      debug_period_s:      0.1
 
   # Safety guards applied by the runner around the policy → arm path.
   # These are last-line-of-defence clamps; the policy should normally
@@ -245,7 +256,7 @@ real:
   # and is what the leader→follower teleop needs to feel direct;
   # autonomous (dreamer / cem) policies can override to a slower
   # cadence from the CLI if their inference dominates.
-  control_dt:        0.0167  # seconds between policy steps (≈60 Hz)
+  control_dt:        1  # seconds between policy steps (≈60 Hz)
   # Keys captured globally; "s" starts the policy, "q" or ESC quits.
   start_key:         "s"
 

@@ -183,7 +183,7 @@ def _build_arm_calibration(ctx, dataset_id: str, episode_config_path: Path):
     calibrate_from_lerobot_dataset,
   )
   from chuck_dreamer.real.object_localization.runtime import init_from_config
-  from chuck_dreamer.real.fk_calibration.fk import FK
+  from chuck_dreamer.real.fk_calibration.fk import FK, load_fk_dq
   from chuck_dreamer.real.fk_calibration.extract_joints import load_episode_config
 
   episode_to_label_by_dataset = load_episode_config(episode_config_path)
@@ -201,6 +201,7 @@ def _build_arm_calibration(ctx, dataset_id: str, episode_config_path: Path):
   if not fk_model_path.exists():
     raise click.ClickException(f"FK model not found at {fk_model_path}")
   fk = FK(fk_model_path)
+  fk_dq = load_fk_dq(ol_cfg.cache_dir)
 
   click.echo(f"Deriving T_world_arm from {dataset_id} "
              f"({len(episode_to_label)} touches: "
@@ -211,6 +212,7 @@ def _build_arm_calibration(ctx, dataset_id: str, episode_config_path: Path):
     fk=fk,
     L_mm=ol_cfg.mat_line_length_mm,
     D_mm=ol_cfg.mat_line_separation_mm,
+    fk_dq=fk_dq,
     fk_model_path=fk_model_path,
   )
   click.echo(f"  max_residual = {max_res:.2f} mm   "

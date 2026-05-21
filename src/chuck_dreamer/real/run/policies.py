@@ -233,23 +233,16 @@ class CornerTouchPolicy:
   time at the current one. Loops indefinitely.
   """
 
-  def __init__(self, R_world_arm: np.ndarray, t_world_arm_mm: np.ndarray,
-               config: CornerTouchConfig) -> None:
-    # T_world_arm: p_world = R @ p_arm + t  (mm). Invert for world → arm.
-    R = np.asarray(R_world_arm, dtype=np.float64)
-    t = np.asarray(t_world_arm_mm, dtype=np.float64).reshape(3)
-    if R.shape != (3, 3):
-      raise ValueError(f"R_world_arm must be (3, 3), got {R.shape}")
-
-    targets_arm_m: list[np.ndarray] = []
+  def __init__(self, config: CornerTouchConfig) -> None:
+    # Targets are stored in world frame (metres). The runner holds
+    # T_world_arm and is responsible for transforming to arm frame
+    # before passing to IK — same path used for the z-floor clamp.
+    targets_world_m: list[np.ndarray] = []
     for cx_mm, cy_mm in config.corners_xy_mm:
-      # World-frame target (mm). The corners are XY offsets from the
-      # origin touch (which is the world frame origin by construction);
-      # z is the hover height above the mat.
-      p_world_mm = np.array([cx_mm, cy_mm, config.hover_z_mm], dtype=np.float64)
-      p_arm_mm   = R.T @ (p_world_mm - t)
-      targets_arm_m.append((p_arm_mm * 1e-3).astype(np.float32))
-    self._targets_arm_m = targets_arm_m
+      p_world_m = np.array([cx_mm * 1e-3, cy_mm * 1e-3,
+                             config.hover_z_mm * 1e-3], dtype=np.float32)
+      targets_world_m.append(p_world_m)
+    self._targets_world_m = targets_world_m
     self._quat = np.asarray(_EE_QUAT_DOWN_WXYZ, dtype=np.float32)
     self._dwell_s = float(config.dwell_s)
     self._idx = 0
@@ -266,10 +259,10 @@ class CornerTouchPolicy:
     if self._waypoint_t0 is None:
       self._waypoint_t0 = now
     elif now - self._waypoint_t0 >= self._dwell_s:
-      self._idx = (self._idx + 1) % len(self._targets_arm_m)
+      self._idx = (self._idx + 1) % len(self._targets_world_m)
       self._waypoint_t0 = now
 
-    pos = self._targets_arm_m[self._idx]
+    pos = self._targets_world_m[self._idx]
     return np.concatenate([pos, self._quat]).astype(np.float32)
 
 
