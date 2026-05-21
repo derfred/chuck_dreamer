@@ -260,7 +260,7 @@ def test_select_video_key_raises_when_no_video_features(tmp_path):
 
 def test_import_dataset_writes_one_file_per_episode(tmp_path, fake_repo):
   out = tmp_path / "out"
-  results = list(li.import_dataset("any/repo", str(out), format="hdf5"))
+  results = list(li.import_dataset("any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False))
 
   assert [idx for idx, _ in results] == [0, 1]
   for _, path in results:
@@ -270,7 +270,7 @@ def test_import_dataset_writes_one_file_per_episode(tmp_path, fake_repo):
 
 def test_import_dataset_per_episode_shapes_and_metadata(tmp_path, fake_repo):
   out = tmp_path / "out"
-  list(li.import_dataset("any/repo", str(out), format="hdf5"))
+  list(li.import_dataset("any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False))
 
   ep0 = load_hdf5_episode(out / "episode-00000.hdf5")
   ep1 = load_hdf5_episode(out / "episode-00001.hdf5")
@@ -287,7 +287,7 @@ def test_import_dataset_per_episode_shapes_and_metadata(tmp_path, fake_repo):
 
 def test_import_dataset_zero_fills_missing_signals(tmp_path, fake_repo):
   out = tmp_path / "out"
-  list(li.import_dataset("any/repo", str(out), format="hdf5"))
+  list(li.import_dataset("any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False))
 
   ep0 = load_hdf5_episode(out / "episode-00000.hdf5")
   # Fields LeRobot teleop doesn't carry must come back as zeros.
@@ -299,7 +299,7 @@ def test_import_dataset_zero_fills_missing_signals(tmp_path, fake_repo):
 
 def test_import_dataset_carries_action_state_and_timestamps(tmp_path, fake_repo):
   out = tmp_path / "out"
-  list(li.import_dataset("any/repo", str(out), format="hdf5"))
+  list(li.import_dataset("any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False))
 
   ep0 = load_hdf5_episode(out / "episode-00000.hdf5")
   ep1 = load_hdf5_episode(out / "episode-00001.hdf5")
@@ -320,7 +320,7 @@ def test_import_dataset_carries_action_state_and_timestamps(tmp_path, fake_repo)
 
 def test_import_dataset_image_content_per_episode(tmp_path, fake_repo):
   out = tmp_path / "out"
-  list(li.import_dataset("any/repo", str(out), format="hdf5"))
+  list(li.import_dataset("any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False))
 
   ep0 = load_hdf5_episode(out / "episode-00000.hdf5")
   ep1 = load_hdf5_episode(out / "episode-00001.hdf5")
@@ -336,7 +336,7 @@ def test_import_dataset_image_content_per_episode(tmp_path, fake_repo):
 def test_import_dataset_respects_max_episodes(tmp_path, fake_repo):
   out = tmp_path / "out"
   results = list(li.import_dataset(
-    "any/repo", str(out), format="hdf5", max_episodes=1))
+    "any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False, max_episodes=1))
 
   assert [idx for idx, _ in results] == [0]
   assert (out / "episode-00000.hdf5").exists()
@@ -347,13 +347,13 @@ def test_import_dataset_rejects_unknown_video_key(tmp_path, fake_repo):
   out = tmp_path / "out"
   with pytest.raises(ValueError, match="not in dataset"):
     list(li.import_dataset(
-      "any/repo", str(out), format="hdf5", video_key="observation.images.nope"))
+      "any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False, video_key="observation.images.nope"))
 
 
 def test_import_dataset_stamps_tags_on_each_episode(tmp_path, fake_repo):
   out = tmp_path / "out"
   list(li.import_dataset(
-    "any/repo", str(out), format="hdf5", tags=("real", "demo")))
+    "any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False, tags=("real", "demo")))
 
   for ep_idx in (0, 1):
     ep = Episode.from_file(out / f"episode-{ep_idx:05d}.hdf5")
@@ -362,7 +362,7 @@ def test_import_dataset_stamps_tags_on_each_episode(tmp_path, fake_repo):
 
 def test_import_dataset_no_tags_by_default(tmp_path, fake_repo):
   out = tmp_path / "out"
-  list(li.import_dataset("any/repo", str(out), format="hdf5"))
+  list(li.import_dataset("any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False))
   ep = Episode.from_file(out / "episode-00000.hdf5")
   assert "tags" not in ep.metadata
 
@@ -370,131 +370,6 @@ def test_import_dataset_no_tags_by_default(tmp_path, fake_repo):
 def test_import_dataset_rerun_round_trip_carries_tags(tmp_path, fake_repo):
   out = tmp_path / "out"
   list(li.import_dataset(
-    "any/repo", str(out), format="rerun", tags=("real",)))
+    "any/repo", str(out), format="rerun", with_ee_pos=False, with_object_pose=False, tags=("real",)))
   ep = Episode.from_file(out / "episode-00000.rrd")
   assert ep.metadata.get("tags") == ("real",)
-
-
-# ---------------------------------------------------------------------------
-# load_processor + processor pipeline
-# ---------------------------------------------------------------------------
-
-
-def test_load_processor_returns_callable(tmp_path):
-  script = tmp_path / "proc.py"
-  script.write_text(
-    "def process(episode, metadata):\n"
-    "    episode['joint_qpos'] = episode['joint_qpos'] * 2.0\n"
-    "    return episode\n"
-  )
-  fn = li.load_processor(script)
-  assert callable(fn)
-  ep = {"joint_qpos": np.array([[1.0, 2.0]], dtype=np.float32)}
-  out = fn(ep, {})
-  np.testing.assert_array_equal(out["joint_qpos"], [[2.0, 4.0]])
-
-
-def test_load_processor_missing_file_raises(tmp_path):
-  with pytest.raises(FileNotFoundError):
-    li.load_processor(tmp_path / "nope.py")
-
-
-def test_load_processor_without_process_attr_raises(tmp_path):
-  script = tmp_path / "bad.py"
-  script.write_text("def something_else(): pass\n")
-  with pytest.raises(AttributeError, match="process"):
-    li.load_processor(script)
-
-
-def test_load_processor_with_non_callable_process_raises(tmp_path):
-  script = tmp_path / "bad.py"
-  script.write_text("process = 42\n")
-  with pytest.raises(AttributeError, match="process"):
-    li.load_processor(script)
-
-
-def test_import_dataset_runs_processor_before_write(tmp_path, fake_repo):
-  out = tmp_path / "out"
-  script = tmp_path / "rescale.py"
-  script.write_text(
-    "def process(episode, metadata):\n"
-    "    episode['joint_qpos'] = episode['joint_qpos'] * 10.0\n"
-    "    return episode\n"
-  )
-  proc = li.load_processor(script)
-  list(li.import_dataset("any/repo", str(out), format="hdf5", processors=(proc,)))
-
-  ep0 = load_hdf5_episode(out / "episode-00000.hdf5")
-  # The synthetic dataset writes joint_qpos[i, j] = i + 0.01 * j; processor
-  # multiplies by 10 → 10*i + 0.1*j.
-  np.testing.assert_allclose(
-    ep0["joint_qpos"][3], [30.0, 30.1, 30.2, 30.3, 30.4, 30.5], atol=1e-5)
-
-
-def test_import_dataset_chains_processors_in_order(tmp_path, fake_repo):
-  out = tmp_path / "out"
-  # First processor adds 1.0, second multiplies by 10. If the order swaps
-  # the final values would be different.
-  script_a = tmp_path / "a.py"
-  script_a.write_text(
-    "def process(episode, metadata):\n"
-    "    episode['joint_qpos'] = episode['joint_qpos'] + 1.0\n"
-    "    return episode\n"
-  )
-  script_b = tmp_path / "b.py"
-  script_b.write_text(
-    "def process(episode, metadata):\n"
-    "    episode['joint_qpos'] = episode['joint_qpos'] * 10.0\n"
-    "    return episode\n"
-  )
-  procs = (li.load_processor(script_a), li.load_processor(script_b))
-  list(li.import_dataset("any/repo", str(out), format="hdf5", processors=procs))
-
-  ep0 = load_hdf5_episode(out / "episode-00000.hdf5")
-  # Row 0 of joint_qpos before processors: [0.0, 0.01, ..., 0.05].
-  # After +1 then *10: [10.0, 10.1, ..., 10.5].
-  np.testing.assert_allclose(
-    ep0["joint_qpos"][0], [10.0, 10.1, 10.2, 10.3, 10.4, 10.5], atol=1e-5)
-
-
-def test_processor_can_read_and_mutate_metadata(tmp_path, fake_repo):
-  # The metadata dict gets passed by reference; processors that need to
-  # tag/annotate at write time can mutate it directly.
-  out = tmp_path / "out"
-  script = tmp_path / "addmeta.py"
-  script.write_text(
-    "def process(episode, metadata):\n"
-    "    # Read existing metadata + add a derived field.\n"
-    "    metadata['outcome'] = f\"processed:{metadata['source']}\"\n"
-    "    return episode\n"
-  )
-  proc = li.load_processor(script)
-  list(li.import_dataset("any/repo", str(out), format="hdf5", processors=(proc,)))
-
-  # ``outcome`` is one of the metadata fields the HDF5 writer persists.
-  import h5py  # type: ignore[import-untyped]
-  with h5py.File(out / "episode-00000.hdf5", "r") as f:
-    written = f["metadata/outcome"][()]
-    val = written.decode("utf-8") if isinstance(written, bytes) else str(written)
-  assert val.startswith("processed:lerobot:")
-
-
-def test_processor_can_compute_ee_pos_from_joints(tmp_path, fake_repo):
-  # End-to-end stand-in for the user's real use case: a processor that
-  # derives ee_pos from joint_qpos via a (toy) kinematics model.
-  out = tmp_path / "out"
-  script = tmp_path / "kin.py"
-  script.write_text(
-    "import numpy as np\n"
-    "def process(episode, metadata):\n"
-    "    # Fake forward-kinematics: ee_pos = first 3 joints summed per axis.\n"
-    "    q = episode['joint_qpos']\n"
-    "    episode['ee_pos'] = np.stack([q[:, 0], q[:, 1], q[:, 2]], axis=1).astype(np.float32)\n"
-    "    return episode\n"
-  )
-  proc = li.load_processor(script)
-  list(li.import_dataset("any/repo", str(out), format="hdf5", processors=(proc,)))
-
-  ep0 = load_hdf5_episode(out / "episode-00000.hdf5")
-  # Frame 3 joint_qpos[0..2] = [3.0, 3.01, 3.02].
-  np.testing.assert_allclose(ep0["ee_pos"][3], [3.0, 3.01, 3.02], atol=1e-5)

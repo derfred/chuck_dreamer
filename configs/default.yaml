@@ -246,8 +246,8 @@ env:
 # Object-localization pipeline (chuck_dreamer.real.object_localization).
 # Used by `python main.py calibrate-intrinsics` + `python main.py annotate-mat`
 # to calibrate cameras from LeRobot recordings, and by the
-# rescale_joints_and_fk processor to populate object_xy. All distance
-# values are in millimeters.
+# `import-lerobot --with-object-pose` stage to populate object_xy. All
+# distance values are in millimeters.
 object_localization:
   # Camera frame key shared across calibration datasets.
   camera_key: "observation.images.front"
@@ -358,7 +358,7 @@ object_localization:
       vel_sigma_mm_s:  500.0    # initial velocity uncertainty (push direction unknown)
     gap_too_long_frames: 30     # mark frames inside longer occlusion gaps as untrustworthy
 
-  # Legacy paths read by the rescale_joints_and_fk processor.
+  # Paths read by the `import-lerobot --with-object-pose` stage.
   mesh_path: "assets/RobotLearning_Rhombicuboctahedron_Object.3mf"
   use_sam2:  true   # set false to force the color-heuristic segmenter
   device:    "cpu"  # "cpu" | "cuda" | "mps"

@@ -16,11 +16,10 @@ EE / object signals.
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Callable, Iterator
 
 import av  # type: ignore[import-untyped]
 import numpy as np
@@ -37,36 +36,6 @@ logger = logging.getLogger(__name__)
 # backend joins onto the dataset root. Both signatures return a ``str`` so
 # the caller can hand it to ``cv2``/``pyarrow``/``av`` unchanged.
 PathResolver = Callable[[str], str]
-
-
-# Episode processor: a callable that takes the assembled per-episode dict and
-# its metadata dict and returns the (possibly transformed) episode dict.
-# Loaded from user-supplied .py files via :func:`load_processor`.
-EpisodeFn = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
-
-
-def load_processor(path: str | Path) -> EpisodeFn:
-  """Load a ``process(episode, metadata)`` callable from a Python file.
-
-  The file must define a top-level ``process`` function with that
-  signature; the returned dict replaces the in-flight episode. Useful
-  for per-import transformations the importer itself shouldn't know
-  about (joint-value rescaling, forward kinematics, image cropping,
-  …).
-  """
-  p = Path(path)
-  if not p.exists():
-    raise FileNotFoundError(f"processor script not found: {p}")
-  spec = importlib.util.spec_from_file_location(f"_chuck_processor_{p.stem}", p)
-  if spec is None or spec.loader is None:
-    raise ImportError(f"cannot import processor script {p}")
-  module = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(module)
-  fn = getattr(module, "process", None)
-  if fn is None or not callable(fn):
-    raise AttributeError(
-      f"processor script {p} must define a top-level callable named 'process'")
-  return fn  # type: ignore[no-any-return]
 
 
 @dataclass
@@ -250,9 +219,9 @@ def import_dataset(
   format: str = "hdf5",
   video_key: str | None = None,
   max_episodes: int | None = None,
-  derive_target_mask: bool = True,
   tags: tuple[str, ...] = (),
-  processors: tuple[EpisodeFn, ...] = (),
+  with_ee_pos: bool = True,
+  with_object_pose: bool = True,
   name_prefix: str | None = None,
   episode_filter: set[int] | None = None,
 ) -> Iterator[tuple[int, Path]]:
@@ -262,32 +231,29 @@ def import_dataset(
   the path to an on-disk LeRobot v3 dataset directory. The latter is
   detected by ``Path(repo_id).is_dir()``.
 
-  ``derive_target_mask`` (default True) runs the white-blob detector
-  from :mod:`chuck_dreamer.sim.blob_mask` over each episode's frames and
-  attaches the resulting Kalman-smoothed circle mask as
-  ``segmentation_target``. This gives the reconstruction-loss focus
-  path a usable target mask even though LeRobot teleop data ships
-  without segmentation.
+  Two post-import stages from :mod:`chuck_dreamer.sim.lerobot_pipeline`
+  run in order on each assembled episode before it is written:
+
+    * ``with_ee_pos`` (default True) rescales ``joint_qpos`` to radians
+      and runs the FK MLP to fill ``ee_pos``, ``ee_quat`` and
+      ``ee_action``. Trainers select between ``joint_action`` and
+      ``ee_action`` based on ``cfg.env.act_mode``.
+    * ``with_object_pose`` (default True) runs SAM2 + per-frame pose
+      fit + RTS smoothing to fill ``object_xy`` and
+      ``object_gap_too_long``. Requires per-dataset calibration and a
+      cached frame-0 prompt; missing either raises.
 
   ``tags`` are stamped onto each written episode's metadata. The
   importer is the canonical way to mark recordings as e.g. ``"real"``
   so the replay buffer's tag-protection and tag-weighting can pick
   them up later (see :class:`ReplayBuffer`).
 
-  ``processors`` is an ordered tuple of ``(episode, metadata) -> episode``
-  callables (usually loaded from .py files via :func:`load_processor`).
-  They run in order as the final step before :meth:`write_episode`, so
-  ``derive_target_mask`` and ``tags`` are already attached when each
-  processor sees the dict. Each processor's return value replaces the
-  in-flight episode.
-
   Generator so callers can wrap in ``tqdm`` and show progress. The
   returned path points at the file produced by :class:`HDF5EpisodeWriter`
   or :class:`RerunEpisodeWriter`.
   """
-  _derive_target_mask: Any = None
-  if derive_target_mask:
-    from .blob_mask import derive_target_mask as _derive_target_mask  # type: ignore[no-redef]
+  from .lerobot_pipeline import apply_ee_pos, apply_object_pose
+
   local_root: Path | None = None
   if Path(repo_id).is_dir():
     local_root = Path(repo_id)
@@ -359,11 +325,6 @@ def import_dataset(
       "ee_quat":      np.zeros((T, 4),        dtype=np.float32),
       "object_xy":    np.zeros((T, 2),        dtype=np.float32),
     }
-    if _derive_target_mask is not None:
-      mask = _derive_target_mask(images)
-      episode["segmentation_target"] = mask
-      from .episode_collector import mask_centroids_uv
-      episode["object_uv"] = mask_centroids_uv(np.asarray(mask, dtype=bool))
     metadata = {
       "config": {
         "source_repo":   repo_id,
@@ -378,8 +339,11 @@ def import_dataset(
     }
     if tags:
       metadata["tags"] = tuple(tags)
-    for fn in processors:
-      episode = fn(episode, metadata)
+
+    if with_ee_pos:
+      apply_ee_pos(episode, metadata)
+    if with_object_pose:
+      apply_object_pose(episode, metadata)
     if name_prefix:
       suffix = f"{name_prefix}-{sl.episode_index:05d}"
     else:

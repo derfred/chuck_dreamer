@@ -179,22 +179,21 @@ def generate_scenes(ctx, episodes, output, seed, fmt, workers, min_steps, overri
               help="Video feature key (e.g. observation.images.wrist). Defaults to the first one.")
 @click.option("--max-episodes", default=None, type=int,
               help="Cap on number of episodes to convert (default: all)")
-@click.option("--derive-target-mask/--no-derive-target-mask", default=True,
-              help="Derive a segmentation_target mask per frame via white-blob detection "
-                   "+ Kalman smoothing (default: on). Provides the focus-loss path with "
-                   "a target mask for datasets that ship without segmentation.")
+@click.option("--with-ee-pos/--no-ee-pos", default=True,
+              help="Rescale joint_qpos to radians and run the FK MLP to fill "
+                   "ee_pos / ee_quat / ee_action (default: on). Required for "
+                   "EE-mode training; needs the trained model at "
+                   "ee_pos_model.safetensors (or $FK_MLP_WEIGHTS).")
+@click.option("--with-object-pose/--no-object-pose", default=True,
+              help="Run SAM2 segmentation + per-frame pose fit + RTS smoothing to "
+                   "fill object_xy / object_gap_too_long (default: on). Requires a "
+                   "per-dataset calibration cache entry (`main.py analyze-cameras`) "
+                   "and a cached frame-0 prompt (`main.py prompt-episodes`).")
 @click.option("--tag", "tags", multiple=True, metavar="TAG",
               help="Tag to stamp onto each written episode's metadata. Repeatable. "
                    "The replay buffer reads these for protected_tags (no-evict) and "
                    "tag_weights (sample upweighting). Typical use: --tag real for "
                    "physical-robot recordings.")
-@click.option("--process", "processor_paths", multiple=True,
-              type=click.Path(exists=True, dir_okay=False),
-              metavar="PATH",
-              help="Path to a Python file defining `process(episode, metadata) -> episode`. "
-                   "Repeatable; processors run in order as the final step before "
-                   "the episode is written. Use for rescaling joint values, computing "
-                   "ee_pos via forward kinematics, image cropping, etc.")
 @click.option("--name-prefix", default=None, type=str,
               help="String prepended to each written episode's filename. "
                    "Use to import multiple datasets into the same --output "
@@ -203,29 +202,33 @@ def generate_scenes(ctx, episodes, output, seed, fmt, workers, min_steps, overri
                    "datasets). Typical: --name-prefix task_2_1805_2")
 @click.pass_context
 def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
-                   derive_target_mask, tags, processor_paths, name_prefix):
+                   with_ee_pos, with_object_pose, tags, name_prefix):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
 
   Pulls the parquet + MP4 from Hugging Face, slices per episode using
   ``meta/episodes/*.parquet``, decodes the matching video range, and
   writes one episode file per LeRobot episode under --output.
 
+  Pipeline stages applied to each imported episode:
+
+    1. Raw import (always): image, joint_action, joint_qpos, timestamp.
+    2. ``--with-ee-pos`` (default on): joint rescaling + FK to ee_pos /
+       ee_quat / ee_action.
+    3. ``--with-object-pose`` (default on): SAM2 segmentation + per-frame
+       pose fit + RTS smoothing to object_xy / object_gap_too_long.
+
   ``REPO_ID`` accepts the same ``DATASET[#EPISODES]`` syntax used by
   ``calibrate-intrinsics`` and ``prompt-episodes`` — e.g.
   ``user/dataset#8-99`` to import only episodes 8 onward. ``:FRAMES``
   syntax is rejected here (frame-range filtering doesn't make sense
   for the importer).
-
-  Fields the repo's format needs but LeRobot teleop data lacks (reward,
-  ee_pos, ee_quat, object_xy) are zero-filled — fine for image-mode
-  training, not for state-mode.
   """
   from tqdm import tqdm
 
   from chuck_dreamer.real.object_localization.calibration.spec_parser import (
     parse_calibration_source,
   )
-  from chuck_dreamer.sim.lerobot_import import import_dataset, load_processor
+  from chuck_dreamer.sim.lerobot_import import import_dataset
 
   try:
     spec = parse_calibration_source(repo_id)
@@ -241,29 +244,31 @@ def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
     set(spec.episodes) if spec.episodes is not None else None
   )
 
-  processors = tuple(load_processor(p) for p in processor_paths)
-
   click.echo(
     f"Importing {parsed_repo_id} → {output}  (format={fmt}, "
-    f"derive_target_mask={derive_target_mask}, tags={list(tags)}, "
-    f"processors={list(processor_paths)}, name_prefix={name_prefix!r}, "
+    f"with_ee_pos={with_ee_pos}, with_object_pose={with_object_pose}, "
+    f"tags={list(tags)}, name_prefix={name_prefix!r}, "
     f"episodes={'all' if episode_filter is None else sorted(episode_filter)})"
   )
   count = 0
-  for ep_idx, out_path in tqdm(
-    import_dataset(
-      parsed_repo_id, output,
-      format=fmt, video_key=video_key, max_episodes=max_episodes,
-      derive_target_mask=derive_target_mask, tags=tuple(tags),
-      name_prefix=name_prefix,
-      processors=processors,
-      episode_filter=episode_filter,
-    ),
-    desc="Episodes",
-    total=(len(episode_filter) if episode_filter is not None else max_episodes),
-  ):
-    count += 1
-    logger.info("episode %d → %s", ep_idx, out_path)
+  try:
+    for ep_idx, out_path in tqdm(
+      import_dataset(
+        parsed_repo_id, output,
+        format=fmt, video_key=video_key, max_episodes=max_episodes,
+        tags=tuple(tags),
+        with_ee_pos=with_ee_pos,
+        with_object_pose=with_object_pose,
+        name_prefix=name_prefix,
+        episode_filter=episode_filter,
+      ),
+      desc="Episodes",
+      total=(len(episode_filter) if episode_filter is not None else max_episodes),
+    ):
+      count += 1
+      logger.info("episode %d → %s", ep_idx, out_path)
+  except FileNotFoundError as e:
+    raise click.ClickException(str(e))
   click.echo(f"Done. Wrote {count} episodes.")
 
 
