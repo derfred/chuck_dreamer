@@ -58,7 +58,7 @@ dependencies = [
     "datasets>=4.8.5",
     "trimesh>=4.12.2",
     "rerun-sdk[all]>=0.30.0",
-    "lerobot[dataset,feetech]",
+    "lerobot[dataset,feetech,placo-dep]",
     "pynput>=1.8.2",
 ]
 

@@ -53,6 +53,29 @@ class RunSettings:
   start_key:  str
 
 
+def _scale_K_for_image_size(K: np.ndarray, calib_size: tuple[int, int],
+                            live_size: tuple[int, int]) -> np.ndarray:
+  """Rescale an intrinsics matrix to a different image size.
+
+  Bundle intrinsics were calibrated at ``calib_size`` (e.g. 1920x1080)
+  but the runner often opens the camera at a lower resolution. ``fx, fy,
+  cx, cy`` scale linearly with the axis ratio; ``dist`` is dimensionless
+  and unchanged.
+  """
+  cw, ch = calib_size
+  lw, lh = live_size
+  if (cw, ch) == (lw, lh):
+    return K
+  sx = lw / float(cw)
+  sy = lh / float(ch)
+  K2 = K.copy()
+  K2[0, 0] *= sx   # fx
+  K2[1, 1] *= sy   # fy
+  K2[0, 2] *= sx   # cx
+  K2[1, 2] *= sy   # cy
+  return K2
+
+
 # ---------------------------------------------------------------------------
 # Factory: cfg.real.policy -> RealPolicy
 # ---------------------------------------------------------------------------
@@ -310,7 +333,12 @@ def _draw_hud(frame: np.ndarray, state: str, fps: float, *, dry_run: bool) -> np
 
 
 def run(cfg) -> None:
-  """Entry point for ``python main.py run``."""
+  """Entry point for ``python main.py run``.
+
+  When ``cfg.real.calibration`` points at an ``annotate-live`` bundle,
+  the runner loads it and overlays the projected mat geometry over every
+  camera frame (same lines as ``annotate-mat --review``).
+  """
   settings = RunSettings(
     control_dt=float(cfg.real.control_dt),
     start_key=str(cfg.real.start_key).lower(),
@@ -323,6 +351,25 @@ def run(cfg) -> None:
     fps=int(cfg.real.camera.fps),
     flip=bool(cfg.real.camera.flip),
   )
+
+  calibration_path = cfg.real.get("calibration", None)
+  overlay_ctx: dict | None = None
+  if calibration_path:
+    from ..object_localization.calibration.bundle import read_bundle
+    from ..object_localization.runtime import init_from_config
+
+    bundle = read_bundle(calibration_path)
+    ol_cfg = init_from_config(cfg)
+    overlay_ctx = {
+      "bundle": bundle,
+      "ol_cfg": ol_cfg,
+      "calib_size": tuple(bundle.intrinsics.image_size),
+      "K_scaled":   None,   # populated lazily on first frame
+    }
+    logger.info("calibration overlay enabled (bundle=%s, calib_size=%s, "
+                "extrinsics_rms=%.2fpx)",
+                calibration_path, bundle.intrinsics.image_size,
+                bundle.extrinsics.rms_px)
   arm_cfg = ArmConfig(
     port=(None if cfg.real.arm.port is None else str(cfg.real.arm.port)),
     calibration_id=(None if cfg.real.arm.calibration_id is None
@@ -422,8 +469,34 @@ def run(cfg) -> None:
               except Exception as e:  # noqa: BLE001 — serial faults vary
                 logger.warning("send_joint_qpos failed: %s — holding pose", e)
 
-        # Draw + window event pump.
-        hud = _draw_hud(bgr, controller.state, fps, dry_run=arm.is_dry_run)
+        # Draw + window event pump. Overlay the calibration first (so the
+        # HUD text stays readable on top of it), then the HUD.
+        canvas = bgr.copy()
+        if overlay_ctx is not None:
+          from ..object_localization.calibration.extrinsics import (
+            draw_extrinsics_overlay_bgr,
+          )
+          live_size = (canvas.shape[1], canvas.shape[0])
+          if overlay_ctx["K_scaled"] is None:
+            overlay_ctx["K_scaled"] = _scale_K_for_image_size(
+              overlay_ctx["bundle"].intrinsics.K,
+              overlay_ctx["calib_size"], live_size,
+            )
+            if overlay_ctx["calib_size"] != live_size:
+              logger.info("overlay K rescaled from %s to %s",
+                          overlay_ctx["calib_size"], live_size)
+          try:
+            draw_extrinsics_overlay_bgr(
+              canvas,
+              overlay_ctx["bundle"].extrinsics,
+              overlay_ctx["K_scaled"],
+              overlay_ctx["bundle"].intrinsics.dist,
+              overlay_ctx["ol_cfg"],
+            )
+          except Exception as e:  # noqa: BLE001 — projection failures vary
+            logger.warning("overlay draw failed: %s — dropping overlay", e)
+            overlay_ctx = None
+        hud = _draw_hud(canvas, controller.state, fps, dry_run=arm.is_dry_run)
         cv2.imshow(WINDOW_NAME, hud)
         key = cv2.waitKey(1) & 0xFF
 

@@ -170,6 +170,13 @@ real:
     fps:      30
     flip:     false   # mirror the frame horizontally before showing/feeding the policy
 
+  # Calibration bundle (intrinsics + extrinsics + mat detection) written
+  # by `python main.py annotate-live --output <path>`. When set, the
+  # runner reprojects the mat geometry over the live camera feed (same
+  # lines as `annotate-mat --review`). Null disables the overlay.
+  # CLI override: `python main.py run --calibration <path>`.
+  calibration: null
+
   # SO-101 follower over USB. ``port`` is the serial device the lerobot bus
   # opens (e.g. ``"/dev/tty.usbmodem58FA0834521"`` on macOS,
   # ``"/dev/ttyACM0"`` on Linux). Leave null to run without an arm:

@@ -609,7 +609,8 @@ def eval_cmd(ctx, name, run_all, recordings, checkpoint_path, num_episodes,
               help="USB port for the SO-101 controller. Overrides cfg.real.arm.port.")
 @override_option
 @click.pass_context
-def run_cmd(ctx, policy_type, checkpoint_path, camera_source, arm_port, overrides):
+def run_cmd(ctx, policy_type, checkpoint_path, camera_source, arm_port,
+            overrides):
   """Run a policy on the real SO-101 arm.
 
   Opens the configured camera, instantiates the policy, and feeds the
@@ -640,18 +641,24 @@ def run_cmd(ctx, policy_type, checkpoint_path, camera_source, arm_port, override
 
 
 from chuck_dreamer.real.object_localization.cli import (
+  annotate_live_cmd,
   annotate_mat_cmd,
+  augment_keyframes_cmd,
   calibrate_intrinsics_cmd,
   prompt_episodes_cmd,
   test_calibration_cmd,
   test_object_pose_cmd,
 )
+from chuck_dreamer.real.fk_calibration.cli import extract_joints_cmd
 
 cli.add_command(calibrate_intrinsics_cmd)
 cli.add_command(annotate_mat_cmd)
+cli.add_command(annotate_live_cmd)
 cli.add_command(prompt_episodes_cmd)
+cli.add_command(augment_keyframes_cmd)
 cli.add_command(test_calibration_cmd)
 cli.add_command(test_object_pose_cmd)
+cli.add_command(extract_joints_cmd)
 
 
 if __name__ == "__main__":

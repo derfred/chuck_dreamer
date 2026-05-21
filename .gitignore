@@ -111,3 +111,4 @@ configs/secret_*.yaml
 docs/_build/
 eval_runs/
 calibration_cache/**/intrinsics_hits.jsonl
+docs/

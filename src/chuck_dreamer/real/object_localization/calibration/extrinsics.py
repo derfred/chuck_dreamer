@@ -271,6 +271,42 @@ def render_extrinsics_overlay(
   return canvas
 
 
+def draw_extrinsics_overlay_bgr(
+  canvas_bgr: np.ndarray, extrinsics: Extrinsics, K: np.ndarray, dist: np.ndarray,
+  ol_cfg: ObjectLocalizationConfig,
+) -> None:
+  """Draw the mat geometry overlay directly onto a BGR canvas in-place.
+
+  Same lines as :func:`render_extrinsics_overlay` but without the
+  annotation-time decorations (per-click markers, per-point reprojection
+  error labels): just the two painted lines, the world circle, and the
+  mat border. Cheap enough to run every frame in the live runner.
+  """
+  import cv2
+
+  rvec, _ = cv2.Rodrigues(extrinsics.R)
+  tvec = extrinsics.t.reshape(3)
+
+  line_world = line_world_points(ol_cfg.mat_line_length_mm,
+                                 ol_cfg.mat_line_separation_mm)
+  line_proj, _ = cv2.projectPoints(line_world, rvec, tvec, K, dist)
+  line_proj = line_proj.reshape(-1, 2)
+  cv2.line(canvas_bgr, _ipt(line_proj[0]), _ipt(line_proj[1]), (0, 255, 0), 2)
+  cv2.line(canvas_bgr, _ipt(line_proj[2]), _ipt(line_proj[3]), (0, 0, 255), 2)
+
+  circle_world = circle_samples_world(ol_cfg.mat_circle_radius_mm, 256)
+  circle_proj, _ = cv2.projectPoints(circle_world, rvec, tvec, K, dist)
+  circle_proj = circle_proj.reshape(-1, 2)
+  pts = np.array([_ipt(p) for p in circle_proj], dtype=np.int32)
+  cv2.polylines(canvas_bgr, [pts], isClosed=True, color=(0, 165, 255), thickness=2)
+
+  border_world = _mat_border_samples_world(ol_cfg, n_per_edge=32)
+  border_proj, _ = cv2.projectPoints(border_world, rvec, tvec, K, dist)
+  border_proj = border_proj.reshape(-1, 2)
+  border_pts = np.array([_ipt(p) for p in border_proj], dtype=np.int32)
+  cv2.polylines(canvas_bgr, [border_pts], isClosed=True, color=(80, 255, 80), thickness=2)
+
+
 def render_world_axes(
   frame_rgb: np.ndarray, extrinsics: Extrinsics, K: np.ndarray, dist: np.ndarray,
   axis_mm: float = 100.0,
