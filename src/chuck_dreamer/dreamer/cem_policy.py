@@ -48,6 +48,12 @@ class CEMPolicy:
                      returned to the env.
     warm_start:      if True, the refitted mean from the previous call
                      seeds this call's mean (shifted one step).
+    ee_max_delta:    if set and action_dim == 7, project sampled EE pose
+                     actions so each imagined step moves at most this
+                     many meters per xyz coordinate from the previous
+                     imagined pose.
+    ee_freeze_quat:  if True in EE projection mode, keep quaternion fixed
+                     to the last executed/seeded EE orientation.
   """
 
   def __init__(
@@ -64,6 +70,8 @@ class CEMPolicy:
     action_low:     float | np.ndarray = -1.0,
     action_high:    float | np.ndarray = 1.0,
     warm_start:     bool = True,
+    ee_max_delta:   float | None = None,
+    ee_freeze_quat: bool = True,
   ) -> None:
     if horizon < 1:
       raise ValueError(f"horizon must be >= 1, got {horizon}")
@@ -83,6 +91,8 @@ class CEMPolicy:
       raise ValueError(f"min_std must be >= 0, got {min_std}")
     if not (0.0 < discount <= 1.0):
       raise ValueError(f"discount must be in (0, 1], got {discount}")
+    if ee_max_delta is not None and ee_max_delta <= 0:
+      raise ValueError(f"ee_max_delta must be > 0 when set, got {ee_max_delta}")
 
     self.model          = model
     self.horizon        = horizon
@@ -93,6 +103,8 @@ class CEMPolicy:
     self.min_std        = min_std
     self.discount       = discount
     self.warm_start     = warm_start
+    self.ee_max_delta   = ee_max_delta
+    self.ee_freeze_quat = ee_freeze_quat
 
     low  = np.broadcast_to(
       np.asarray(action_low,  dtype=np.float32),
@@ -125,6 +137,22 @@ class CEMPolicy:
     self._tracker_state = self.model.initial_state(1)
     self._prev_action   = np.zeros((self.model.action_dim,), dtype=np.float32)
     self._mean          = None
+    
+  def seed_action(self, action: np.ndarray) -> None:
+    """Seed CEM with a known valid action.
+
+    Useful for absolute action spaces such as EE pose actions, where a
+    zero action is not a valid or reachable pose. Call this after reset().
+    """
+    action = np.asarray(action, dtype=np.float32)
+    if action.shape != (self.model.action_dim,):
+      raise ValueError(
+        f"seed action must have shape {(self.model.action_dim,)}, got {action.shape}"
+      )
+
+    action = np.clip(action, self.action_low, self.action_high).astype(np.float32)
+    self._prev_action = action
+    self._mean = np.tile(action[None, :], (self.horizon, 1)).astype(np.float32)
 
   def act(self, obs: Any) -> np.ndarray:
     if self._tracker_state is None or self._prev_action is None:
@@ -229,16 +257,63 @@ class CEMPolicy:
       shifted[:-1] = self._mean[1:]
       return shifted
     return np.zeros((H, A), dtype=np.float32)
+  
+  def _project_ee_samples(self, samples: np.ndarray) -> np.ndarray:
+    """Project sampled absolute EE poses into small reachable steps.
 
-  def _sample_actions(self, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
-    """Sample ``(N, H, A)`` from a diagonal Gaussian, clipped to bounds."""
-    noise = np.random.randn(self.num_samples, *mean.shape).astype(np.float32)
-    samples = mean[None] + std[None] * noise
+    EE actions are absolute poses:
+      [x, y, z, qw, qx, qy, qz]
+
+    Direct Gaussian sampling in this 7D box can produce poses that are
+    inside action bounds but unreachable by IK. This projection keeps
+    each imagined xyz step close to the previous imagined pose, and
+    optionally freezes the quaternion to the last executed/seeded pose.
+    """
+    if self.ee_max_delta is None:
+      return samples
+    if self.model.action_dim != 7:
+      return samples
+    if self._prev_action is None:
+      return samples
+
+    samples = samples.copy()
+
+    max_delta = float(self.ee_max_delta)
+    prev_pos = np.broadcast_to(
+      self._prev_action[:3].astype(np.float32),
+      (samples.shape[0], 3),
+    ).copy()
+
+    for t in range(samples.shape[1]):
+      raw_pos = samples[:, t, :3]
+      delta = np.clip(raw_pos - prev_pos, -max_delta, max_delta)
+      safe_pos = prev_pos + delta
+      samples[:, t, :3] = safe_pos
+      prev_pos = safe_pos
+
+    if self.ee_freeze_quat:
+      samples[:, :, 3:7] = self._prev_action[3:7].astype(np.float32)
+    else:
+      quat = samples[:, :, 3:7]
+      norm = np.linalg.norm(quat, axis=-1, keepdims=True)
+      samples[:, :, 3:7] = quat / np.maximum(norm, 1e-6)
+
     return np.clip(
       samples,
       self.action_low[None, None, :],
       self.action_high[None, None, :],
     ).astype(np.float32, copy=False)
+
+  def _sample_actions(self, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    """Sample ``(N, H, A)`` from a diagonal Gaussian, clipped to bounds."""
+    noise = np.random.randn(self.num_samples, *mean.shape).astype(np.float32)
+    samples = mean[None] + std[None] * noise
+    samples = np.clip(
+      samples,
+      self.action_low[None, None, :],
+      self.action_high[None, None, :],
+    ).astype(np.float32, copy=False)
+    return self._project_ee_samples(samples)
 
   def _score(self, plan_state: State, samples: np.ndarray) -> np.ndarray:
     """Return ``(N,)`` discounted predicted returns over the horizon.

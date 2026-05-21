@@ -341,9 +341,13 @@ def show_scene(ctx, seed, step_delay, policy_type, checkpoint_path,
         num_samples=int(c.num_samples),
         num_elites=int(c.num_elites),
         num_iterations=int(c.num_iterations),
+        init_std=float(c.get("init_std", 0.02)),
+        min_std=float(c.get("min_std", 0.002)),
         discount=float(c.get("discount", 1.0)),
         action_low=env.action_space.low,
         action_high=env.action_space.high,
+        ee_max_delta=float(c.get("ee_max_delta", c.get("max_delta", 0.005))),
+        ee_freeze_quat=bool(c.get("ee_freeze_quat", True)),
       )
     elif policy_type == "cem_probe":
       if not probe_path:
@@ -384,6 +388,9 @@ def show_scene(ctx, seed, step_delay, policy_type, checkpoint_path,
     policy = GatedPolicy(inner, hold_action=_hold_action, project=env.policy_obs)
     policy.reset(scene)
 
+    if policy_type == "cem":
+      inner.seed_action(_hold_action(obs))
+
   def key_callback(keycode):
     if keycode != 32:  # Space bar
       return True
@@ -409,6 +416,10 @@ def show_scene(ctx, seed, step_delay, policy_type, checkpoint_path,
     while v.is_running():
       if not done:
         prev_state = policy.state if isinstance(policy, ScriptedPolicy) else None
+
+        if policy_type == "cem" and env.act_mode == "ee":
+          inner.seed_action(_hold_action(obs))
+
         action = policy.act(obs)
         obs, _, terminated, truncated, _ = env.step(action)
 
