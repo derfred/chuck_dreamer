@@ -2,7 +2,7 @@
 # Sync the local working tree to a remote host over ssh, re-syncing on any change.
 #
 # Usage:
-#   scripts/rsync_watch.sh <user@host>:<remote/path> [--ignore <glob>]... [--ssh-port N] [--initial-only]
+#   scripts/rsync_watch.sh <user@host>:<remote/path> [--ignore <glob>]... [--ssh-port N] [--initial-only] [--progress]
 #
 # Examples:
 #   scripts/rsync_watch.sh me@gpu-box:~/world_model_pusher \
@@ -22,6 +22,7 @@ fi
 REMOTE="$1"; shift
 SSH_PORT=22
 INITIAL_ONLY=0
+PROGRESS=0
 
 # --- Default excludes (edit these) -------------------------------------------
 # rsync --exclude syntax: trailing '/' means directory, '*' is a glob.
@@ -36,8 +37,11 @@ EXCLUDES=(
 
   --exclude=data/eval-real
   --exclude=data/generated-pushes
+  --exclude=data/new-generated-pushes
   --exclude=data/oldtraces
   --exclude=data/warmup-real
+  --exclude=data/eval-old
+  --exclude=data/warmup-old
   --exclude=checkpoints
   --exclude=data/real_imported
 )
@@ -53,6 +57,8 @@ while [[ $# -gt 0 ]]; do
       SSH_PORT="$2"; shift 2 ;;
     --initial-only)
       INITIAL_ONLY=1; shift ;;
+    --progress)
+      PROGRESS=1; shift ;;
     -h|--help)
       sed -n '2,14p' "$0"; exit 0 ;;
     *)
@@ -75,6 +81,26 @@ do_sync() {
   printf '[%s] syncing -> %s\n' "$ts" "$REMOTE"
 
   start=$(date +%s)
+
+  if [[ $PROGRESS -eq 1 ]]; then
+    # Stream rsync output live so big transfers show progress.
+    # Use --progress (per-file) since macOS' bundled rsync 2.6 lacks --info=progress2.
+    set +e
+    rsync "${RSYNC_OPTS[@]}" --progress "${EXCLUDES[@]}" "${SRC_DIR}/" "${REMOTE}/"
+    status=$?
+    set -e
+    end=$(date +%s)
+    elapsed=$((end - start))
+
+    if [[ $status -ne 0 ]]; then
+      printf '[%s] rsync failed (exit %d, %ds) — continuing\n\n' "$(date +%H:%M:%S)" "$status" "$elapsed" >&2
+      return
+    fi
+
+    printf '[%s] done in %ds\n\n' "$(date +%H:%M:%S)" "$elapsed"
+    return
+  fi
+
   set +e
   out="$(rsync "${RSYNC_OPTS[@]}" "${EXCLUDES[@]}" "${SRC_DIR}/" "${REMOTE}/" 2>&1)"
   status=$?
