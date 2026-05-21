@@ -260,6 +260,7 @@ class ObjectPoseEstimator:
     masks = segment_video(frame_list, kfs[0], self.use_sam2,
                           self.sam2_checkpoint, self.device,
                           scene_bg=self.scene_bg)
+    self.last_masks = masks
 
     out: list[ObjectPose | None] = []
     prev: ObjectPose | None = None

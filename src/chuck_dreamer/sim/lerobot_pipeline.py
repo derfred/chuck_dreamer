@@ -21,6 +21,7 @@ object-localization runtime loads across episodes in one import run.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -221,6 +222,17 @@ def apply_object_pose(episode: dict[str, Any], metadata: dict[str, Any]) -> None
   print(f"[apply_object_pose] {source_repo} ep{episode_index}: "
         f"estimator returned {n_ok}/{len(poses)} non-None poses")
 
+  masks = getattr(estimator, "last_masks", None)
+  if masks is not None:
+    _store_masks_and_uv(episode, list(imgs), masks)
+
+  debug_dir = os.environ.get("IMPORT_LEROBOT_DEBUG_MASKS")
+  if debug_dir:
+    _dump_debug_masks(
+      Path(debug_dir), source_repo, episode_index,
+      list(imgs), getattr(estimator, "last_masks", None),
+    )
+
   smoother = _ensure_smoother(source_repo)
   if all(p is None for p in poses) or poses[0] is None:
     out = np.zeros((T, 2), dtype=np.float32)
@@ -237,3 +249,85 @@ def apply_object_pose(episode: dict[str, Any], metadata: dict[str, Any]) -> None
   episode["object_gap_too_long"] = np.array(
     [f.gap_too_long for f in frames], dtype=np.bool_,
   )
+
+
+def _store_masks_and_uv(episode: dict[str, Any],
+                        imgs: list[np.ndarray],
+                        masks: list[np.ndarray | None]) -> None:
+  """Fill ``segmentation_target`` (T, H, W) uint8 and ``object_uv`` (T, 2)
+  float32 on the episode dict from per-frame SAM2 masks.
+
+  Pixels carry label 1 inside the target mask, 0 elsewhere. For frames
+  where SAM2 returned no mask we emit a zero mask and ``NaN`` centroids
+  so downstream tooling can tell drop-outs apart from "mask centred at
+  origin".
+  """
+  T = len(imgs)
+  if T == 0:
+    return
+  ref = next((np.asarray(m) for m in masks if m is not None), None)
+  if ref is None:
+    return
+  H, W = ref.shape[:2]
+  seg_arr = np.zeros((T, H, W), dtype=np.uint8)
+  uv_arr  = np.full((T, 2), np.nan, dtype=np.float32)
+  for t, m in enumerate(masks):
+    if m is None:
+      continue
+    m_arr = np.asarray(m, dtype=bool)
+    if m_arr.shape[:2] != (H, W):
+      continue
+    seg_arr[t][m_arr] = 1
+    ys, xs = np.where(m_arr)
+    if xs.size:
+      uv_arr[t, 0] = float(xs.mean())
+      uv_arr[t, 1] = float(ys.mean())
+  episode["segmentation_target"] = seg_arr
+  episode["object_uv"]           = uv_arr
+
+
+def _dump_debug_masks(out_root: Path, source_repo: str, episode_index: int,
+                      imgs: list[np.ndarray],
+                      masks: list[np.ndarray | None] | None) -> None:
+  """Dump per-frame mask overlays for visual inspection.
+
+  Triggered by setting ``IMPORT_LEROBOT_DEBUG_MASKS=<dir>``. Writes one
+  PNG per frame to ``<dir>/<dataset_slug>/ep<NNN>/frame_<NNNNN>.png``,
+  with the SAM2 mask shown as a red 50% overlay on the source image.
+  Frames where segmentation failed are still dumped (no overlay) so
+  drop-outs are visible by scrubbing the folder.
+  """
+  if masks is None:
+    print(f"[debug-masks] no masks available on estimator; skipping dump")
+    return
+  try:
+    from PIL import Image
+  except ImportError:
+    print(f"[debug-masks] PIL not available; skipping dump")
+    return
+
+  from chuck_dreamer.real.object_localization.types import dataset_slug
+
+  ep_dir = out_root / dataset_slug(source_repo) / f"ep{episode_index:03d}"
+  ep_dir.mkdir(parents=True, exist_ok=True)
+  n_with_mask = 0
+  for t, (img, mask) in enumerate(zip(imgs, masks)):
+    if img.dtype != np.uint8:
+      img_u8 = (np.clip(img.astype(np.float32), 0.0, 1.0) * 255.0).astype(np.uint8)
+    else:
+      img_u8 = img
+    if img_u8.ndim == 3 and img_u8.shape[-1] == 1:
+      img_u8 = np.repeat(img_u8, 3, axis=-1)
+    if img_u8.ndim == 2:
+      img_u8 = np.stack([img_u8] * 3, axis=-1)
+    out = img_u8.copy()
+    if mask is not None:
+      n_with_mask += 1
+      m = np.asarray(mask, dtype=bool)
+      if m.shape[:2] == out.shape[:2]:
+        red = np.array([255, 0, 0], dtype=np.uint8)
+        out[m] = (out[m].astype(np.uint16) * 1 // 2
+                  + red.astype(np.uint16) * 1 // 2).astype(np.uint8)
+    Image.fromarray(out).save(ep_dir / f"frame_{t:05d}.png")
+  print(f"[debug-masks] wrote {len(imgs)} frames "
+        f"({n_with_mask} with mask) to {ep_dir}")

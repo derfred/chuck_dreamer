@@ -383,5 +383,5 @@ object_localization:
   # Paths read by the `import-lerobot --with-object-pose` stage.
   mesh_path: "assets/RobotLearning_Rhombicuboctahedron_Object.3mf"
   use_sam2:  true   # set false to force the color-heuristic segmenter
-  device:    "cpu"  # "cpu" | "cuda" | "mps"
+  device:    "auto"  # "auto" | "cpu" | "cuda" | "mps"
 

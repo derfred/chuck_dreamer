@@ -196,8 +196,8 @@ def _seed_cem_from_current_pose(
     )
 
 
-def _policy_obs_mode_has_ee(policy) -> bool:
-  """Return True if the loaded model's ``obs_mode`` includes ``"ee"``.
+def _policy_obs_mode_has(policy, component: str) -> bool:
+  """Return True if the loaded model's ``obs_mode`` includes ``component``.
 
   Looks through :class:`~chuck_dreamer.policy.GatedPolicy` wrapping at
   ``.inner`` and then at ``.model.obs_mode``. Returns ``False`` for
@@ -205,7 +205,7 @@ def _policy_obs_mode_has_ee(policy) -> bool:
   ``CornerTouchPolicy``) — those have nothing to feed observations to.
   """
   from chuck_dreamer.policy import GatedPolicy
-  from ...training.observation import EE, normalize_obs_mode
+  from ...training.observation import normalize_obs_mode
 
   inner = policy.inner if isinstance(policy, GatedPolicy) else policy
   model = getattr(inner, "model", None)
@@ -214,7 +214,7 @@ def _policy_obs_mode_has_ee(policy) -> bool:
   obs_mode = getattr(model, "obs_mode", None)
   if obs_mode is None:
     return False
-  return EE in normalize_obs_mode(obs_mode)
+  return component in normalize_obs_mode(obs_mode)
 
 
 def _hold_qpos(obs: dict) -> np.ndarray:
@@ -455,11 +455,32 @@ def run(cfg) -> None:
   # has no model and emits joint qpos, so neither side needs it there.
   ik: _EEToJointsIK | None = None
   action_needs_ik = str(cfg.real.policy.type) in ("cem", "dreamer", "corner_touch")
-  obs_needs_fk = _policy_obs_mode_has_ee(policy)
+  obs_needs_fk = _policy_obs_mode_has(policy, "ee")
+  obs_needs_object_uv = _policy_obs_mode_has(policy, "object_uv")
   if action_needs_ik or obs_needs_fk:
     ik = _EEToJointsIK()
     logger.info("IK adapter built (URDF=%s, action_ik=%s, obs_fk=%s)",
                 _URDF_PATH, action_needs_ik, obs_needs_fk)
+
+  # SAM2-backed object tracker, loaded only when the model wants
+  # ``object_uv``. Construction is heavy (ViT weights) so we do it
+  # eagerly here — the actual click prompt + worker thread start happens
+  # at controller-start time, with the first live frame in hand.
+  object_tracker = None
+  if obs_needs_object_uv:
+    from .object_tracker import ObjectTracker
+    sam2_checkpoint = "facebook/sam2-hiera-base-plus"
+    sam2_device     = "mps"
+    if "object_localization" in cfg:
+      ol = cfg.object_localization
+      sam2_checkpoint = str(getattr(ol, "object", {}).get("sam2_checkpoint",
+                                                          sam2_checkpoint)
+                            if hasattr(getattr(ol, "object", {}), "get")
+                            else sam2_checkpoint)
+      sam2_device = str(getattr(ol, "device", sam2_device) or sam2_device)
+    logger.info("Loading SAM2 image predictor (checkpoint=%s, device=%s) — "
+                "this takes a few seconds.", sam2_checkpoint, sam2_device)
+    object_tracker = ObjectTracker(checkpoint=sam2_checkpoint, device=sam2_device)
 
   # World-frame z-floor for EE actions. Defends against a runaway policy
   # commanding the gripper into the mat. Engaged only for 7-D EE actions
@@ -520,6 +541,14 @@ def run(cfg) -> None:
         }
         if ik is not None and obs_needs_fk:
           obs["ee"] = ik.current_ee_action(current_qpos)
+        if object_tracker is not None:
+          # Hand the worker the freshest frame (drop-on-arrival) and
+          # read whatever the last completed inference produced. Before
+          # the operator hits start the tracker isn't running and
+          # latest_uv() returns NaNs; the controller is idle then anyway
+          # so the obs is never consumed by the model.
+          object_tracker.submit_frame(rgb)
+          obs["object_uv"] = object_tracker.latest_uv()
 
         # Hand off to the controller at control_dt cadence — camera
         # refreshes faster than control to keep the HUD lively.
@@ -608,6 +637,22 @@ def run(cfg) -> None:
         key = cv2.waitKey(1) & 0xFF
 
         if key == start_keycode:
+          # If the model needs ``object_uv`` and the tracker hasn't been
+          # primed yet, collect a click prompt against the current frame
+          # before handing control to the policy. This blocks the run
+          # loop until the operator clicks; that's fine — we haven't
+          # started motion yet.
+          if object_tracker is not None and not object_tracker.is_started():
+            from .object_tracker import click_prompt_uv
+            try:
+              click_uv = click_prompt_uv(bgr, WINDOW_NAME)
+            except KeyboardInterrupt:
+              logger.info("start aborted at object-click prompt")
+              continue
+            object_tracker.start(rgb, click_uv)
+            # Refresh obs["object_uv"] with the synchronous warm result so
+            # the very first controller tick sees a real centroid.
+            obs["object_uv"] = object_tracker.latest_uv()
           controller.start(obs)
           logger.info("controller started")
           # Seed CEM's action distribution from the current EE pose so
@@ -630,6 +675,8 @@ def run(cfg) -> None:
     finally:
       if isinstance(policy, ManualPolicy):
         policy.stop_listener()
+      if object_tracker is not None:
+        object_tracker.stop()
       controller.stop()
       cv2.destroyWindow(WINDOW_NAME)
       logger.info("last commanded action: %s", last_action)

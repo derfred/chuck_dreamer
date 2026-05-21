@@ -380,10 +380,19 @@ def _project_obs_for_model(obs: dict, obs_mode: Any) -> dict:
           "loaded policy needs IK or its obs_mode includes 'ee')."
         )
       out[c] = np.asarray(obs["ee"], dtype=np.float32)
-    elif c in (OBJECT_XY, OBJECT_UV):
+    elif c == OBJECT_UV:
+      if "object_uv" not in obs:
+        raise ValueError(
+          "obs_mode includes 'object_uv' but the runner did not populate "
+          "obs['object_uv']. Ensure the SAM2 ObjectTracker is started "
+          "(it runs automatically when the loaded model's obs_mode "
+          "includes 'object_uv')."
+        )
+      out[c] = np.asarray(obs["object_uv"], dtype=np.float32)
+    elif c == OBJECT_XY:
       raise ValueError(
         f"obs_mode component {c!r} is not supported on the real arm: "
-        f"the runner does not compute object_xy / object_uv."
+        f"the runner does not compute object_xy yet."
       )
     else:
       raise ValueError(f"unknown obs_mode component {c!r}")
