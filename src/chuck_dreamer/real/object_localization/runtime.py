@@ -18,6 +18,23 @@ from typing import Any
 from omegaconf import DictConfig, OmegaConf
 
 
+def _resolve_device(value: Any) -> str:
+  requested = str(value).lower() if value is not None else "auto"
+  if requested != "auto":
+    return requested
+  try:
+    import torch
+    if torch.cuda.is_available():
+      return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+      import os
+      os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+      return "mps"
+  except ImportError:
+    pass
+  return "cpu"
+
+
 @dataclass
 class ObjectLocalizationConfig:
   camera_key: str
@@ -171,7 +188,7 @@ def _parse(raw: dict[str, Any]) -> ObjectLocalizationConfig:
     edges_max_iter             = int(edges.get("max_iter", 50)),
 
     use_sam2 = bool(raw.get("use_sam2", True)),
-    device   = str(raw.get("device", "cpu")),
+    device   = _resolve_device(raw.get("device", "auto")),
 
     raw = raw,
   )

@@ -339,6 +339,19 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
                     meta_grp.create_dataset(
                         "tags",
                         data=np.asarray([str(t) for t in tags], dtype=h5py.string_dtype()))
+                # Arm-to-world calibration block (stored as a single JSON
+                # string for forward-compatibility with the brief's data
+                # contract). Written by import-lerobot when an episode-
+                # config supplies T_world_arm for the dataset.
+                t_world_arm = metadata.get("T_world_arm")
+                if t_world_arm is not None:
+                    blob = {
+                        "T_world_arm":     t_world_arm,
+                        "arm_diagnostics": metadata.get("arm_diagnostics"),
+                        "arm_metadata":    metadata.get("arm_metadata"),
+                    }
+                    meta_grp.create_dataset(
+                        "T_world_arm", data=json.dumps(blob))
 
         return ep_path
 
@@ -461,6 +474,12 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             # Tags ride as a comma-joined string since Rerun metadata props are
             # dict[str, str]. The reader splits on commas to recover the tuple.
             props["tags"] = ",".join(str(t) for t in metadata["tags"])
+        if metadata is not None and metadata.get("T_world_arm") is not None:
+            props["T_world_arm"] = json.dumps({
+                "T_world_arm":     metadata["T_world_arm"],
+                "arm_diagnostics": metadata.get("arm_diagnostics"),
+                "arm_metadata":    metadata.get("arm_metadata"),
+            })
         self._log_metadata(rec, props)
 
         images     = np.asarray(episode["image"],      dtype=np.uint8)

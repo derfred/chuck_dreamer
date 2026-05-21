@@ -8,6 +8,7 @@ can consume directly.
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -17,6 +18,10 @@ import numpy as np
 
 from chuck_dreamer.config import load_config
 
+from ..calibration.arm import (
+  DEFAULT_TOUCH_SEQUENCE,
+  run_arm_touch_calibration,
+)
 from ..calibration.bundle import (
   CalibrationBundle,
   read_loose_intrinsics,
@@ -35,6 +40,10 @@ from ..calibration.interactive import (
 from ..runtime import init_from_config
 from .common import override_option
 
+# SO-101 MJCF used by FK. Mirrors `chuck_dreamer.sim.scene_builder`.
+_FK_MODEL_PATH = (Path(__file__).resolve().parents[5]
+                  / "assets" / "mujoco" / "so101_arm.xml")
+
 logger = logging.getLogger(__name__)
 
 _PREVIEW_WINDOW = "annotate-live · capture"
@@ -51,15 +60,24 @@ _PREVIEW_WINDOW = "annotate-live · capture"
                    "<object_localization.cache_dir>/intrinsics.json).")
 @click.option("--camera", "camera_source", default=None, type=str,
               help="Camera index or device path. Overrides cfg.real.camera.source.")
+@click.option("--skip-arm/--with-arm", "skip_arm", default=False,
+              help="Skip the arm-to-world (T_world_arm) touch calibration.")
+@click.option("--arm-port", "arm_port", default=None, type=str,
+              help="Serial port for the SO-101 follower. Overrides "
+                   "cfg.real.arm.port. With no port (and none in config) "
+                   "the arm runs dry-run and the arm step is skipped.")
 @override_option
 @click.pass_context
 def annotate_live_cmd(ctx, output_path: Path, intrinsics_path: Path | None,
-                      camera_source: str | None,
+                      camera_source: str | None, skip_arm: bool,
+                      arm_port: str | None,
                       overrides: tuple[str, ...]) -> None:
   """Capture a frame from the live camera, annotate the mat, save the bundle."""
   aliases: dict = {}
   if camera_source is not None:
     aliases["real.camera.source"] = camera_source
+  if arm_port is not None:
+    aliases["real.arm.port"] = arm_port
   cfg = load_config(ctx.obj["config_path"], overrides=overrides, aliases=aliases)
   ol_cfg = init_from_config(cfg)
 
@@ -172,3 +190,60 @@ def annotate_live_cmd(ctx, output_path: Path, intrinsics_path: Path | None,
     "camera_size":       [int(cam_cfg.width), int(cam_cfg.height)],
   })
   click.echo(f"wrote {output_path}")
+
+  if skip_arm:
+    click.echo("--skip-arm set; T_world_arm not calibrated.")
+    return
+
+  arm_port_cfg = cfg.real.arm.port
+  if arm_port_cfg is None:
+    click.echo("cfg.real.arm.port is null; running arm in dry-run mode "
+               "would produce a meaningless T_world_arm. Skipping. Pass "
+               "--arm-port PATH or set real.arm.port to enable.")
+    return
+
+  _run_arm_step(cfg, ol_cfg, output_path)
+
+
+def _run_arm_step(cfg, ol_cfg, output_path: Path) -> None:
+  """Run the 4-touch arm-to-world calibration and merge into the bundle."""
+  from ...run.arm import Arm, ArmConfig
+  from ...fk_calibration.fk import FK
+
+  if not _FK_MODEL_PATH.exists():
+    raise click.ClickException(f"FK model not found at {_FK_MODEL_PATH}")
+  fk = FK(_FK_MODEL_PATH)
+
+  arm_cfg = ArmConfig(
+    port=str(cfg.real.arm.port),
+    calibration_id=(None if cfg.real.arm.calibration_id is None
+                    else str(cfg.real.arm.calibration_id)),
+    disable_torque_on_disconnect=bool(cfg.real.arm.disable_torque_on_disconnect),
+    max_relative_target=(None if cfg.real.arm.max_relative_target is None
+                         else float(cfg.real.arm.max_relative_target)),
+    use_degrees=bool(cfg.real.arm.use_degrees),
+  )
+
+  with Arm(arm_cfg) as arm:
+    arm_block = run_arm_touch_calibration(
+      arm=arm,
+      fk=fk,
+      L_mm=ol_cfg.mat_line_length_mm,
+      D_mm=ol_cfg.mat_line_separation_mm,
+      fk_model_path=_FK_MODEL_PATH,
+      touch_sequence=DEFAULT_TOUCH_SEQUENCE,
+    )
+
+  if arm_block is None:
+    click.echo("T_world_arm not persisted.")
+    return
+
+  # Merge arm fields into the same bundle file. T_world_arm shares the
+  # rig (arm base + camera + mat) with the camera extrinsics; if either
+  # moves, both calibrations are stale together — so they live together.
+  blob = json.loads(output_path.read_text())
+  blob["T_world_arm"]    = arm_block["T_world_arm"]
+  blob["arm_diagnostics"] = arm_block["diagnostics"]
+  blob["arm_metadata"]    = arm_block["metadata"]
+  output_path.write_text(json.dumps(blob, indent=2))
+  click.echo(f"updated {output_path} with T_world_arm")

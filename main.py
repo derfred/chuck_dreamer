@@ -170,6 +170,61 @@ def generate_scenes(ctx, episodes, output, seed, fmt, workers, min_steps, overri
   click.echo(f"Done. Outcomes: {outcome_counts}  (skipped {short_skipped} short episodes)")
 
 
+def _build_arm_calibration(ctx, dataset_id: str, episode_config_path: Path):
+  """Compute a T_world_arm block for ``dataset_id`` from an fk_episode_config.
+
+  Returns the JSON block to stamp onto each episode's metadata, or
+  ``None`` if the dataset isn't in the config / Umeyama rejected the
+  alignment. Mirrors `calibrate-live`'s 4-touch flow; the only
+  difference is that joint medians come from the LeRobot parquet
+  instead of the live arm.
+  """
+  from chuck_dreamer.real.object_localization.calibration.arm import (
+    calibrate_from_lerobot_dataset,
+  )
+  from chuck_dreamer.real.object_localization.runtime import init_from_config
+  from chuck_dreamer.real.fk_calibration.fk import FK
+  from chuck_dreamer.real.fk_calibration.extract_joints import load_episode_config
+
+  episode_to_label_by_dataset = load_episode_config(episode_config_path)
+  if dataset_id not in episode_to_label_by_dataset:
+    click.echo(f"{dataset_id} not in {episode_config_path}; skipping "
+               "T_world_arm derivation.")
+    return None
+  episode_to_label = episode_to_label_by_dataset[dataset_id]
+
+  cfg = load_config(ctx.obj["config_path"])
+  ol_cfg = init_from_config(cfg)
+
+  fk_model_path = (Path(__file__).resolve().parent
+                   / "assets" / "mujoco" / "so101_arm.xml")
+  if not fk_model_path.exists():
+    raise click.ClickException(f"FK model not found at {fk_model_path}")
+  fk = FK(fk_model_path)
+
+  click.echo(f"Deriving T_world_arm from {dataset_id} "
+             f"({len(episode_to_label)} touches: "
+             f"{sorted(episode_to_label.values())})")
+  block, residuals, max_res, rms_res = calibrate_from_lerobot_dataset(
+    dataset_id=dataset_id,
+    episode_to_label=episode_to_label,
+    fk=fk,
+    L_mm=ol_cfg.mat_line_length_mm,
+    D_mm=ol_cfg.mat_line_separation_mm,
+    fk_model_path=fk_model_path,
+  )
+  click.echo(f"  max_residual = {max_res:.2f} mm   "
+             f"rms_residual = {rms_res:.2f} mm")
+  if block is None:
+    click.echo(click.style(
+      f"  REJECT: max_residual {max_res:.2f}mm exceeds threshold. "
+      "T_world_arm NOT stamped onto episodes.", fg="red"))
+    return None
+  click.echo(click.style(f"  OK — stamping T_world_arm on every episode.",
+                         fg="green"))
+  return block
+
+
 @cli.command("import-lerobot")
 @click.argument("repo_id", type=str, metavar="REPO_ID[#EPISODES]")
 @click.option("--output", required=True, type=str, help="Output directory")
@@ -200,9 +255,16 @@ def generate_scenes(ctx, episodes, output, seed, fmt, workers, min_steps, overri
                    "directory without filename collisions (default "
                    "names are episode-00000, etc. — identical across "
                    "datasets). Typical: --name-prefix task_2_1805_2")
+@click.option("--episode-config", "episode_config_path", default=None,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Path to a fk_episode_config.json. When the imported "
+                   "repo_id appears in it, derive T_world_arm from the "
+                   "touch episodes (Umeyama on joint medians + FK) and "
+                   "stamp it onto each written episode's metadata.")
 @click.pass_context
 def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
-                   with_ee_pos, with_object_pose, tags, name_prefix):
+                   with_ee_pos, with_object_pose, tags, name_prefix,
+                   episode_config_path):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
 
   Pulls the parquet + MP4 from Hugging Face, slices per episode using
@@ -244,11 +306,17 @@ def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
     set(spec.episodes) if spec.episodes is not None else None
   )
 
+  arm_calibration = None
+  if episode_config_path is not None:
+    arm_calibration = _build_arm_calibration(
+      ctx, parsed_repo_id, episode_config_path)
+
   click.echo(
     f"Importing {parsed_repo_id} → {output}  (format={fmt}, "
     f"with_ee_pos={with_ee_pos}, with_object_pose={with_object_pose}, "
     f"tags={list(tags)}, name_prefix={name_prefix!r}, "
-    f"episodes={'all' if episode_filter is None else sorted(episode_filter)})"
+    f"episodes={'all' if episode_filter is None else sorted(episode_filter)}, "
+    f"T_world_arm={'yes' if arm_calibration else 'no'})"
   )
   count = 0
   try:
@@ -261,6 +329,7 @@ def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
         with_object_pose=with_object_pose,
         name_prefix=name_prefix,
         episode_filter=episode_filter,
+        arm_calibration=arm_calibration,
       ),
       desc="Episodes",
       total=(len(episode_filter) if episode_filter is not None else max_episodes),
@@ -654,7 +723,10 @@ from chuck_dreamer.real.object_localization.cli import (
   test_calibration_cmd,
   test_object_pose_cmd,
 )
-from chuck_dreamer.real.fk_calibration.cli import extract_joints_cmd
+from chuck_dreamer.real.fk_calibration.cli import (
+  calibrate_arm_from_episodes_cmd,
+  extract_joints_cmd,
+)
 
 cli.add_command(calibrate_intrinsics_cmd)
 cli.add_command(annotate_mat_cmd)
@@ -664,6 +736,7 @@ cli.add_command(augment_keyframes_cmd)
 cli.add_command(test_calibration_cmd)
 cli.add_command(test_object_pose_cmd)
 cli.add_command(extract_joints_cmd)
+cli.add_command(calibrate_arm_from_episodes_cmd)
 
 
 if __name__ == "__main__":

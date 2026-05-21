@@ -60,6 +60,7 @@ dependencies = [
     "rerun-sdk[all]>=0.30.0",
     "lerobot[dataset,feetech,placo-dep]",
     "pynput>=1.8.2",
+    "sam-2",
 ]
 
 [build-system]
@@ -100,6 +101,7 @@ torch = [
 torchvision = [
   { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
 ]
+sam-2 = { git = "https://github.com/facebookresearch/sam2.git" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

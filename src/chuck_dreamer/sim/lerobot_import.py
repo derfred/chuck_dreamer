@@ -224,6 +224,7 @@ def import_dataset(
   with_object_pose: bool = True,
   name_prefix: str | None = None,
   episode_filter: set[int] | None = None,
+  arm_calibration: dict | None = None,
 ) -> Iterator[tuple[int, Path]]:
   """Yield ``(episode_index, output_path)`` per converted episode.
 
@@ -339,6 +340,12 @@ def import_dataset(
     }
     if tags:
       metadata["tags"] = tuple(tags)
+    if arm_calibration is not None:
+      # Same shape as the live calibration writes — see
+      # `docs/calibrate_live_arm_brief.md`.
+      metadata["T_world_arm"]    = arm_calibration["T_world_arm"]
+      metadata["arm_diagnostics"] = arm_calibration["diagnostics"]
+      metadata["arm_metadata"]    = arm_calibration["metadata"]
 
     if with_ee_pos:
       apply_ee_pos(episode, metadata)
