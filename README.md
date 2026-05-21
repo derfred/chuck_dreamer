@@ -99,7 +99,7 @@ python main.py train -o 'data.training.protected_tags=["real"]' -o data.training
 
 This will instruct the replay buffer to sample real-world episodes with twice the probability of simulated episodes. The `protected_tags` option ensures that all episodes with the "real" tag are not evicted from the replay buffer. The significance of this is that during training new simulated episodes are generated and added to the replay buffer, as we can cheaply generate these on the fly. For real-world episodes this is not the case.
 
-Finally the trainer provides some options for scaling the training process. For this purpose a `config/h200.yaml` file is provided that has optimized settings for training on an NVIDIA H200 GPU.
+Finally the trainer provides some options for scaling the training process. For this purpose a `config/h200.yaml` file is provided that has optimized settings for training on an NVIDIA H200 GPU. We provide our highest performing checkpoint here: (final.safetensors)[final.safetensors].
 
 ### Evaluation
 
