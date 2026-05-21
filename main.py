@@ -225,9 +225,85 @@ def _build_arm_calibration(ctx, dataset_id: str, episode_config_path: Path):
   return block
 
 
+def _doctor_import_lerobot(ctx, dataset_id: str, *,
+                           with_ee_pos: bool, with_object_pose: bool,
+                           episode_config_path: Path | None) -> bool:
+  """Check calibration / model files required by import-lerobot.
+
+  Returns True if everything is present, False otherwise. Prints one
+  status line per artifact and, for missing items, the command to
+  produce them.
+  """
+  from chuck_dreamer.real.object_localization.runtime import init_from_config
+  from chuck_dreamer.real.object_localization.types import dataset_cache_dir
+  from chuck_dreamer.sim.lerobot_pipeline import FK_MODEL_PATH
+
+  click.echo(f"Doctor check for import-lerobot {dataset_id}")
+  click.echo(f"  with_ee_pos={with_ee_pos}  with_object_pose={with_object_pose}  "
+             f"episode_config={'yes' if episode_config_path else 'no'}")
+
+  missing: list[str] = []
+
+  def check(label: str, path: Path, remediation: str) -> None:
+    if path.exists():
+      click.echo(click.style(f"  OK    ", fg="green") + f"{label}: {path}")
+    else:
+      click.echo(click.style(f"  MISS  ", fg="red") + f"{label}: {path}")
+      click.echo(f"        run: {remediation}")
+      missing.append(label)
+
+  if with_ee_pos:
+    check(
+      "FK MuJoCo model", FK_MODEL_PATH,
+      "restore assets/mujoco/so101_arm.xml from git",
+    )
+
+  if with_object_pose:
+    cfg = load_config(ctx.obj["config_path"])
+    ol_cfg = init_from_config(cfg)
+    cache_dir = Path(ol_cfg.calibration_cache)
+    ds_dir = dataset_cache_dir(cache_dir, dataset_id)
+
+    check(
+      "camera intrinsics", ds_dir / "intrinsics.json",
+      f"uv run python main.py calibrate-intrinsics {dataset_id}",
+    )
+    check(
+      "camera extrinsics", ds_dir / "extrinsics.json",
+      f"uv run python main.py annotate-mat {dataset_id}",
+    )
+    check(
+      "frame-0 object prompts", ds_dir / "object_prompts.json",
+      f"uv run python main.py prompt-episodes --dataset {dataset_id}",
+    )
+    check(
+      "object mesh", Path(ol_cfg.mesh_path),
+      f"set object_localization.mesh_path in configs/default.yaml to a valid .obj/.ply",
+    )
+
+  if episode_config_path is not None:
+    check(
+      "fk_episode_config.json", episode_config_path,
+      f"create {episode_config_path} listing touch episodes for {dataset_id}",
+    )
+    if not with_ee_pos:
+      check(
+        "FK MuJoCo model", FK_MODEL_PATH,
+        "restore assets/mujoco/so101_arm.xml from git",
+      )
+
+  if missing:
+    click.echo(click.style(
+      f"\nDoctor: {len(missing)} missing artifact(s).", fg="red"))
+    return False
+  click.echo(click.style("\nDoctor: all required artifacts present.", fg="green"))
+  return True
+
+
 @cli.command("import-lerobot")
 @click.argument("repo_id", type=str, metavar="REPO_ID[#EPISODES]")
-@click.option("--output", required=True, type=str, help="Output directory")
+@click.option("--output", default=None, type=str,
+              help="Output directory. Required unless --doctor is passed.")
 @click.option("--format", "fmt", default="rerun", type=click.Choice(["hdf5", "rerun"]),
               help="Episode output format (hdf5 or rerun)")
 @click.option("--video-key", default=None, type=str,
@@ -235,10 +311,10 @@ def _build_arm_calibration(ctx, dataset_id: str, episode_config_path: Path):
 @click.option("--max-episodes", default=None, type=int,
               help="Cap on number of episodes to convert (default: all)")
 @click.option("--with-ee-pos/--no-ee-pos", default=True,
-              help="Rescale joint_qpos to radians and run the FK MLP to fill "
-                   "ee_pos / ee_quat / ee_action (default: on). Required for "
-                   "EE-mode training; needs the trained model at "
-                   "ee_pos_model.safetensors (or $FK_MLP_WEIGHTS).")
+              help="Convert joint_qpos to radians and run the MuJoCo FK "
+                   "(chuck_dreamer.real.fk_calibration.fk) to fill ee_pos "
+                   "/ ee_quat / ee_action (default: on). Required for "
+                   "EE-mode training; needs assets/mujoco/so101_arm.xml.")
 @click.option("--with-object-pose/--no-object-pose", default=True,
               help="Run SAM2 segmentation + per-frame pose fit + RTS smoothing to "
                    "fill object_xy / object_gap_too_long (default: on). Requires a "
@@ -261,10 +337,15 @@ def _build_arm_calibration(ctx, dataset_id: str, episode_config_path: Path):
                    "repo_id appears in it, derive T_world_arm from the "
                    "touch episodes (Umeyama on joint medians + FK) and "
                    "stamp it onto each written episode's metadata.")
+@click.option("--doctor", "doctor", is_flag=True, default=False,
+              help="Check that all calibration / model files required for "
+                   "the requested pipeline stages are present, then exit "
+                   "without importing. Prints the exact remediation command "
+                   "for each missing artifact.")
 @click.pass_context
 def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
                    with_ee_pos, with_object_pose, tags, name_prefix,
-                   episode_config_path):
+                   episode_config_path, doctor):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
 
   Pulls the parquet + MP4 from Hugging Face, slices per episode using
@@ -305,6 +386,18 @@ def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
   episode_filter: set[int] | None = (
     set(spec.episodes) if spec.episodes is not None else None
   )
+
+  if not doctor and not output:
+    raise click.UsageError("--output is required (unless --doctor is passed).")
+
+  if doctor:
+    ok = _doctor_import_lerobot(
+      ctx, parsed_repo_id,
+      with_ee_pos=with_ee_pos,
+      with_object_pose=with_object_pose,
+      episode_config_path=episode_config_path,
+    )
+    ctx.exit(0 if ok else 1)
 
   arm_calibration = None
   if episode_config_path is not None:

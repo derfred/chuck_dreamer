@@ -3,10 +3,11 @@
 Two stages are applied to each freshly-imported episode dict, each guarded
 by its own CLI flag in ``main.py import-lerobot``:
 
-  * :func:`apply_ee_pos` — rescale ``joint_qpos`` from servo units to
-    radians, then run the MLX FK MLP (trained by
-    ``scripts/train_fk_mlp.py``) to fill ``ee_pos``, ``ee_quat`` and
-    ``ee_action``.
+  * :func:`apply_ee_pos` — convert ``joint_qpos`` (degrees, as stored in
+    LeRobot ``observation.state``) to radians for the 5 positioning
+    joints, then run the MuJoCo FK in
+    :mod:`chuck_dreamer.real.fk_calibration.fk` to fill ``ee_pos``,
+    ``ee_quat`` and ``ee_action``.
 
   * :func:`apply_object_pose` — run the calibrated
     :mod:`chuck_dreamer.real.object_localization` pipeline on the
@@ -20,122 +21,72 @@ object-localization runtime loads across episodes in one import run.
 """
 from __future__ import annotations
 
-import math
-import os
 from pathlib import Path
 from typing import Any
 
-import mlx.core as mx
-import mlx.nn as nn
 import numpy as np
-from mlx.utils import tree_unflatten
 
 
 # ---------------------------------------------------------------------------
 # Stage: ee_pos / ee_quat / ee_action
 # ---------------------------------------------------------------------------
 
-# (low, high) such that input -100 maps to ``low`` and +100 maps to ``high``.
-# joint0/3/4/5 flip sign; joints 1/2 go monotonically in their stated direction.
-_JOINT_RANGES: tuple[tuple[float, float], ...] = (
-  (+math.pi / 2,  -math.pi / 2),  # joint 0
-  ( 0.0,          -math.pi),      # joint 1
-  (+math.pi,       0.0),          # joint 2
-  (+math.pi / 2,  -math.pi / 2),  # joint 3
-  (+math.pi / 2,  -math.pi / 2),  # joint 4
-  (+math.pi / 2,  -math.pi / 2),  # joint 5
+# Path to the SO-101 MuJoCo model used by the FK module. Mirrors the
+# default used by ``_build_arm_calibration`` in ``main.py``.
+FK_MODEL_PATH = (
+  Path(__file__).resolve().parents[3]
+  / "assets" / "mujoco" / "so101_arm.xml"
 )
-
-_DEFAULT_WEIGHTS = Path(__file__).resolve().parents[3] / "ee_pos_model.safetensors"
 
 # MuJoCo [w, x, y, z] for a 180° rotation about x — gripper z points down.
 _EE_QUAT_DOWN: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 0.0)
 
-
-class _MLP(nn.Module):
-  def __init__(self, in_dim: int, hidden: tuple[int, ...], out_dim: int):
-    super().__init__()
-    layers: list[nn.Module] = []
-    prev = in_dim
-    for h in hidden:
-      layers.append(nn.Linear(prev, h))
-      layers.append(nn.GELU())
-      prev = h
-    layers.append(nn.Linear(prev, out_dim))
-    self.net = nn.Sequential(*layers)
-
-  def __call__(self, x: mx.array) -> mx.array:
-    return self.net(x)
+# Number of positioning joints consumed by FK (rest of the state vector is
+# the gripper, which doesn't affect EE position).
+_N_POSITIONING_JOINTS = 5
 
 
-def _rescale_joints(qpos: np.ndarray) -> np.ndarray:
-  out = qpos.astype(np.float32, copy=True)
-  n   = min(out.shape[1], len(_JOINT_RANGES))
-  np.clip(out[:, :n], -100.0, 100.0, out=out[:, :n])
-  t = (out[:, :n] + 100.0) / 200.0
-  for i in range(n):
-    lo, hi = _JOINT_RANGES[i]
-    out[:, i] = lo + t[:, i] * (hi - lo)
-  return out
+_fk = None
 
 
-def _hidden_dims_from_weights(weights: dict[str, mx.array]) -> tuple[int, ...]:
-  idxs = sorted(
-    int(k.split(".")[2]) for k in weights
-    if k.startswith("net.layers.") and k.endswith(".weight")
-  )
-  return tuple(weights[f"net.layers.{i}.weight"].shape[0] for i in idxs[:-1])
-
-
-def _build_model(weights_path: Path) -> tuple[_MLP, mx.array, mx.array]:
-  weights = mx.load(str(weights_path))
-  x_mean  = weights.pop("_x_mean")
-  x_std   = weights.pop("_x_std")
-  hidden  = _hidden_dims_from_weights(weights)
-  in_dim  = weights["net.layers.0.weight"].shape[1]
-  last    = max(int(k.split(".")[2]) for k in weights if k.endswith(".weight"))
-  out_dim = weights[f"net.layers.{last}.weight"].shape[0]
-
-  model = _MLP(in_dim=in_dim, hidden=hidden, out_dim=out_dim)
-  model.update(tree_unflatten(list(weights.items())))
-  mx.eval(model.parameters())
-  return model, x_mean, x_std
-
-
-_model: _MLP | None = None
-_x_mean: mx.array | None = None
-_x_std:  mx.array | None = None
-
-
-def _ensure_model() -> tuple[_MLP, mx.array, mx.array]:
-  global _model, _x_mean, _x_std
-  if _model is None:
-    weights_path = Path(os.environ.get("FK_MLP_WEIGHTS", str(_DEFAULT_WEIGHTS)))
-    if not weights_path.exists():
+def _ensure_fk():
+  """Lazy-load the MuJoCo FK evaluator. Cached across episodes."""
+  global _fk
+  if _fk is None:
+    if not FK_MODEL_PATH.exists():
       raise FileNotFoundError(
-        f"FK weights not found at {weights_path}. Train them first: "
-        f"`uv run python scripts/train_fk_mlp.py --save {weights_path}`")
-    _model, _x_mean, _x_std = _build_model(weights_path)
-  assert _x_mean is not None and _x_std is not None
-  return _model, _x_mean, _x_std
+        f"FK MuJoCo model not found at {FK_MODEL_PATH}. "
+        f"Restore assets/mujoco/so101_arm.xml from git.")
+    from chuck_dreamer.real.fk_calibration.fk import FK
+    _fk = FK(FK_MODEL_PATH)
+  return _fk
 
 
 def apply_ee_pos(episode: dict[str, Any], metadata: dict[str, Any]) -> None:
-  """Rescale joint_qpos, run FK, and fill ee_pos/ee_quat/ee_action in place."""
+  """Convert joint_qpos to radians, run FK, and fill ee_* in place.
+
+  ``joint_qpos`` comes in from LeRobot ``observation.state`` in
+  **degrees** with 6 columns (5 positioning joints + gripper). We
+  convert the positioning joints to radians (the gripper column is left
+  untouched if present) and call the MuJoCo FK for each frame.
+  """
   qpos = episode.get("joint_qpos")
   if qpos is None or qpos.size == 0:
     return
 
-  rescaled = _rescale_joints(np.asarray(qpos))
+  qpos = np.asarray(qpos, dtype=np.float32)
+  n = min(qpos.shape[1], _N_POSITIONING_JOINTS)
+  rescaled = qpos.copy()
+  rescaled[:, :n] = np.deg2rad(rescaled[:, :n])
   episode["joint_qpos"] = rescaled
 
-  model, x_mean, x_std = _ensure_model()
-  fk_input = rescaled[:, :6]
-  x = (mx.array(fk_input) - x_mean) / x_std
-  ee_pos = np.asarray(model(x), dtype=np.float32)
+  fk = _ensure_fk()
+  T = rescaled.shape[0]
+  ee_pos = np.empty((T, 3), dtype=np.float32)
+  for t in range(T):
+    ee_pos[t] = fk(rescaled[t, :_N_POSITIONING_JOINTS]).astype(np.float32)
   episode["ee_pos"] = ee_pos
 
-  T = ee_pos.shape[0]
   ee_quat = np.tile(np.asarray(_EE_QUAT_DOWN, dtype=np.float32), (T, 1))
   episode["ee_quat"] = ee_quat
 
