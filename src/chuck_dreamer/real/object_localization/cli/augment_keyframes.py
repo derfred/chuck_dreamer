@@ -73,7 +73,7 @@ class _Proposal:
               help="Reject if (candidate area / previous area) is outside "
                    "[ratio, 1/ratio]. Default 0.4 (so blob can grow/shrink "
                    "by 2.5x before we reject).")
-@click.option("--min-confidence", default=0.4, type=float,
+@click.option("--min-confidence", default=0.3, type=float,
               help="Reject poses with confidence below this (default 0.5).")
 @click.option("--max-residual-px", default=2.0, type=float,
               help="Reject poses with reprojection residual above this "
