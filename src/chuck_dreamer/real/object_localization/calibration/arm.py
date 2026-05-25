@@ -22,7 +22,6 @@ import click
 import numpy as np
 
 from ...fk_calibration.fk import FK
-from ...run.arm import Arm
 
 # Re-exported so callers don't need a second import.
 __all__ = [

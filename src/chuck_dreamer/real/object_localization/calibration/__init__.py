@@ -1,4 +1,4 @@
-"""Per-camera calibration: intrinsics, extrinsics, interactive UI."""
-from . import extrinsics, interactive, intrinsics
+"""Per-camera calibration: extrinsics, interactive UI."""
+from . import extrinsics, interactive
 
-__all__ = ["interactive", "intrinsics", "extrinsics"]
+__all__ = ["interactive", "extrinsics"]

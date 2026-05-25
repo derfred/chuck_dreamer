@@ -767,10 +767,8 @@ def eval_cmd(ctx, name, run_all, recordings, checkpoint_path, num_episodes,
 
 
 from chuck_dreamer.real.object_localization.cli import (
-  annotate_live_cmd,
   annotate_mat_cmd,
   augment_keyframes_cmd,
-  calibrate_intrinsics_cmd,
   prompt_episodes_cmd,
   test_calibration_cmd,
   test_object_pose_cmd,
@@ -780,9 +778,7 @@ from chuck_dreamer.real.fk_calibration.cli import (
   extract_joints_cmd,
 )
 
-cli.add_command(calibrate_intrinsics_cmd)
 cli.add_command(annotate_mat_cmd)
-cli.add_command(annotate_live_cmd)
 cli.add_command(prompt_episodes_cmd)
 cli.add_command(augment_keyframes_cmd)
 cli.add_command(test_calibration_cmd)
