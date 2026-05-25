@@ -26,7 +26,7 @@ import numpy as np
 import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download
 
-from .episode_writer import EpisodeWriter
+from chuck_dreamer.sim.episode_writer import EpisodeWriter
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +232,7 @@ def import_dataset(
   the path to an on-disk LeRobot v3 dataset directory. The latter is
   detected by ``Path(repo_id).is_dir()``.
 
-  Two post-import stages from :mod:`chuck_dreamer.sim.lerobot_pipeline`
+  Two post-import stages from :mod:`chuck_dreamer.lerobot.pipeline`
   run in order on each assembled episode before it is written:
 
     * ``with_ee_pos`` (default True) rescales ``joint_qpos`` to radians
@@ -253,7 +253,7 @@ def import_dataset(
   returned path points at the file produced by :class:`HDF5EpisodeWriter`
   or :class:`RerunEpisodeWriter`.
   """
-  from .lerobot_pipeline import apply_ee_pos, apply_object_pose
+  from .pipeline import apply_ee_pos, apply_object_pose
 
   local_root: Path | None = None
   if Path(repo_id).is_dir():

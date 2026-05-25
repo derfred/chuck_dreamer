@@ -238,7 +238,7 @@ def _doctor_import_lerobot(ctx, dataset_id: str, *,
   """
   from chuck_dreamer.real.object_localization.runtime import init_from_config
   from chuck_dreamer.real.object_localization.types import dataset_cache_dir
-  from chuck_dreamer.sim.lerobot_pipeline import FK_MODEL_PATH
+  from chuck_dreamer.lerobot.pipeline import FK_MODEL_PATH
 
   click.echo(f"Doctor check for import-lerobot {dataset_id}")
   click.echo(f"  with_ee_pos={with_ee_pos}  with_object_pose={with_object_pose}  "
@@ -373,7 +373,7 @@ def import_lerobot(ctx, repo_id, output, fmt, video_key, max_episodes,
   from chuck_dreamer.real.object_localization.calibration.spec_parser import (
     parse_calibration_source,
   )
-  from chuck_dreamer.sim.lerobot_import import import_dataset
+  from chuck_dreamer.lerobot.importer import import_dataset
 
   try:
     spec = parse_calibration_source(repo_id)
