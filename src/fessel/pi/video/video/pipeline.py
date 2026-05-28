@@ -17,15 +17,14 @@ Every cap below is load-bearing on the Pi hardware:
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
-import gi
+from fessel_schemas import ModeTriplet
 
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst  # noqa: E402
+from .platform import BitrateStyle, EncoderProfile, encoder_profile
 
-from fessel_schemas import ModeTriplet  # noqa: E402
-
-from .platform import EncoderProfile, encoder_profile  # noqa: E402
+if TYPE_CHECKING:
+  from gi.repository import Gst
 
 log = logging.getLogger(__name__)
 
@@ -62,12 +61,19 @@ def _source_chain(device: str, width: int, height: int, fps: int, use_test_sourc
 
 
 def _encoder_chain(prof: EncoderProfile, mode: ModeTriplet, gop: int) -> str:
-  """Hardware H.264 encode parameterised by the mode triplet."""
-  if prof.uses_extra_controls:
+  """H.264 encode parameterised by the mode triplet, per encoder style."""
+  if prof.bitrate_style is BitrateStyle.EXTRA_CONTROLS:
     # v4l2h264enc: bitrate + GOP via the control string.
     enc = (
       f'{prof.element} extra-controls="controls,'
       f"video_bitrate={mode.bitrate_bps},h264_i_frame_period={gop}\""
+    )
+  elif prof.is_software:
+    # x264enc (test-only): bitrate in kbit/s; key-int-max gives the short
+    # GOP; zerolatency for low-latency streaming; baseline for broad decode.
+    enc = (
+      f"{prof.element} bitrate={mode.bitrate_bps // 1000} "
+      f"key-int-max={gop} tune=zerolatency speed-preset=ultrafast"
     )
   else:
     # vtenc_h264 (macOS dev): bitrate is a plain property (bits/s);
@@ -87,13 +93,17 @@ def build_live_launch(
   srt_port: int = 8890,
   device: str = "/dev/video0",
   use_test_source: bool = False,
+  allow_software_encoder: bool = False,
 ) -> str:
   """Return the gst-parse launch string for the live SRT-push branch.
 
   Kept as a pure string builder so it is unit-testable without a running
   pipeline; build_pipeline() turns it into a Gst.Pipeline.
+
+  `allow_software_encoder` is the test-only seam (x264enc); it defaults
+  False so production keeps fail-loud hardware-only behaviour.
   """
-  prof = encoder_profile()
+  prof = encoder_profile(allow_software=allow_software_encoder)
   width, height = _resolution_wh(mode)
   gop = max(1, mode.fps)  # ~1s keyframe interval -> short GOP for fast WHEP start.
 
@@ -107,11 +117,17 @@ def build_live_launch(
   return f"{source} ! {encoder} ! mpegtsmux ! {sink}"
 
 
-def build_pipeline(launch: str) -> Gst.Pipeline:
+def build_pipeline(launch: str) -> "Gst.Pipeline":
   """Parse a launch string into a Gst.Pipeline.
 
-  Fails loud (raises) if the hardware encoder element is missing on the
-  platform — Gst.parse_launch raises GLib.Error.
+  Imports gi lazily so the launch-string builders above stay testable
+  without GStreamer. Fails loud (raises) if the encoder element is missing
+  — Gst.parse_launch raises GLib.Error.
   """
+  import gi
+
+  gi.require_version("Gst", "1.0")
+  from gi.repository import Gst
+
   Gst.init(None)
   return Gst.parse_launch(launch)

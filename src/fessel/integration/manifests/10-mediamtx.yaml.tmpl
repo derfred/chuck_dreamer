@@ -1,0 +1,136 @@
+# mediamtx for the integration test: WHEP + SRT + WebRTC, with the
+# runOnDemand curl targeting the in-cluster supervisor Service (stands in
+# for the Tailscale egress), and JWT auth validated against the webui
+# backend JWKS. WebRTC is reachable in-cluster (the test Job is a cluster
+# pod), so we advertise the pod IP as the ICE host candidate instead of the
+# production NodePort/public-IP set.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mediamtx-config
+data:
+  mediamtx.yml: |
+    logLevel: info
+    logDestinations: [stdout]
+    readTimeout: 10s
+    writeTimeout: 10s
+    rtsp: no
+    rtmp: no
+    hls: no
+    srt: yes
+    webrtc: yes
+    api: yes
+    metrics: yes
+    srtAddress: :8890
+    # ICE host candidate = the pod IP (test client is in-cluster). Injected
+    # via the MTX_WEBRTCADDITIONALHOSTS env from the downward API below.
+    webrtcLocalUDPAddress: :8189
+    webrtcLocalTCPAddress: :8189
+    # No STUN: client and mediamtx are both in-cluster with routable pod IPs,
+    # so only host candidates are needed. A STUN srflx candidate (the
+    # cluster's public NAT IP) is unreachable from inside and just stalls
+    # ICE until the handshake deadline — drop it for fast in-cluster ICE.
+    webrtcICEServers2: []
+    # HTTP auth: mediamtx calls webui /auth per request. webui validates the
+    # WHEP JWT (jwt= query param) for read; publish (the Pi's trusted SRT
+    # ingest) is excluded so it doesn't need a token. JWT mode can't exclude
+    # publish, hence HTTP auth here.
+    authMethod: http
+    authHTTPAddress: http://webui:8000/auth
+    authHTTPExclude:
+      - action: publish
+      - action: api
+      - action: metrics
+      - action: pprof
+    pathDefaults:
+      source: publisher
+    paths:
+      pi:
+        source: publisher
+        # Pass the raw WHEP query string to supervisor, which extracts the
+        # mode. Uses wget (Alpine ffmpeg image has no curl). mediamtx
+        # expands $MTX_PATH and $MTX_QUERY in the runOnDemand environment.
+        runOnDemand: >
+          wget -q -O- --header="Content-Type: application/json"
+          --post-data="{\"path\":\"$MTX_PATH\",\"query\":\"$MTX_QUERY\"}"
+          http://supervisor:8443/control/live/activate
+        runOnUnDemand: >
+          wget -q -O- --header="Content-Type: application/json"
+          --post-data="{\"path\":\"$MTX_PATH\"}"
+          http://supervisor:8443/control/live/deactivate
+        runOnDemandStartTimeout: 15s
+        runOnDemandCloseAfter: 10s
+        runOnDemandRestart: no
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mediamtx
+  labels: { app: mediamtx }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: mediamtx }
+  template:
+    metadata:
+      labels: { app: mediamtx }
+    spec:
+      # Run as a non-root UID. The real cause of mediamtx's startup
+      # "too many open files" on this shared rke2 node is exhaustion of the
+      # per-UID inotify instance budget (fs.inotify.max_user_instances=128)
+      # for uid 0 — mediamtx's config-reload watcher can't get an inotify
+      # instance. A non-root uid has its own fresh budget, so it starts
+      # cleanly. (Not an fd-limit issue; the nofile ulimit is irrelevant.)
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: mediamtx
+          # -ffmpeg variant is Alpine-based and ships wget (for runOnDemand);
+          # the scratch default image has neither shell nor http client.
+          image: bluenviron/mediamtx:1.9.1-ffmpeg
+          args: ["/config/mediamtx.yml"]
+          env:
+            # Advertise the pod IP as the WebRTC ICE host candidate.
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: MTX_WEBRTCADDITIONALHOSTS
+              value: "$(POD_IP)"
+          ports:
+            - { name: whep, containerPort: 8889, protocol: TCP }
+            - { name: srt, containerPort: 8890, protocol: UDP }
+            - { name: webrtc-udp, containerPort: 8189, protocol: UDP }
+            - { name: webrtc-tcp, containerPort: 8189, protocol: TCP }
+            - { name: api, containerPort: 9997, protocol: TCP }
+            - { name: metrics, containerPort: 9998, protocol: TCP }
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+          volumeMounts:
+            - { name: config, mountPath: /config }
+      volumes:
+        - name: config
+          configMap: { name: mediamtx-config }
+---
+# WHEP signaling (browser/test-job entry).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mediamtx
+spec:
+  selector: { app: mediamtx }
+  ports:
+    - { name: whep, port: 8889, targetPort: 8889, protocol: TCP }
+    - { name: webrtc-udp, port: 8189, targetPort: 8189, protocol: UDP }
+    - { name: webrtc-tcp, port: 8189, targetPort: 8189, protocol: TCP }
+    - { name: api, port: 9997, targetPort: 9997, protocol: TCP }
+---
+# SRT ingest (video publishes here; stands in for the Tailscale ingress).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mediamtx-srt
+spec:
+  selector: { app: mediamtx }
+  ports:
+    - { name: srt, port: 8890, targetPort: 8890, protocol: UDP }

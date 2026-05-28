@@ -1,0 +1,23 @@
+# Test-image video config. Overwrites the dpkg-seeded conffile in the
+# integration-test container ONLY.
+mqtt:
+  host: 127.0.0.1
+  port: 1883
+
+srt:
+  # In-cluster mediamtx SRT Service (stands in for the Tailscale ingress
+  # magicDNS name; config-only substitution per the Slice 1.5 plan).
+  host: mediamtx-srt
+  port: 8890
+
+camera:
+  # No /dev/video0 in the container and no kernel module on the cluster
+  # nodes: use the built-in videotestsrc (moving 'ball' pattern), which
+  # gives a real moving H.264 stream for the data-plane liveness check.
+  device: /dev/video0
+  use_test_source: true
+  # Test-only software encoder (no hardware encoder in a container).
+  allow_software_encoder: true
+
+live:
+  connect_timeout_s: 15.0

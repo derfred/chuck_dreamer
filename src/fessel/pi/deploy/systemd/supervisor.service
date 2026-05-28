@@ -1,7 +1,7 @@
 [Unit]
 Description=Fessel supervisor (safety/control plane + MQTT relay)
-After=network.target mosquitto.service
-Wants=mosquitto.service
+After=network.target fessel-mosquitto.service
+Wants=fessel-mosquitto.service
 
 [Service]
 Environment=SUPERVISOR_CONFIG=/etc/fessel/supervisor.yaml

@@ -36,10 +36,25 @@ HEARTBEAT_INTERVAL_S = 5.0
 
 
 class ActivateRequest(BaseModel):
-  """mediamtx runOnDemand sends mode as the canonical string, not an object."""
+  """mediamtx runOnDemand provides path + either the canonical mode string
+  or the raw WHEP query (from which we extract mode). Accepting the raw
+  query avoids fragile shell quote-parsing in the mediamtx runOnDemand
+  command."""
 
   path: str
-  mode: str
+  mode: str | None = None
+  query: str | None = None
+
+  def resolved_mode(self) -> str:
+    if self.mode:
+      return self.mode
+    if self.query:
+      from urllib.parse import parse_qs
+
+      vals = parse_qs(self.query).get("mode")
+      if vals:
+        return vals[0]
+    raise ValueError("no mode in request (neither mode nor query[mode])")
 
 
 class DeactivateRequest(BaseModel):
@@ -58,11 +73,32 @@ class Relay:
     )
     self._stop = threading.Event()
     self._hb_thread = threading.Thread(target=self._heartbeat_loop, name="hb", daemon=True)
+    # Cache of the latest retained live state + an ordered history of state
+    # values, so the integration test can assert the off->starting->running
+    # ->off progression via an HTTP read path (no MQTT exposed off-Pi).
+    self._live_state: dict | None = None
+    self._live_history: list[str] = []
+    self._lock = threading.Lock()
 
   def start(self) -> None:
     self._mqtt.connect()
+    self._mqtt.subscribe(topics.STATE_LIVE, self._on_live_state, qos=topics.QOS_STATE)
     self._mqtt.loop_start()
     self._hb_thread.start()
+
+  def _on_live_state(self, _topic: str, payload: dict) -> None:
+    with self._lock:
+      self._live_state = payload
+      state = payload.get("state")
+      if state and (not self._live_history or self._live_history[-1] != state):
+        self._live_history.append(state)
+
+  def live_state(self) -> dict:
+    with self._lock:
+      return {
+        "current": self._live_state,
+        "history": list(self._live_history),
+      }
 
   def stop(self) -> None:
     self._stop.set()
@@ -106,10 +142,16 @@ def create_app(config: dict | None = None) -> FastAPI:
   def healthz() -> dict:
     return {"status": "ok"}
 
+  @app.get("/state/live")
+  def state_live() -> dict:
+    # Observability read path for the integration harness: the cached
+    # retained arm/video/state/live plus the ordered state history.
+    return relay.live_state()
+
   @app.post("/control/live/activate")
   def live_activate(req: ActivateRequest) -> dict:
     try:
-      mode = mode_from_canonical(req.mode)
+      mode = mode_from_canonical(req.resolved_mode())
     except ValueError as e:
       raise HTTPException(status_code=400, detail=str(e)) from e
     cmd = LiveActivate(path=req.path, mode=mode)

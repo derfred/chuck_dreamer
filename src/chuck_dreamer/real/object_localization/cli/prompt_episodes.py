@@ -22,15 +22,13 @@ import click
 
 from chuck_dreamer.config import load_config
 
-from ..calibration.spec_parser import (
-  CalibrationSource, parse_calibration_source,
-)
 from ..dataset import all_episode_bounds_from_meta, get_frame
 from ..prompts import (
   click_object, load_keyframe_prompts, save_keyframe_prompt, sidecar_path,
 )
 from ..runtime import init_from_config
 from chuck_dreamer.cli import override_option
+from chuck_dreamer.common.episode_spec import EpisodeSpec
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +64,7 @@ def prompt_episodes_cmd(ctx, sources: tuple[str, ...],
   ol_cfg = init_from_config(cfg)
   cache_root = Path(ol_cfg.cache_dir)
 
-  try:
-    parsed = [parse_calibration_source(s) for s in sources]
-  except ValueError as e:
-    raise click.ClickException(str(e))
+  parsed = EpisodeSpec.parse_many(sources, command="prompt-episodes")
 
   try:
     keyframe_offsets = _parse_keyframes(keyframes_spec)
@@ -80,22 +75,18 @@ def prompt_episodes_cmd(ctx, sources: tuple[str, ...],
   pending: list[tuple[str, int, int]] = []
   for src in parsed:
     try:
-      ep_bounds = all_episode_bounds_from_meta(src.dataset_id)
+      slices, _ = src.read_episodes()
     except Exception as e:
       raise click.ClickException(
         f"could not read episode metadata for {src.dataset_id}: {e}")
-    if src.episodes is None:
-      eps = [(ep, b) for ep, b in ep_bounds]
-    else:
-      ep_set = set(src.episodes)
-      eps = [(ep, b) for ep, b in ep_bounds if ep in ep_set]
-      missing = ep_set - {ep for ep, _ in eps}
+    if src.episodes is not None:
+      missing = set(src.episodes) - {s.episode_index for s in slices}
       if missing:
         click.echo(click.style(
           f"  WARN {src.dataset_id}: episodes {sorted(missing)} not in "
           f"dataset metadata; skipping.", fg="yellow"))
-    for ep, (fr, to) in eps:
-      pending.append((src.dataset_id, ep, to - fr))
+    for s in slices:
+      pending.append((src.dataset_id, s.episode_index, s.length))
 
   if not pending:
     raise click.ClickException("no (dataset, episode) pairs to prompt for.")

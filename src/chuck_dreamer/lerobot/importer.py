@@ -17,7 +17,6 @@ EE / object signals.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -26,6 +25,7 @@ import numpy as np
 import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download
 
+from chuck_dreamer.common.episode_spec import EpisodeSpec
 from chuck_dreamer.sim.episode_writer import EpisodeWriter
 
 logger = logging.getLogger(__name__)
@@ -38,88 +38,12 @@ logger = logging.getLogger(__name__)
 PathResolver = Callable[[str], str]
 
 
-@dataclass
-class _EpisodeSlice:
-  episode_index: int
-  data_from: int
-  data_to: int                    # exclusive
-  video_from_ts: float
-  video_to_ts: float              # exclusive
-  data_chunk: int
-  data_file: int
-  video_chunk: int
-  video_file: int
-  task: str
-  length: int
-
-
 def _data_path(chunk: int, file: int) -> str:
   return f"data/chunk-{chunk:03d}/file-{file:03d}.parquet"
 
 
 def _video_path(video_key: str, chunk: int, file: int) -> str:
   return f"videos/{video_key}/chunk-{chunk:03d}/file-{file:03d}.mp4"
-
-
-def _list_local_meta_episodes(root: Path) -> list[str]:
-  """Return relative paths of ``meta/episodes/*.parquet`` under ``root``."""
-  meta_dir = root / "meta" / "episodes"
-  if not meta_dir.exists():
-    return []
-  return sorted(
-    str(p.relative_to(root)).replace("\\", "/")
-    for p in meta_dir.rglob("*.parquet")
-  )
-
-
-def _read_episodes_meta(
-  dataset_id: str,
-  video_key: str,
-  resolver: PathResolver,
-  list_meta_files: Callable[[str], list[str]],
-) -> list[_EpisodeSlice]:
-  """Read all episode rows from ``meta/episodes/chunk-*/file-*.parquet``.
-
-  v3 stores episode metadata across one or more parquet files. ``dataset_id``
-  is the HF repo id or a local path label (only used for error messages);
-  ``resolver`` and ``list_meta_files`` decide where the data comes from.
-  """
-  files = list_meta_files(dataset_id)
-  if not files:
-    raise RuntimeError(f"{dataset_id}: no meta/episodes/*.parquet files found")
-
-  vcol_chunk = f"videos/{video_key}/chunk_index"
-  vcol_file = f"videos/{video_key}/file_index"
-  vcol_from = f"videos/{video_key}/from_timestamp"
-  vcol_to = f"videos/{video_key}/to_timestamp"
-
-  slices: list[_EpisodeSlice] = []
-  for rel in sorted(files):
-    p = resolver(rel)
-    table = pq.read_table(p, columns=[
-      "episode_index", "tasks", "length",
-      "data/chunk_index", "data/file_index",
-      "dataset_from_index", "dataset_to_index",
-      vcol_chunk, vcol_file, vcol_from, vcol_to,
-    ])
-    d = table.to_pydict()
-    for i in range(table.num_rows):
-      tasks = d["tasks"][i] or []
-      slices.append(_EpisodeSlice(
-        episode_index=int(d["episode_index"][i]),
-        data_from=int(d["dataset_from_index"][i]),
-        data_to=int(d["dataset_to_index"][i]),
-        video_from_ts=float(d[vcol_from][i]),
-        video_to_ts=float(d[vcol_to][i]),
-        data_chunk=int(d["data/chunk_index"][i]),
-        data_file=int(d["data/file_index"][i]),
-        video_chunk=int(d[vcol_chunk][i]),
-        video_file=int(d[vcol_file][i]),
-        task=str(tasks[0]) if tasks else "",
-        length=int(d["length"][i]),
-      ))
-  slices.sort(key=lambda s: s.episode_index)
-  return slices
 
 
 def _decode_video_range(
@@ -166,41 +90,8 @@ def _decode_video_range(
   return np.stack(frames[:expected], axis=0)
 
 
-def _select_video_key(
-  dataset_id: str,
-  preferred: str | None,
-  resolver: PathResolver,
-) -> str:
-  """Pick a video stream key from ``meta/info.json`` features."""
-  import json
-
-  info_path = resolver("meta/info.json")
-  with open(info_path) as f:
-    info = json.load(f)
-  repo_id = dataset_id  # alias for error messages
-  video_keys = [k for k, v in info.get("features", {}).items()
-                if isinstance(v, dict) and v.get("dtype") == "video"]
-  if not video_keys:
-    raise RuntimeError(f"{repo_id}: no video features in meta/info.json")
-  if preferred is None:
-    return str(video_keys[0])
-  if preferred not in video_keys:
-    raise ValueError(
-      f"{repo_id}: video key {preferred!r} not in dataset (available: {video_keys})")
-  return preferred
-
-
 def _hf_resolver(repo_id: str) -> PathResolver:
   return lambda rel: hf_hub_download(repo_id, rel, repo_type="dataset")
-
-
-def _hf_list_meta(repo_id: str) -> list[str]:
-  from huggingface_hub import HfApi
-  api = HfApi()
-  return [
-    f for f in api.list_repo_files(repo_id, repo_type="dataset")
-    if f.startswith("meta/episodes/") and f.endswith(".parquet")
-  ]
 
 
 def _local_resolver(root: Path) -> PathResolver:
@@ -223,7 +114,7 @@ def import_dataset(
   with_ee_pos: bool = True,
   with_object_pose: bool = True,
   name_prefix: str | None = None,
-  episode_filter: set[int] | None = None,
+  source: EpisodeSpec | None = None,
   arm_calibration: dict | None = None,
 ) -> Iterator[tuple[int, Path]]:
   """Yield ``(episode_index, output_path)`` per converted episode.
@@ -253,22 +144,23 @@ def import_dataset(
   returned path points at the file produced by :class:`HDF5EpisodeWriter`
   or :class:`RerunEpisodeWriter`.
   """
-  from .pipeline import apply_ee_pos, apply_object_pose
+  from .stages import StageContext, enabled_from_flags, resolve_stages
+
+  enabled = enabled_from_flags(
+    with_ee_pos=with_ee_pos, with_object_pose=with_object_pose)
+  stages = resolve_stages(enabled)
+  ctx = StageContext(source_repo=repo_id)
 
   local_root: Path | None = None
   if Path(repo_id).is_dir():
     local_root = Path(repo_id)
     resolver = _local_resolver(local_root)
-    list_meta = lambda _id: _list_local_meta_episodes(local_root)  # noqa: E731
   else:
     resolver = _hf_resolver(repo_id)
-    list_meta = _hf_list_meta
 
-  resolved_video_key = _select_video_key(repo_id, video_key, resolver)
-  slices             = _read_episodes_meta(
-    repo_id, resolved_video_key, resolver, list_meta)
-  if episode_filter is not None:
-    slices = [s for s in slices if s.episode_index in episode_filter]
+  spec = source if source is not None else EpisodeSpec(dataset_id=repo_id)
+  slices, resolved_video_key = spec.read_episodes(
+    video_key=video_key, root=local_root)
   if max_episodes is not None:
     slices = slices[:max_episodes]
   if not slices:
@@ -347,10 +239,9 @@ def import_dataset(
       metadata["arm_diagnostics"] = arm_calibration["diagnostics"]
       metadata["arm_metadata"]    = arm_calibration["metadata"]
 
-    if with_ee_pos:
-      apply_ee_pos(episode, metadata)
-    if with_object_pose:
-      apply_object_pose(episode, metadata)
+    ctx.masks.clear()
+    for stage in stages:
+      stage.apply(episode, metadata, ctx)
     if name_prefix:
       suffix = f"{name_prefix}-{sl.episode_index:05d}"
     else:

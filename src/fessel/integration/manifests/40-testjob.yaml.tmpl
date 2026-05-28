@@ -1,0 +1,33 @@
+# The test driver Job (WHEP client + assertions). Emits JUnit to stdout
+# (collected from pod logs by CI) and to /results. Parameterised with the
+# in-namespace Service DNS names.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fessel-test
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: { app: fessel-test }
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: driver
+          image: ${REGISTRY}/fessel-test-driver:${IMAGE_TAG}
+          env:
+            - { name: WEBUI, value: "http://webui:8000" }
+            - { name: MEDIA, value: "http://mediamtx:8889" }
+            - { name: SUPERVISOR, value: "http://supervisor:8443" }
+            - { name: FESSEL_PATH, value: "pi" }
+            - { name: FESSEL_MODE, value: "640x480@30@1000000" }
+            - { name: DATA_PLANE_WINDOW_S, value: "30" }
+            - { name: RECONNECT_CYCLES, value: "20" }
+            - { name: JUNIT_OUT, value: "/results/junit.xml" }
+          volumeMounts:
+            - { name: results, mountPath: /results }
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+      volumes:
+        - name: results
+          emptyDir: {}

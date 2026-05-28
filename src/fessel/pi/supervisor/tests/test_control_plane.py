@@ -18,6 +18,9 @@ def make_client(monkeypatch):
     def connect(self):
       pass
 
+    def subscribe(self, topic, handler, qos=0):
+      pass
+
     def loop_start(self):
       pass
 
@@ -62,9 +65,37 @@ def test_activate_rejects_bad_mode(monkeypatch):
     assert r.status_code == 400
 
 
+def test_activate_extracts_mode_from_raw_query(monkeypatch):
+  # mediamtx runOnDemand posts the raw WHEP query; supervisor extracts mode.
+  client, published = make_client(monkeypatch)
+  with client:
+    r = client.post(
+      "/control/live/activate",
+      json={"path": "pi", "query": "mode=640x480@30@1000000&token=abc.def.ghi"},
+    )
+    assert r.status_code == 200
+  activate = next(p for p in published if p[0] == "arm/video/cmd/live/activate")
+  assert activate[1]["mode"]["resolution"] == "640x480"
+
+
 def test_deactivate_relays(monkeypatch):
   client, published = make_client(monkeypatch)
   with client:
     r = client.post("/control/live/deactivate", json={"path": "pi"})
     assert r.status_code == 200
   assert any(p[0] == "arm/video/cmd/live/deactivate" for p in published)
+
+
+def test_state_live_tracks_history(monkeypatch):
+  client, _ = make_client(monkeypatch)
+  with client:
+    relay = client.app.state.relay
+    # Simulate retained live-state messages arriving from video.
+    for st in ["off", "starting", "running", "starting", "off"]:
+      relay._on_live_state("arm/video/state/live", {"state": st, "path": "pi"})
+    r = client.get("/state/live")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["current"]["state"] == "off"
+    # Consecutive duplicates collapse; transitions preserved in order.
+    assert body["history"] == ["off", "starting", "running", "starting", "off"]

@@ -1,0 +1,11 @@
+Package: fessel-monitor
+Version: @VERSION@
+Section: misc
+Priority: optional
+Architecture: all
+Depends: python3 (>= 3.11), python3-venv, python3-gi, gir1.2-gst-plugins-bad-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-tools, mosquitto, v4l-utils
+Maintainer: Fessel <noreply@example.com>
+Description: Fessel robot-arm monitoring (Pi side)
+ supervisor (safety/control plane + MQTT relay) and video (GStreamer
+ pipeline + live state machine), installed as system-site-packages venvs
+ with their systemd units and seeded /etc/fessel config.

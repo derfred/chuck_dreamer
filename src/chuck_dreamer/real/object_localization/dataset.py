@@ -45,17 +45,15 @@ def episode_bounds(ds: Any, episode_idx: int) -> tuple[int, int]:
 
 
 def episode_bounds_from_meta(dataset_id: str, episode_idx: int) -> tuple[int, int]:
-  """``(from_idx, to_idx_exclusive)`` from cached parquet metadata only.
+  """``(from_idx, to_idx_exclusive)`` for one episode, metadata only.
 
-  This avoids ``LeRobotDataset(dataset_id)`` and the multi-minute PyAV
-  index build it triggers on first access. ``LeRobotDatasetMetadata``
-  only reads the parquet sidecars under ``meta/`` and the small HF refs
-  files — no video touch.
+  Derived from :meth:`chuck_dreamer.common.episode_spec.EpisodeSpec.read_episodes`,
+  which reads only the parquet sidecars under ``meta/`` — no video touch.
   """
-  from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # type: ignore
-  meta = LeRobotDatasetMetadata(dataset_id)
-  row = meta.episodes[episode_idx]
-  return int(row["dataset_from_index"]), int(row["dataset_to_index"])
+  for ep, bounds in all_episode_bounds_from_meta(dataset_id):
+    if ep == episode_idx:
+      return bounds
+  raise KeyError(f"{dataset_id}: episode {episode_idx} not in metadata")
 
 
 def all_episode_bounds_from_meta(dataset_id: str
@@ -63,13 +61,10 @@ def all_episode_bounds_from_meta(dataset_id: str
   """Return ``[(episode_idx, (from, to)), ...]`` for every episode in the
   dataset, sourced from cached parquet metadata only.
   """
-  from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # type: ignore
-  meta = LeRobotDatasetMetadata(dataset_id)
-  out: list[tuple[int, tuple[int, int]]] = []
-  for row in meta.episodes:
-    out.append((int(row["episode_index"]),
-                (int(row["dataset_from_index"]), int(row["dataset_to_index"]))))
-  return out
+  from chuck_dreamer.common.episode_spec import EpisodeSpec
+
+  slices, _ = EpisodeSpec(dataset_id=dataset_id).read_episodes()
+  return [(s.episode_index, s.bounds) for s in slices]
 
 
 def get_frame(ds: Any, frame_idx: int, camera_key: str) -> np.ndarray:

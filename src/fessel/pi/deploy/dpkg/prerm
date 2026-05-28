@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  systemctl stop fessel-video.service || true
+  systemctl stop fessel-supervisor.service || true
+  systemctl stop fessel-mosquitto.service || true
+fi
+
+exit 0

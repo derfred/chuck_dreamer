@@ -26,6 +26,11 @@ import time
 import jwt
 from fessel_schemas import ModeTriplet, mode_to_canonical
 
+# Key ID shared between the signed JWT header and the JWKS entry. mediamtx's
+# JWKS validation matches the JWT header `kid` against a key in the JWKS, so
+# both sides must carry the same kid.
+WHEP_KID = "fessel-whep"
+
 
 def mint_whep_token(
   *,
@@ -51,4 +56,4 @@ def mint_whep_token(
     # mediamtx JWT authorization: grant the read (WHEP) action on this path.
     "mediamtx_permissions": [{"action": "read", "path": path}],
   }
-  return jwt.encode(claims, secret, algorithm="HS256")
+  return jwt.encode(claims, secret, algorithm="HS256", headers={"kid": WHEP_KID})
