@@ -38,15 +38,15 @@ data:
       pi:
         source: publisher
         # Pass the raw WHEP query string to supervisor, which extracts the
-        # mode. Avoids fragile nested-quote shell parsing. mediamtx expands
-        # $MTX_PATH and $MTX_QUERY in the runOnDemand environment.
+        # mode. Uses wget (Alpine ffmpeg image has no curl). mediamtx
+        # expands $MTX_PATH and $MTX_QUERY in the runOnDemand environment.
         runOnDemand: >
-          curl -fsS -X POST -H "Content-Type: application/json"
-          --data "{\"path\":\"$MTX_PATH\",\"query\":\"$MTX_QUERY\"}"
+          wget -q -O- --header="Content-Type: application/json"
+          --post-data="{\"path\":\"$MTX_PATH\",\"query\":\"$MTX_QUERY\"}"
           http://supervisor:8443/control/live/activate
         runOnUnDemand: >
-          curl -fsS -X POST -H "Content-Type: application/json"
-          --data "{\"path\":\"$MTX_PATH\"}"
+          wget -q -O- --header="Content-Type: application/json"
+          --post-data="{\"path\":\"$MTX_PATH\"}"
           http://supervisor:8443/control/live/deactivate
         runOnDemandStartTimeout: 15s
         runOnDemandCloseAfter: 10s
@@ -68,8 +68,16 @@ spec:
     spec:
       containers:
         - name: mediamtx
-          image: bluenviron/mediamtx:1.9.3
-          args: ["/config/mediamtx.yml"]
+          # -ffmpeg variant is Alpine-based (has /bin/sh + wget), unlike the
+          # scratch default image. We need a shell to cap RLIMIT_NOFILE and
+          # for runOnDemand.
+          image: bluenviron/mediamtx:1.9.3-ffmpeg
+          # Cap the file-descriptor soft limit before launching mediamtx.
+          # On containerd/rke2 nodes the inherited RLIMIT_NOFILE is enormous
+          # and mediamtx crashes at startup with "too many open files"
+          # (bluenviron/mediamtx#3452). A sane cap fixes it.
+          command: ["/bin/sh", "-c"]
+          args: ["ulimit -n 65536; exec /mediamtx /config/mediamtx.yml"]
           env:
             # Advertise the pod IP as the WebRTC ICE host candidate.
             - name: POD_IP
