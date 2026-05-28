@@ -1,9 +1,10 @@
-# mediamtx for the integration test: WHEP + SRT + WebRTC, with the
-# runOnDemand curl targeting the in-cluster supervisor Service (stands in
-# for the Tailscale egress), and JWT auth validated against the webui
-# backend JWKS. WebRTC is reachable in-cluster (the test Job is a cluster
-# pod), so we advertise the pod IP as the ICE host candidate instead of the
-# production NodePort/public-IP set.
+# mediamtx for the integration test: WHEP + SRT + WebRTC. runOnDemand
+# targets the in-cluster supervisor Service (stands in for the Tailscale
+# egress). Auth is JWT validated locally against the webui JWKS (no
+# callback), with publish excluded so the Pi's SRT ingest needs no token.
+# WebRTC is reachable in-cluster (the test Job is a cluster pod), so we
+# advertise the pod IP as the ICE host candidate instead of the production
+# NodePort/public-IP set.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -31,13 +32,17 @@ data:
     # cluster's public NAT IP) is unreachable from inside and just stalls
     # ICE until the handshake deadline — drop it for fast in-cluster ICE.
     webrtcICEServers2: []
-    # HTTP auth: mediamtx calls webui /auth per request. webui validates the
-    # WHEP JWT (jwt= query param) for read; publish (the Pi's trusted SRT
-    # ingest) is excluded so it doesn't need a token. JWT mode can't exclude
-    # publish, hence HTTP auth here.
-    authMethod: http
-    authHTTPAddress: http://webui:8000/auth
-    authHTTPExclude:
+    # JWT auth, validated locally against the webui JWKS — NO per-request
+    # callback (the architecture's design, §2.3/§4.3). authJWTExclude lets
+    # the Pi's trusted SRT publish through without a token (a JWT can't be
+    # carried over SRT: streamid is capped at 512 chars). authJWTInHTTPQuery
+    # lets mediamtx read the token from the ?jwt= WHEP query parameter.
+    # Requires mediamtx >= 1.13.0 (authJWTExclude introduced there).
+    authMethod: jwt
+    authJWTJWKS: http://webui:8000/jwks
+    authJWTClaimKey: mediamtx_permissions
+    authJWTInHTTPQuery: true
+    authJWTExclude:
       - action: publish
       - action: api
       - action: metrics
@@ -89,7 +94,8 @@ spec:
         - name: mediamtx
           # -ffmpeg variant is Alpine-based and ships wget (for runOnDemand);
           # the scratch default image has neither shell nor http client.
-          image: bluenviron/mediamtx:1.9.1-ffmpeg
+          # >= 1.13.0 for authJWTExclude; pinned to latest 1.18.2.
+          image: bluenviron/mediamtx:1.18.2-ffmpeg
           args: ["/config/mediamtx.yml"]
           env:
             # Advertise the pod IP as the WebRTC ICE host candidate.

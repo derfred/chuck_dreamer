@@ -35,9 +35,16 @@ spec:
       labels:
         app: mediamtx
     spec:
+      # Non-root: on shared rke2/containerd nodes, root mediamtx can hit the
+      # per-UID inotify-instance limit and crash at startup; a non-root uid
+      # has its own budget.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
       containers:
         - name: mediamtx
-          image: bluenviron/mediamtx:1.9.3
+          # >= 1.13.0 required for authJWTExclude (publish exclusion).
+          image: bluenviron/mediamtx:1.18.2
           args: ["/config/mediamtx.yml"]
           ports:
             - { name: srt, containerPort: 8890, protocol: UDP }

@@ -31,11 +31,14 @@ data:
     webrtcLocalTCPAddress: :${WRTC_TCP_NODEPORT}
     webrtcAdditionalHosts: [${NODE_PUBLIC_IPS}]
     webrtcICEServers2: []
-    # HTTP auth: webui validates the WHEP JWT for reads; publish (Pi SRT
-    # ingest) excluded.
-    authMethod: http
-    authHTTPAddress: http://webui:8000/auth
-    authHTTPExclude:
+    # JWT auth validated locally against the webui JWKS (no callback).
+    # Publish excluded (the Pi's SRT ingest can't carry a JWT). Requires
+    # mediamtx >= 1.13.0.
+    authMethod: jwt
+    authJWTJWKS: http://webui:8000/jwks
+    authJWTClaimKey: mediamtx_permissions
+    authJWTInHTTPQuery: true
+    authJWTExclude:
       - action: publish
       - action: api
       - action: metrics
@@ -78,7 +81,7 @@ spec:
         runAsGroup: 1000
       containers:
         - name: mediamtx
-          image: bluenviron/mediamtx:1.9.1-ffmpeg
+          image: bluenviron/mediamtx:1.18.2-ffmpeg
           args: ["/config/mediamtx.yml"]
           ports:
             - { name: whep, containerPort: 8889, protocol: TCP }

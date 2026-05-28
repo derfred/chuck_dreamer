@@ -36,13 +36,20 @@ webrtcICEServers2:
 # and validates the signature + expiry itself. The token's signature is an
 # HMAC over (path, mode, expiry) expressed as JWT claims (see backend
 # app/token.py). The shared secret is the JWKS `oct` key.
+# Requires mediamtx >= 1.13.0 (authJWTExclude / authJWTInHTTPQuery).
 authMethod: jwt
 authJWTJWKS: ${BACKEND_JWKS_URL}
-# mediamtx reads the JWT from the `token` query parameter on the WHEP URL.
 authJWTClaimKey: mediamtx_permissions
-
-# No publish-side credentials: omit publishUser/publishPass entirely
-# (do not set to empty strings).
+# mediamtx reads the JWT from the `jwt` query parameter on the WHEP URL.
+authJWTInHTTPQuery: true
+# Exclude the Pi's trusted SRT publish from JWT auth: a JWT cannot be
+# carried over SRT (streamid is capped at 512 chars). Read (WHEP) still
+# requires a valid token, so the only trigger that starts encoding is a
+# valid signed token. api/metrics excluded as operational endpoints.
+authJWTExclude:
+  - action: publish
+  - action: api
+  - action: metrics
 
 pathDefaults:
   source: publisher
@@ -51,18 +58,17 @@ paths:
   ${LIVE_PATH}:
     source: publisher
     # runOnDemand fires only after the WHEP token is validated above, so
-    # the only trigger that reaches the Pi is a valid signed token.
-    # ${MTX_QUERY} expands to the WHEP query string; we forward `mode`.
+    # the only trigger that reaches the Pi is a valid signed token. We hand
+    # supervisor the raw WHEP query; it extracts `mode` (avoids fragile
+    # nested-quote shell parsing). $MTX_PATH / $MTX_QUERY are mediamtx vars.
     runOnDemand: >
-      sh -c 'curl -fsS -X POST
-      -H "Content-Type: application/json"
-      --data "{\"path\":\"$MTX_PATH\",\"mode\":\"$(echo "$MTX_QUERY" | sed -n "s/.*mode=\\([^&]*\\).*/\\1/p")\"}"
-      ${SUPERVISOR_BASE}/control/live/activate'
+      curl -fsS -X POST -H "Content-Type: application/json"
+      --data "{\"path\":\"$MTX_PATH\",\"query\":\"$MTX_QUERY\"}"
+      ${SUPERVISOR_BASE}/control/live/activate
     runOnUnDemand: >
-      sh -c 'curl -fsS -X POST
-      -H "Content-Type: application/json"
+      curl -fsS -X POST -H "Content-Type: application/json"
       --data "{\"path\":\"$MTX_PATH\"}"
-      ${SUPERVISOR_BASE}/control/live/deactivate'
+      ${SUPERVISOR_BASE}/control/live/deactivate
     runOnDemandStartTimeout: 15s
     runOnDemandCloseAfter: 10s
     runOnDemandRestart: no

@@ -10,7 +10,7 @@ build+push images (GitHub-hosted) → deploy + test on the self-hosted
 
 | Assertion | What it validates |
 |---|---|
-| `happy_path_activation` | Browser WHEP → webui `/auth` (JWT) → mediamtx `runOnDemand` → supervisor (in-cluster DNS) → MQTT → `video` state machine `off→starting→running` → SRT publish to mediamtx (`is publishing … H264`). |
+| `happy_path_activation` | Browser fetches a signed WHEP URL from webui → mediamtx validates the JWT locally against webui's JWKS (no callback) → `runOnDemand` → supervisor (in-cluster DNS) → MQTT → `video` state machine `off→starting→running` → SRT publish to mediamtx (`is publishing … H264`). |
 | `teardown_returns_off` | Disconnect → `runOnDemandCloseAfter` → deactivate → state machine returns to `off`. |
 | `token_rejection_no_activation` | A tampered token is rejected at mediamtx/webui **before** any Pi activation (state stays `off`). The core security property. |
 | `rapid_reconnect_no_leak` | N rapid connect/disconnect cycles leave the state machine in `off` with no leaked encoder — the regression the live state machine exists to prevent. |
@@ -88,8 +88,9 @@ gh run view <run-id> --log-failed               # only failed steps
 ```
 
 **2. Map the failure to a layer.** The assertions localize it:
-- `happy_path_activation` fails at WHEP/auth → check **webui** `/auth` logs
-  and **mediamtx** (look for `authentication failed`, `codecs`, `kid`).
+- `happy_path_activation` fails at WHEP/auth → check **mediamtx** logs
+  (look for `authentication failed`, `codecs`, `kid`, JWKS fetch errors)
+  and that **webui** `/jwks` is reachable from mediamtx.
 - `happy_path` reaches WHEP but never `running` → check **mediamtx**
   `runOnDemand` (did the `curl`/`wget` to supervisor fire?) and **pi** logs
   (`relay activate` in supervisor, `activate`/`live launch`/state changes in
