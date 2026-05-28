@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
@@ -126,12 +127,28 @@ def mint_whep_url() -> str:
   return body["url"]
 
 
+def whep_post(signed_url: str, offer_sdp: str) -> tuple[int, str]:
+  """POST the WHEP offer from Python (the browser's about:blank origin
+  can't fetch cross-origin). Returns (status, answer_sdp_or_error)."""
+  req = urllib.request.Request(  # noqa: S310
+    signed_url,
+    data=offer_sdp.encode(),
+    method="POST",
+    headers={"Content-Type": "application/sdp"},
+  )
+  try:
+    with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310
+      return r.status, r.read().decode()
+  except urllib.error.HTTPError as e:
+    return e.code, e.read().decode(errors="replace")
+
+
 # ---------- the WHEP client (browser) ----------
 
-# JS run in-page: do the WHEP handshake against a signed URL, attach the
-# track, and expose stats for the data-plane assertion.
-WHEP_JS = r"""
-async (signedUrl) => {
+# Create a recvonly PeerConnection, gather ICE fully (no trickle: we relay
+# the SDP through Python), and return the complete offer SDP.
+OFFER_JS = r"""
+async () => {
   const pc = new RTCPeerConnection();
   window.__pc = pc;
   const v = document.createElement('video');
@@ -143,13 +160,23 @@ async (signedUrl) => {
   pc.ontrack = (e) => { if (e.streams[0]) v.srcObject = e.streams[0]; };
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
-  const resp = await fetch(signedUrl, {
-    method:'POST', headers:{'Content-Type':'application/sdp'}, body: offer.sdp
+  // Wait for ICE gathering to finish so the offer carries all candidates.
+  await new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    const check = () => { if (pc.iceGatheringState === 'complete') { pc.removeEventListener('icegatheringstatechange', check); resolve(); } };
+    pc.addEventListener('icegatheringstatechange', check);
+    setTimeout(resolve, 3000);  // cap the wait
   });
-  if (!resp.ok) { return {ok:false, status: resp.status, body: await resp.text()}; }
-  const answer = await resp.text();
-  await pc.setRemoteDescription({type:'answer', sdp: answer});
-  return {ok:true, status: resp.status};
+  return pc.localDescription.sdp;
+}
+"""
+
+# Apply the SDP answer relayed back from Python.
+ANSWER_JS = r"""
+async (answerSdp) => {
+  const pc = window.__pc;
+  await pc.setRemoteDescription({type:'answer', sdp: answerSdp});
+  return true;
 }
 """
 
@@ -178,9 +205,15 @@ def main() -> int:
     page = browser.new_page()
     page.goto("about:blank")
 
-    def connect() -> dict:
-      url = mint_whep_url()
-      return page.evaluate(WHEP_JS, url)
+    def connect(url: str | None = None) -> dict:
+      """Full WHEP handshake: browser offer -> Python POST -> browser answer."""
+      signed = url if url is not None else mint_whep_url()
+      offer_sdp = page.evaluate(OFFER_JS)
+      status, body = whep_post(signed, offer_sdp)
+      if status not in (200, 201):
+        return {"ok": False, "status": status, "body": body[:300]}
+      page.evaluate(ANSWER_JS, body)
+      return {"ok": True, "status": status}
 
     def close_pc() -> None:
       page.evaluate("() => { if (window.__pc) window.__pc.close(); window.__pc=null; if(window.__video){window.__video.remove(); window.__video=null;} }")
@@ -230,7 +263,7 @@ def main() -> int:
       # Tamper the token.
       url = mint_whep_url()
       bad = url[:-3] + ("aaa" if not url.endswith("aaa") else "bbb")
-      res = page.evaluate(WHEP_JS, bad)
+      res = connect(url=bad)
       assert not res.get("ok"), f"tampered token unexpectedly accepted: {res}"
       # Assert state STAYED off (no Pi activation).
       time.sleep(5)
