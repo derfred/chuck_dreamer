@@ -66,18 +66,21 @@ spec:
     metadata:
       labels: { app: mediamtx }
     spec:
+      # Run as a non-root UID. The real cause of mediamtx's startup
+      # "too many open files" on this shared rke2 node is exhaustion of the
+      # per-UID inotify instance budget (fs.inotify.max_user_instances=128)
+      # for uid 0 — mediamtx's config-reload watcher can't get an inotify
+      # instance. A non-root uid has its own fresh budget, so it starts
+      # cleanly. (Not an fd-limit issue; the nofile ulimit is irrelevant.)
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
       containers:
         - name: mediamtx
-          # Pin 1.9.1: 1.9.3 crashes at startup on this rke2/containerd
-          # cluster with "too many open files" regardless of the nofile
-          # ulimit (a regression after 1.9.1; bluenviron/mediamtx#3452).
-          # 1.9.1 is proven stable on these exact nodes (the spike ran it
-          # for 22h). The -ffmpeg variant is Alpine-based (has /bin/sh +
-          # wget), which the scratch default image lacks; we need a shell to
-          # cap RLIMIT_NOFILE defensively and wget for runOnDemand.
+          # -ffmpeg variant is Alpine-based and ships wget (for runOnDemand);
+          # the scratch default image has neither shell nor http client.
           image: bluenviron/mediamtx:1.9.1-ffmpeg
-          command: ["/bin/sh", "-c"]
-          args: ["ulimit -n 65536 2>/dev/null || true; exec /mediamtx /config/mediamtx.yml"]
+          args: ["/config/mediamtx.yml"]
           env:
             # Advertise the pod IP as the WebRTC ICE host candidate.
             - name: POD_IP
