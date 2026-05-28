@@ -1,12 +1,10 @@
 """`annotate-mat` CLI: interactive extrinsics calibration from one frame."""
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
 import click
-import numpy as np
 
 from chuck_dreamer.config import load_config
 

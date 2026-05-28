@@ -137,7 +137,7 @@ class CEMPolicy:
     self._tracker_state = self.model.initial_state(1)
     self._prev_action   = np.zeros((self.model.action_dim,), dtype=np.float32)
     self._mean          = None
-    
+
   def seed_action(self, action: np.ndarray) -> None:
     """Seed CEM with a known valid action.
 
@@ -257,7 +257,7 @@ class CEMPolicy:
       shifted[:-1] = self._mean[1:]
       return shifted
     return np.zeros((H, A), dtype=np.float32)
-  
+
   def _project_ee_samples(self, samples: np.ndarray) -> np.ndarray:
     """Project sampled absolute EE poses into small reachable steps.
 

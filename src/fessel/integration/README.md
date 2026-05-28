@@ -26,23 +26,128 @@ The two cluster↔Pi legs use in-cluster Service DNS instead of Tailscale:
 
 Both are config-only on the Fessel side, so the same dpkg/images run unmodified.
 
-## Known gap: browser WebRTC media reception
+## Why there's no automated data-plane (video-bytes) assertion
 
-`data_plane_media_flows` is a **non-blocking xfail** (`<skipped>` in JUnit).
-ICE between the in-cluster **headless Chrome** test client and mediamtx does
-not complete (`peer connection state: connecting → deadline exceeded`),
-despite both pods having routable IPs and JWT auth + SDP signaling
-succeeding. This is a containerized-Chrome / k8s UDP-ICE limitation of the
-**test client**, not a Fessel defect — the Pi *is* publishing H264 to
-mediamtx (verified in mediamtx logs), so the media plane works up to the
-browser's ICE agent.
+The automated suite intentionally does **not** assert that video bytes reach
+the browser. ICE between the in-cluster **headless Chrome** test client and
+mediamtx never completes (`peer connection state: connecting → deadline
+exceeded`) even though both pods have routable IPs and JWT auth + SDP
+signaling + SRT publish all succeed — a containerized-Chrome / k8s UDP-ICE
+limitation of the **test client**, not a Fessel defect. Such a test could
+never pass here, so it isn't run.
 
-This sits alongside the other Slice 1.5 §6 coverage gaps (hardware encoder,
-Tailscale Services, production NodePort/public-IP WebRTC, real cellular).
-Cover real WebRTC media reception in the physical-Pi / real-browser tier.
+The control plane still proves the chain up to the media plane: `happy_path`
+drives activation → SRT publish, confirmed by mediamtx logging
+`is publishing ... H264`. The remaining hop (media decoded in a browser) is
+verified **manually** via the live-preview workflow below, in a real browser.
 
-Set `DATA_PLANE_BLOCKING=1` on the test Job to make this assertion blocking
-again once such a tier exists.
+This is one of the Slice 1.5 §6 coverage gaps (alongside hardware encoder,
+Tailscale Services, real cellular); a future physical-Pi / real-browser tier
+can add an automated data-plane assertion there.
+
+## Live preview (manual video verification)
+
+Because the automated browser can't complete WebRTC ICE in-cluster, there's
+an on-demand **live preview** that puts a *real* browser (yours) at the end:
+`.github/workflows/fessel-live-preview.yml` (`live-preview/`).
+
+It deploys the same system but with **production WebRTC exposure** — WebRTC
+media over a NodePort on the node public IPs (`webrtcAdditionalHosts`), WHEP
+signaling + the `/live` page behind HTTPS Ingresses — so a public browser can
+actually connect. It runs the control-plane assertions (`CONTROL_PLANE_ONLY`),
+then leaves the stack up and prints the URL.
+
+Usage (Actions → "fessel live preview" → Run workflow):
+- `action=up` (default): build images (tag `live-preview`), deploy, print
+  `https://fessel-live.derfred.com/`, keep alive for `ttl_minutes` (default
+  30), then auto-teardown. Open the URL, pick a mode, click "Start live
+  view", and confirm the moving test pattern.
+- `action=down`: tear down immediately.
+
+DNS for `*.derfred.com` resolves to the cluster ingress; WebRTC media flows
+directly to the node public IPs on NodePorts 31554 (UDP) / 31555 (TCP).
+This exercises the production NodePort/public-IP WebRTC path that the per-PR
+test overrides — closing that coverage gap manually, on demand.
+
+## Debugging a failed run
+
+When the `fessel integration` check is red, work through these in order.
+
+**1. Read the CI log first — it is self-contained.**
+On failure, `run-test.sh` dumps a full post-mortem after the assertions:
+the driver log (with `[PASS]`/`[FAIL]`/`[ice]` lines and the JUnit), then
+for **mediamtx, webui, and pi**: `describe`, current logs, and previous
+logs (if a pod restarted). `deploy.sh` separately dumps describe + logs if
+any rollout fails or a pod is unstable. So most root causes are visible
+without cluster access:
+```
+gh run list --workflow fessel-integration.yml -L 5
+gh run view <run-id> --log                      # everything
+gh run view <run-id> --log | grep -E '\[PASS\]|\[FAIL\]|\[ice\]|INTEGRATION:|ERR|error'
+gh run view <run-id> --log-failed               # only failed steps
+```
+
+**2. Map the failure to a layer.** The assertions localize it:
+- `happy_path_activation` fails at WHEP/auth → check **webui** `/auth` logs
+  and **mediamtx** (look for `authentication failed`, `codecs`, `kid`).
+- `happy_path` reaches WHEP but never `running` → check **mediamtx**
+  `runOnDemand` (did the `curl`/`wget` to supervisor fire?) and **pi** logs
+  (`relay activate` in supervisor, `activate`/`live launch`/state changes in
+  video). The supervisor `/state/live` history is the source of truth for
+  the `off→starting→running` progression.
+- `teardown_returns_off` fails → `runOnUnDemand` / deactivate path.
+- `rapid_reconnect_no_leak` fails → the video state machine (run the unit
+  tests: `make -C src/fessel test-video`).
+- A pod CrashLoopBackOff before tests even run → `deploy.sh`'s rollout +
+  stability diagnostics already printed the crash logs.
+
+**3. Reproduce live in the fixed dev namespace.** The per-run `fessel-it-*`
+namespace is auto-deleted, but you can redeploy the exact stack into the
+persistent `fessel-integration-test` namespace and poke at it directly
+(this is how the original bring-up was debugged):
+```
+export KUBECONFIG=~/.kube/config-bugzoo-direct
+cd src/fessel
+TAG=<an image tag that exists, e.g. a recent run id or 'live-preview'>
+for f in 00-secret 10-mediamtx 20-webui 30-pi; do
+  NS=fessel-integration-test IMAGE_TAG=$TAG REGISTRY=ghcr.io/derfred \
+    FESSEL_WHEP_SECRET=devsecret integration/render.sh < integration/manifests/$f.yaml.tmpl
+  echo ---
+done | kubectl apply -n fessel-integration-test -f -
+kubectl rollout status deploy/mediamtx -n fessel-integration-test
+# then: kubectl logs / exec / get events, run a driver-probe pod, etc.
+# clean up:  kubectl delete deploy,svc,cm,secret,job --all -n fessel-integration-test
+```
+Bump mediamtx logging by piping the rendered config through
+`sed 's/logLevel: info/logLevel: debug/'` before `kubectl apply` — that
+reveals per-session ICE / DTLS / auth detail.
+
+**4. Watch a CI run live.** While the `integration` job runs, its
+`fessel-it-<run-id>` namespace exists for ~5 min:
+```
+NS=fessel-it-<run-id>
+kubectl get pods -n $NS -w
+kubectl logs -n $NS -l app=mediamtx -f      # publish/read/runOnDemand/auth
+kubectl logs -n $NS -l app=pi -f            # supervisor relays + video state
+```
+
+**5. Run the driver against a live deployment.** Launch the driver image as
+a one-off pod (set `CONTROL_PLANE_ONLY=1` to skip nothing extra, or tweak
+`RECONNECT_CYCLES`) to iterate on the test itself without a full CI cycle:
+```
+kubectl run driver-probe -n fessel-integration-test --restart=Never \
+  --image=ghcr.io/derfred/fessel-test-driver:$TAG \
+  --env=WEBUI=http://webui:8000 --env=MEDIA=http://mediamtx:8889 \
+  --env=SUPERVISOR=http://supervisor:8443
+kubectl logs -f driver-probe -n fessel-integration-test
+```
+
+**Knobs for more logging:**
+- mediamtx: `logLevel: debug` in `manifests/10-mediamtx.yaml.tmpl`.
+- supervisor/video: already structured JSON to stdout; `/state/live` on
+  supervisor exposes the live-state history over HTTP.
+- driver: `happy_path` already calls `connect(debug=True)` to dump ICE
+  candidates; pass `debug=True` in other `connect()` calls to see their SDP.
 
 ## Other deviations from the plan
 

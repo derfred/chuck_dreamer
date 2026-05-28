@@ -6,7 +6,7 @@ handles the conversion in one place so callers never have to.
 """
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 
@@ -124,7 +124,7 @@ def _to_uint8_hwc(img: Any) -> np.ndarray:
   try:
     import torch
   except Exception:  # pragma: no cover - torch is a hard dep but be defensive
-    torch = None
+    torch = None  # type: ignore[assignment]
   if torch is not None and isinstance(img, torch.Tensor):
     arr = img.detach().cpu().numpy()
   else:

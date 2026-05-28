@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -85,99 +86,59 @@ def segment_image(
 
 def segment_video(
   frames: list[np.ndarray],
-  first_frame_prompt: tuple[int, int] | list[tuple[int, int]],
-  use_sam2: bool, checkpoint: str, device: str,
-  scene_bg: "SceneBackground | None" = None,
+  keyframe_prompts: dict[int, "tuple[int, int] | list[tuple[int, int]]"],
+  checkpoint: str, device: str,
 ) -> list[np.ndarray | None]:
-  """Propagate a mask through an episode. Returns per-frame masks."""
-  if use_sam2:
-    sam = _get_sam2(checkpoint, device)
-    pred = sam.video_predictor
-    if pred is not None:
-      try:
-        return _sam2_video(pred, frames, first_frame_prompt)
-      except Exception as e:
-        logger.warning("SAM2 video predict failed (%s); falling back per-frame.", e)
-  out: list[np.ndarray | None] = []
-  for f in frames:
-    mask = None
-    if scene_bg is not None:
-      mask = _bg_mask(f, first_frame_prompt, scene_bg)
-    if mask is None:
-      mask = _fallback_mask(f, first_frame_prompt)
-    out.append(mask)
-  return out
+  """Propagate a mask through an episode with SAM2's video predictor.
+
+  ``keyframe_prompts`` maps episode-relative frame index to the click(s)
+  anchoring the object at that frame; each is added to SAM2 as a prompt
+  so the propagation is re-anchored at every keyframe. Returns per-frame
+  masks (``None`` where SAM2 produced no mask).
+
+  SAM2-only: raises if the video predictor is unavailable. Frames are
+  written to a temporary JPEG directory and handed to SAM2's native
+  ``init_state`` so SAM2 owns all preprocessing (no manual normalize).
+  """
+  sam = _get_sam2(checkpoint, device)
+  pred = sam.video_predictor
+  if pred is None:
+    raise RuntimeError(
+      "SAM2 video predictor unavailable; segment_video requires SAM2.")
+  return _sam2_video(pred, frames, keyframe_prompts)
 
 
 def _sam2_video(predictor, frames: list[np.ndarray],
-                first_frame_prompt: tuple[int, int] | list[tuple[int, int]]
+                keyframe_prompts: dict[int, "tuple[int, int] | list[tuple[int, int]]"]
                 ) -> list[np.ndarray | None]:
-  pts = _prompt_to_array(first_frame_prompt)
-  state = _sam2_init_state_from_frames(predictor, frames)
-  predictor.add_new_points_or_box(
-    inference_state=state, frame_idx=0, obj_id=0,
-    points=pts, labels=np.ones(pts.shape[0], dtype=np.int32),
-  )
-  per_frame: dict[int, np.ndarray] = {}
-  for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(state):
-    mask = (mask_logits[0] > 0).cpu().numpy()
-    if mask.ndim == 3:
-      mask = mask[0]
-    per_frame[int(frame_idx)] = _largest_component(mask.astype(bool))
+  import shutil
+  import tempfile
+
+  import cv2
+
+  jpg_dir = Path(tempfile.mkdtemp(prefix="segment_video_"))
+  try:
+    for i, f in enumerate(frames):
+      bgr = cv2.cvtColor(np.asarray(f), cv2.COLOR_RGB2BGR)
+      cv2.imwrite(str(jpg_dir / f"{i:05d}.jpg"), bgr)
+
+    state = predictor.init_state(str(jpg_dir), offload_video_to_cpu=True)
+    for frame_idx, prompt in sorted(keyframe_prompts.items()):
+      pts = _prompt_to_array(prompt)
+      predictor.add_new_points_or_box(
+        inference_state=state, frame_idx=int(frame_idx), obj_id=0,
+        points=pts, labels=np.ones(pts.shape[0], dtype=np.int32),
+      )
+
+    per_frame: dict[int, np.ndarray | None] = {}
+    for frame_idx, _obj_ids, mask_logits in predictor.propagate_in_video(state):
+      mask = (mask_logits[0] > 0).cpu().numpy()
+      if mask.ndim == 3:
+        mask = mask[0]
+      per_frame[int(frame_idx)] = _largest_component(mask.astype(bool))
+  finally:
+    shutil.rmtree(jpg_dir, ignore_errors=True)
   return [per_frame.get(i) for i in range(len(frames))]
-
-
-def _sam2_init_state_from_frames(predictor, frames: list[np.ndarray]) -> dict:
-  """Mirror of SAM2's ``init_state`` that accepts in-memory RGB frames.
-
-  Bypasses ``load_video_frames`` (which only supports MP4 / JPEG folder)
-  by preprocessing numpy frames directly: resize to ``image_size``,
-  ImageNet-normalize, stack to ``(T, 3, S, S)`` float on the model
-  device. Then rebuilds the state dict that ``init_state`` would have
-  produced and warms up frame 0. Reaches into SAM2 internals — revisit
-  if upgrading SAM2.
-  """
-  import torch
-  import torch.nn.functional as F
-  from collections import OrderedDict
-
-  if not frames:
-    raise RuntimeError("_sam2_init_state_from_frames: empty frame list")
-
-  video_height, video_width = frames[0].shape[:2]
-  image_size = predictor.image_size
-  device = predictor.device
-
-  # (T, 3, H, W) float in [0, 1]
-  arr = np.stack(frames, axis=0).astype(np.float32) / 255.0
-  t = torch.from_numpy(arr).permute(0, 3, 1, 2).contiguous()
-  t = F.interpolate(t, size=(image_size, image_size), mode="bilinear", align_corners=False)
-  mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)[:, None, None]
-  std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)[:, None, None]
-  t = (t - mean) / std
-  images = t.to(device)
-
-  state: dict = {}
-  state["images"] = images
-  state["num_frames"] = len(frames)
-  state["offload_video_to_cpu"] = False
-  state["offload_state_to_cpu"] = False
-  state["video_height"] = video_height
-  state["video_width"] = video_width
-  state["device"] = device
-  state["storage_device"] = device
-  state["point_inputs_per_obj"] = {}
-  state["mask_inputs_per_obj"] = {}
-  state["cached_features"] = {}
-  state["constants"] = {}
-  state["obj_id_to_idx"] = OrderedDict()
-  state["obj_idx_to_id"] = OrderedDict()
-  state["obj_ids"] = []
-  state["output_dict_per_obj"] = {}
-  state["temp_output_dict_per_obj"] = {}
-  state["frames_tracked_per_obj"] = {}
-  predictor._get_image_feature(state, frame_idx=0, batch_size=1)
-  return state
 
 
 def _prompt_to_array(prompt) -> np.ndarray:
@@ -233,8 +194,10 @@ def _bg_mask(rgb: np.ndarray,
   if chosen == 0:
     # Search a small window around the click for the nearest foreground.
     R = 30
-    y0 = max(0, v0 - R); y1 = min(H, v0 + R + 1)
-    x0 = max(0, u0 - R); x1 = min(W, u0 + R + 1)
+    y0 = max(0, v0 - R)
+    y1 = min(H, v0 + R + 1)
+    x0 = max(0, u0 - R)
+    x1 = min(W, u0 + R + 1)
     window = labels[y0:y1, x0:x1]
     cand = window[window != 0]
     if cand.size == 0:
@@ -267,7 +230,6 @@ def _fallback_mask(rgb: np.ndarray, prompt: tuple[int, int] | list[tuple[int, in
   v0 = max(0, min(rgb.shape[0] - 1, v0))
 
   gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-  seed = int(gray[v0, u0])
 
   # Floodfill with a per-channel tolerance. cv2.floodFill mutates the
   # input mask in-place; ours is (H+2, W+2) per its API.

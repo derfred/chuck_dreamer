@@ -73,7 +73,6 @@ def _win_to_image(x: int, y: int, scale: float) -> tuple[float, float]:
 
 
 def _buttons(window_w: int) -> list[_ButtonRect]:
-  bar_y0 = _BANNER_H + int(_canvas_h() * 1)  # set after canvas height known
   return []
 
 

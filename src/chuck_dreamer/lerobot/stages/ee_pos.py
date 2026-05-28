@@ -13,9 +13,10 @@ _EE_QUAT_DOWN: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 0.0)
 # the gripper, which doesn't affect EE position).
 _N_POSITIONING_JOINTS = 5
 
+
 class EePosStage:
   name = "ee_pos"
-  produces = ("joint_qpos", "ee_pos", "ee_quat", "ee_action")
+  produces: tuple[str, ...] = ("joint_qpos", "ee_pos", "ee_quat", "ee_action")
   requires: tuple[str, ...] = ()
 
   def requirements(self, ctx: StageContext) -> list[Requirement]:

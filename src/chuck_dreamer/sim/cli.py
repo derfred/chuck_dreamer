@@ -245,6 +245,7 @@ def show_scene_cmd(ctx, seed, step_delay, policy_type, checkpoint_path,
     else:
       from chuck_dreamer.dreamer import DreamerPolicy
       inner = DreamerPolicy(loaded.model, act_mode=env.act_mode)
+
     def _hold_action(o):
       if env.act_mode == "joint":
         return np.asarray(o["arm_qpos"], dtype=np.float32)

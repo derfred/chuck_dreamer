@@ -12,7 +12,6 @@ runtime once, then later code paths fetch the snapshot.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from omegaconf import DictConfig, OmegaConf

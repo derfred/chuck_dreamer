@@ -38,5 +38,26 @@ if [ "$SUCCEEDED" = "1" ]; then
   echo "INTEGRATION: PASS"
   exit 0
 fi
+
+# On failure, dump full diagnostics so the CI log is self-contained (no live
+# cluster access needed for a post-mortem). This is the first place to look
+# when the integration check is red.
+echo "############################################################"
+echo "## INTEGRATION FAILED — diagnostics for namespace $NS"
+echo "############################################################"
+echo "== pods =="
+kubectl get pods -n "$NS" -o wide || true
+echo "== recent events =="
+kubectl get events -n "$NS" --sort-by=.lastTimestamp 2>/dev/null | tail -30 || true
+for app in mediamtx webui pi; do
+  echo "== describe $app =="
+  kubectl describe deploy "$app" -n "$NS" 2>/dev/null | tail -25 || true
+  for p in $(kubectl get pods -n "$NS" -l app="$app" -o name 2>/dev/null); do
+    echo "== logs $p (current) =="
+    kubectl logs -n "$NS" "$p" --tail=80 --all-containers 2>&1 || true
+    echo "== logs $p (previous, if restarted) =="
+    kubectl logs -n "$NS" "$p" --previous --tail=80 --all-containers 2>&1 || true
+  done
+done
 echo "INTEGRATION: FAIL"
 exit 1

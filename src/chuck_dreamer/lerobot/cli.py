@@ -9,8 +9,6 @@ from pathlib import Path
 
 import click
 
-from chuck_dreamer.config import load_config
-
 logger = logging.getLogger(__name__)
 
 

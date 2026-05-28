@@ -8,4 +8,3 @@ FK_MODEL_PATH = (
   Path(__file__).resolve().parents[3]
   / "assets" / "mujoco" / "so101_arm.xml"
 )
-
