@@ -588,7 +588,7 @@ def _process_episode(ds, dataset_id: str, episode_idx: int, ep_len: int,
 def _anchor_pose(ds, ep_fr: int, ep_to: int, anchor_rel: int, prompt,
                  camera_key: str, estimator,
                  calibration: CameraCalibration,
-                 ) -> tuple[object, tuple[int, int], float] | None:
+                 ) -> "tuple[ObjectPose, tuple[int, int], float] | None":
   """Cold-start the estimator at a manual keyframe; return (pose, uv, area)."""
   from ..estimator import _EpisodeContext
 

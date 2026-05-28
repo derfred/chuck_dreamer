@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime
+from typing import cast
 
 from ..sim.episode_writer import EpisodeWriter
 
@@ -9,7 +10,7 @@ _UNSET: object = object()
 
 
 class Tracker:
-  def __init__(self, config, data={}, parent=None, *, step=_UNSET):
+  def __init__(self, config, data={}, parent=None, *, step: int | None | object = _UNSET):
     self.config  = config
     self.data    = data
     self._parent = parent
@@ -17,7 +18,7 @@ class Tracker:
     # (and its children that don't override) use this step value. Walks
     # up the parent chain in _resolve_step. Sentinel distinguishes
     # "explicitly set to None" from "not set on this node".
-    self._step   = step
+    self._step: int | None | object = step
 
     # One writer instance backs both collect and eval dumps — the file
     # naming differs but the format/output dir are shared.
@@ -42,7 +43,7 @@ class Tracker:
       # root only; children read/write via :meth:`_root`.
       self._step_counter = 0
 
-  def _collect_root(self):
+  def _collect_root(self) -> "Tracker":
     node = self
     while node._parent is not None:
       node = node._parent
@@ -138,15 +139,15 @@ class Tracker:
       name_suffix=f"iteration{iteration:04d}-{source_filename}",
     )
 
-  def _resolve_step(self, explicit) -> int | None:
+  def _resolve_step(self, explicit: int | None | object) -> int | None:
     # Explicit kwarg wins. Otherwise walk up the chain for the nearest
     # node with a bound step. Falls back to None (wandb auto-increment).
     if explicit is not _UNSET:
-      return explicit
+      return cast("int | None", explicit)
     node = self
     while node is not None:
       if node._step is not _UNSET:
-        return node._step
+        return cast("int | None", node._step)
       node = node._parent
     return None
 
@@ -193,7 +194,7 @@ class Tracker:
     if counts:
       self.log({f"batch_tag/{t or 'untagged'}": n for t, n in counts.items()})
 
-  def derive(self, data: dict, *, step=_UNSET):
+  def derive(self, data: dict, *, step: int | None | object = _UNSET) -> "Tracker":
     return Tracker(self.config, data=data, parent=self, step=step)
 
   def at_step(self, step: int | None) -> "Tracker":

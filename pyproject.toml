@@ -107,7 +107,7 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [[tool.mypy.overrides]]
-module = ["mlx", "mlx.*", "mujoco", "h5py", "rerun", "tqdm", "tqdm.*"]
+module = ["mlx", "mlx.*", "mujoco", "mujoco.*", "h5py", "rerun", "tqdm", "tqdm.*", "scipy", "scipy.*"]
 ignore_missing_imports = true
 
 [dependency-groups]

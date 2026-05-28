@@ -12,7 +12,7 @@ runtime once, then later code paths fetch the snapshot.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -100,7 +100,7 @@ def init_from_config(cfg: DictConfig) -> ObjectLocalizationConfig:
   raw = OmegaConf.to_container(cfg.object_localization, resolve=True)
   assert isinstance(raw, dict)
 
-  ol_cfg = _parse(raw)
+  ol_cfg = _parse(cast("dict[str, Any]", raw))
   _active = ol_cfg
   return ol_cfg
 

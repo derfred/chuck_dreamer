@@ -340,6 +340,6 @@ class CEMPolicy:
     # ``requires_grad=True``).
     rewards = as_numpy(traj.rewards).astype(np.float32, copy=False)  # (N, H)
     if self.discount == 1.0:
-      return rewards.sum(axis=-1)
+      return np.asarray(rewards.sum(axis=-1))
     discounts = (self.discount ** np.arange(self.horizon, dtype=np.float32))[None, :]
-    return (rewards * discounts).sum(axis=-1)
+    return np.asarray((rewards * discounts).sum(axis=-1))

@@ -219,10 +219,14 @@ class ObjectPoseEstimator:
     if prompt is None and prev_pose is None:
       raise ValueError("estimate(): one of `prompt` or `prev_pose` is required.")
 
+    effective_prompt: tuple[int, int] | list[tuple[int, int]] | None
     if prev_pose is not None:
       effective_prompt = prompt if prompt is not None else _pose_to_prompt(prev_pose, self.camera)
     else:
       effective_prompt = prompt
+    # Guaranteed non-None: the guard above raises when both prompt and
+    # prev_pose are None, and the prev_pose branch always sets a prompt.
+    assert effective_prompt is not None
     mask = segment_image(image, effective_prompt, self.use_sam2,
                          self.sam2_checkpoint, self.device,
                          scene_bg=self.scene_bg)
@@ -400,6 +404,8 @@ class ObjectPoseEstimator:
     # gradient w.r.t. (x, y) is weak: if we seeded at the previous
     # frame's xy the optimizer would converge immediately on the
     # already-overlapping render and never actually track the object.
+    # Not cold_start guarantees both are set (see the cold_start predicate).
+    assert prev_pose is not None and self._episode.resting is not None
     rest = self._episode.resting
     yaw  = prev_pose.yaw_rad
     prev_z_world = float(prev_pose.xyz_mm[2])
@@ -472,7 +478,7 @@ class ObjectPoseEstimator:
       d_obs_to_ren = ren_dt[obs_idx_v, obs_idx_u]
       d_ren_to_obs = obs_dt[ren_resampled[:, 1].astype(int),
                              ren_resampled[:, 0].astype(int)]
-      return np.concatenate([d_obs_to_ren, d_ren_to_obs]).astype(np.float64)
+      return np.asarray(np.concatenate([d_obs_to_ren, d_ren_to_obs]), dtype=np.float64)
 
     x0 = np.array([xy0[0], xy0[1], dz0, rpy0[0], rpy0[1], rpy0[2]],
                   dtype=np.float64)
@@ -590,7 +596,7 @@ class ObjectPoseEstimator:
       d_obs_to_ren = ren_dt[obs_idx_v, obs_idx_u]
       d_ren_to_obs = obs_dt[ren_resampled[:, 1].astype(int),
                              ren_resampled[:, 0].astype(int)]
-      return np.concatenate([d_obs_to_ren, d_ren_to_obs]).astype(np.float64)
+      return np.asarray(np.concatenate([d_obs_to_ren, d_ren_to_obs]), dtype=np.float64)
 
     x0 = np.array([xy0[0], xy0[1], yaw0], dtype=np.float64)
     try:
@@ -815,7 +821,7 @@ def _rotation_align(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
     [v[2], 0.0, -v[0]],
     [-v[1], v[0], 0.0],
   ])
-  return np.eye(3) + vx + vx @ vx * ((1 - c) / (s * s))
+  return np.asarray(np.eye(3) + vx + vx @ vx * ((1 - c) / (s * s)))
 
 
 def _axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:
@@ -857,7 +863,7 @@ def _small_tilt(roll: float, pitch: float) -> np.ndarray:
     [0.0, 1.0, 0.0],
     [-sp, 0.0,  cp],
   ])
-  return Ry @ Rx
+  return np.asarray(Ry @ Rx)
 
 
 def _back_project_centroid(mask: np.ndarray, cam: Camera,
@@ -885,7 +891,7 @@ def _back_project_centroid(mask: np.ndarray, cam: Camera,
     return None
   s = (z_plane - origin_world[2]) / ray_world[2]
   hit = origin_world + s * ray_world
-  return hit[:2]
+  return np.asarray(hit[:2])
 
 
 def _mask_contour(mask: np.ndarray) -> np.ndarray | None:
@@ -902,7 +908,7 @@ def _distance_transform(mask: np.ndarray, image_size: tuple[int, int]) -> np.nda
   import cv2
   W, H = image_size
   inv = (mask == 0).astype(np.uint8)
-  return cv2.distanceTransform(inv, cv2.DIST_L2, 3)
+  return np.asarray(cv2.distanceTransform(inv, cv2.DIST_L2, 3))
 
 
 def _distance_transform_from_contour(contour: np.ndarray,

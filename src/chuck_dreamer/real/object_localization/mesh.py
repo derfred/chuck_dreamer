@@ -76,10 +76,11 @@ def _load_3mf(path: Path) -> Mesh:
   if vlist is None or tlist is None:
     raise ValueError(f"Malformed 3MF mesh in {path}")
   verts = np.array(
-    [(float(v.get("x")), float(v.get("y")), float(v.get("z"))) for v in vlist],
+    [(float(v.get("x", 0.0)), float(v.get("y", 0.0)), float(v.get("z", 0.0)))
+     for v in vlist],
     dtype=np.float64) * scale_mm
   tris = np.array(
-    [(int(t.get("v1")), int(t.get("v2")), int(t.get("v3"))) for t in tlist],
+    [(int(t.get("v1", 0)), int(t.get("v2", 0)), int(t.get("v3", 0))) for t in tlist],
     dtype=np.int32)
   return _finalize(verts, tris)
 

@@ -35,13 +35,18 @@ def convert(src: Path, dst: Path) -> None:
   if mesh is None:
     raise ValueError(f"No <mesh> in <object> in {src}")
 
+  vertices = mesh.find(f"{ns}vertices")
+  triangles = mesh.find(f"{ns}triangles")
+  if vertices is None or triangles is None:
+    raise ValueError(f"<mesh> in {src} is missing <vertices>/<triangles>")
+
   verts = [
-      (float(v.get("x")), float(v.get("y")), float(v.get("z")))
-      for v in mesh.find(f"{ns}vertices")
+      (float(v.get("x", 0.0)), float(v.get("y", 0.0)), float(v.get("z", 0.0)))
+      for v in vertices
   ]
   tris = [
-      (int(t.get("v1")), int(t.get("v2")), int(t.get("v3")))
-      for t in mesh.find(f"{ns}triangles")
+      (int(t.get("v1", 0)), int(t.get("v2", 0)), int(t.get("v3", 0)))
+      for t in triangles
   ]
 
   # 3MF declares millimetres; the simulator works in metres.

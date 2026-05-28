@@ -134,7 +134,7 @@ class Trainer:
         logger.warning("Buffer too small to sample (have %d steps); skipping train phase.", len(self._replay_buffer))
         return 0
 
-      num_steps = self.config.training.num_gradient_steps
+      num_steps = int(self.config.training.num_gradient_steps)
       phase_losses: list[float] = []
       for _ in tqdm.tqdm(range(num_steps), desc=f"Training - iteration {iteration}", total=num_steps):
         # tick() advances the global step counter and returns a child

@@ -209,8 +209,8 @@ def _bilinear_sample(gray: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarr
   Ib = gray[v0, u1]
   Ic = gray[v1, u0]
   Id = gray[v1, u1]
-  return (1 - du) * (1 - dv) * Ia + du * (1 - dv) * Ib \
-       + (1 - du) * dv       * Ic + du * dv       * Id
+  return np.asarray((1 - du) * (1 - dv) * Ia + du * (1 - dv) * Ib
+                    + (1 - du) * dv * Ic + du * dv * Id)
 
 
 def _walk_to_tip(gray: np.ndarray, line_pt: np.ndarray, line_dir: np.ndarray,

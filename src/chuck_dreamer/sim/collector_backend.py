@@ -238,7 +238,7 @@ class AsyncCollectorBackend:
     # Serialize the config once; workers re-parse via OmegaConf.create.
     config_yaml = OmegaConf.to_yaml(config, resolve=True)
 
-    self.workers: list[mp.Process] = []
+    self.workers: list[mp.process.BaseProcess] = []
     for i in range(num_workers):
       p = ctx.Process(
         target=_worker_loop,

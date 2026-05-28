@@ -33,7 +33,7 @@ class Camera:
 def transform_object(vertices_mm: np.ndarray, R_world_obj: np.ndarray,
                      xyz_mm: np.ndarray) -> np.ndarray:
   """Apply object->world transform to the mesh vertices."""
-  return (R_world_obj @ vertices_mm.T).T + xyz_mm.reshape(1, 3)
+  return np.asarray((R_world_obj @ vertices_mm.T).T + xyz_mm.reshape(1, 3))
 
 
 def project_points(pts_world: np.ndarray, cam: Camera) -> np.ndarray:
@@ -54,7 +54,7 @@ def visible_face_mask(vertices_world: np.ndarray, triangles: np.ndarray,
   centers = (v0 + v1 + v2) / 3.0
   cam_pos_world = -cam.R_world_cam.T @ cam.t_world_cam.reshape(3)
   to_cam = cam_pos_world.reshape(1, 3) - centers
-  return np.sum(normals * to_cam, axis=1) > 0
+  return np.asarray(np.sum(normals * to_cam, axis=1) > 0)
 
 
 def project_silhouette(vertices_world: np.ndarray, triangles: np.ndarray,
