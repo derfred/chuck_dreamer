@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Deploy the Fessel stack for an on-demand LIVE PREVIEW: production WebRTC
+# exposure (node public IPs + NodePort) and HTTPS Ingresses so a REAL
+# browser can watch the stream. Runs the control-plane assertions, then
+# leaves the stack UP and prints the URL. Does NOT tear down (use
+# teardown.sh or the workflow's TTL).
+#
+# Required env: NS, IMAGE_TAG, REGISTRY, FESSEL_WHEP_SECRET, BASE_DOMAIN
+# Optional: WRTC_UDP_NODEPORT (default 31554), WRTC_TCP_NODEPORT (31555)
+set -euo pipefail
+: "${NS:?}" "${IMAGE_TAG:?}" "${REGISTRY:?}" "${FESSEL_WHEP_SECRET:?}" "${BASE_DOMAIN:?}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RENDER="$HERE/../render.sh"
+
+export WRTC_UDP_NODEPORT="${WRTC_UDP_NODEPORT:-31554}"
+export WRTC_TCP_NODEPORT="${WRTC_TCP_NODEPORT:-31555}"
+export WEBUI_HOST="fessel-live.${BASE_DOMAIN}"
+export MEDIA_HOST="media-fessel-live.${BASE_DOMAIN}"
+
+# Node public IPs of schedulable worker nodes, as quoted YAML list items for
+# webrtcAdditionalHosts. Derived from the cluster (ExternalIP of Ready,
+# schedulable nodes).
+NODE_PUBLIC_IPS="$(
+  kubectl get nodes -o jsonpath='{range .items[*]}{.spec.unschedulable}{" "}{.status.addresses[?(@.type=="ExternalIP")].address}{"\n"}{end}' \
+  | awk '$1!="true" && $2!="" {printf "%s\"%s\"", sep, $2; sep=","}'
+)"
+export NODE_PUBLIC_IPS
+echo "== node public IPs: ${NODE_PUBLIC_IPS} =="
+
+export NS IMAGE_TAG REGISTRY FESSEL_WHEP_SECRET
+
+echo "== namespace $NS =="
+kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+
+echo "== render + apply live-preview manifests =="
+for tmpl in "$HERE"/0*.yaml.tmpl "$HERE"/[123]*.yaml.tmpl; do
+  "$RENDER" < "$tmpl"; echo "---"
+done | kubectl apply -n "$NS" -f -
+
+echo "== wait for rollouts =="
+kubectl -n "$NS" rollout status deploy/mediamtx --timeout=120s
+kubectl -n "$NS" rollout status deploy/webui --timeout=120s
+kubectl -n "$NS" rollout status deploy/pi --timeout=180s
+
+echo "== control-plane assertions (data plane is verified manually) =="
+kubectl delete job fessel-cp -n "$NS" --ignore-not-found
+cat <<EOF | kubectl apply -n "$NS" -f -
+apiVersion: batch/v1
+kind: Job
+metadata: { name: fessel-cp }
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: driver
+          image: ${REGISTRY}/fessel-test-driver:${IMAGE_TAG}
+          env:
+            - { name: WEBUI, value: "http://webui:8000" }
+            - { name: MEDIA, value: "http://mediamtx:8889" }
+            - { name: SUPERVISOR, value: "http://supervisor:8443" }
+            - { name: CONTROL_PLANE_ONLY, value: "1" }
+            - { name: RECONNECT_CYCLES, value: "10" }
+            - { name: JUNIT_OUT, value: "/tmp/junit.xml" }
+EOF
+kubectl wait --for=condition=complete job/fessel-cp -n "$NS" --timeout=240s &
+W1=$!; kubectl wait --for=condition=failed job/fessel-cp -n "$NS" --timeout=240s & W2=$!
+wait -n "$W1" "$W2" || true
+kubectl logs -n "$NS" job/fessel-cp 2>&1 | grep -E '\[PASS\]|\[FAIL\]|INTEGRATION:' || true
+CP_OK=$(kubectl get job fessel-cp -n "$NS" -o jsonpath='{.status.succeeded}')
+[ "$CP_OK" = "1" ] && echo "control plane: PASS" || echo "control plane: FAIL (continuing; preview still up)"
+
+cat <<EOF
+
+============================================================
+  FESSEL LIVE PREVIEW IS UP
+  Open:  https://${WEBUI_HOST}/
+  (pick a mode, click "Start live view", confirm moving video)
+
+  WHEP host: https://${MEDIA_HOST}
+  Namespace: ${NS}
+  Tear down: integration/live-preview/teardown.sh  (NS=${NS})
+============================================================
+EOF

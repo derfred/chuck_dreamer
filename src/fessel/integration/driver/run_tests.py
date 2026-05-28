@@ -340,6 +340,11 @@ def main() -> int:
         time.sleep(1)
       assert current_state() == "off", f"did not settle to off after churn: {current_state()}"
 
+    # CONTROL_PLANE_ONLY: skip the data-plane media test entirely (used by
+    # the live-preview workflow, where a human verifies video in a real
+    # browser instead).
+    control_plane_only = os.environ.get("CONTROL_PLANE_ONLY") == "1"
+
     suite.run("happy_path_activation", t_happy_path)
     # Browser WebRTC media reception is a documented known gap: ICE between
     # the in-cluster headless Chrome and mediamtx does not complete (a
@@ -349,12 +354,13 @@ def main() -> int:
     # teardown. Recorded as a non-blocking xfail; see the Slice 1.5 coverage
     # gaps. Override with DATA_PLANE_BLOCKING=1 once a physical-Pi / real
     # WebRTC tier exists.
-    data_plane_gap = (
-      None
-      if os.environ.get("DATA_PLANE_BLOCKING") == "1"
-      else "containerized-Chrome WebRTC ICE does not complete in-cluster"
-    )
-    suite.run("data_plane_media_flows", t_data_plane, known_gap=data_plane_gap)
+    if not control_plane_only:
+      data_plane_gap = (
+        None
+        if os.environ.get("DATA_PLANE_BLOCKING") == "1"
+        else "containerized-Chrome WebRTC ICE does not complete in-cluster"
+      )
+      suite.run("data_plane_media_flows", t_data_plane, known_gap=data_plane_gap)
     suite.run("teardown_returns_off", t_teardown)
     suite.run("token_rejection_no_activation", t_token_rejection)
     suite.run("rapid_reconnect_no_leak", t_rapid_reconnect)

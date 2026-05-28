@@ -44,6 +44,30 @@ Cover real WebRTC media reception in the physical-Pi / real-browser tier.
 Set `DATA_PLANE_BLOCKING=1` on the test Job to make this assertion blocking
 again once such a tier exists.
 
+## Live preview (manual video verification)
+
+Because the automated browser can't complete WebRTC ICE in-cluster, there's
+an on-demand **live preview** that puts a *real* browser (yours) at the end:
+`.github/workflows/fessel-live-preview.yml` (`live-preview/`).
+
+It deploys the same system but with **production WebRTC exposure** — WebRTC
+media over a NodePort on the node public IPs (`webrtcAdditionalHosts`), WHEP
+signaling + the `/live` page behind HTTPS Ingresses — so a public browser can
+actually connect. It runs the control-plane assertions (`CONTROL_PLANE_ONLY`),
+then leaves the stack up and prints the URL.
+
+Usage (Actions → "fessel live preview" → Run workflow):
+- `action=up` (default): build images (tag `live-preview`), deploy, print
+  `https://fessel-live.derfred.com/`, keep alive for `ttl_minutes` (default
+  30), then auto-teardown. Open the URL, pick a mode, click "Start live
+  view", and confirm the moving test pattern.
+- `action=down`: tear down immediately.
+
+DNS for `*.derfred.com` resolves to the cluster ingress; WebRTC media flows
+directly to the node public IPs on NodePorts 31554 (UDP) / 31555 (TCP).
+This exercises the production NodePort/public-IP WebRTC path that the per-PR
+test overrides — closing that coverage gap manually, on demand.
+
 ## Other deviations from the plan
 
 - **Camera**: uses `video`'s built-in `videotestsrc` (moving pattern), not

@@ -6,7 +6,12 @@
 set -euo pipefail
 
 content="$(cat)"
-for var in NS IMAGE_TAG REGISTRY FESSEL_WHEP_SECRET; do
+# Allowlist covers both the per-PR integration manifests and the live-preview
+# manifests. Unset vars substitute to empty (harmless for templates that
+# don't reference them).
+for var in NS IMAGE_TAG REGISTRY FESSEL_WHEP_SECRET \
+           NODE_PUBLIC_IPS WEBUI_HOST MEDIA_HOST \
+           WRTC_UDP_NODEPORT WRTC_TCP_NODEPORT; do
   value="${!var-}"
   content="${content//\$\{$var\}/$value}"
 done
