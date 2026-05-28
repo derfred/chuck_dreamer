@@ -95,7 +95,7 @@ class FK:
         raise ValueError(f"dq must be shape (5,), got {dq.shape}")
     self.data.qpos[self.qpos_idx] = q + dq
     mujoco.mj_kinematics(self.model, self.data)
-    return self.data.site_xpos[self.ee_site_id].copy()
+    return np.asarray(self.data.site_xpos[self.ee_site_id].copy())
 
 
 # ---------------------------------------------------------------------------

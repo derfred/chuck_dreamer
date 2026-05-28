@@ -196,7 +196,7 @@ def click_object(
   win_h     = banner_h + canvas_h + footer_h
   win_name  = "object-prompt"
 
-  state: dict = {"click": None, "done": False}
+  state: dict[str, tuple[int, int] | bool | None] = {"click": None, "done": False}
 
   def on_mouse(event, x, y, _flags, _ud):
     if event != cv2.EVENT_LBUTTONDOWN:
@@ -236,7 +236,8 @@ def click_object(
   finally:
     cv2.destroyWindow(win_name)
     cv2.waitKey(1)
-  return state["click"]
+  click = state["click"]
+  return click if isinstance(click, tuple) else None
 
 
 def _coerce_prompt(raw: Any) -> Prompt:

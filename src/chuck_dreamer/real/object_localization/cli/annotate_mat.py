@@ -21,6 +21,7 @@ from ..calibration.interactive import (
 from ..dataset import episode_bounds, get_frame, sample_episode_frames
 from ..runtime import init_from_config
 from ..types import (
+  MatDetection,
   dataset_cache_dir,
   read_extrinsics,
   read_intrinsics,
@@ -87,6 +88,7 @@ def annotate_mat_cmd(ctx, dataset_ids: tuple[str, ...],
         f"for episode {ol_cfg.episode_empty} (length {to - fr}).")
     frame = get_frame(ds, target_idx, ol_cfg.camera_key)
 
+    detection: MatDetection | None
     if review:
       try:
         detection = read_mat_annotation(cache_root, dataset_id)

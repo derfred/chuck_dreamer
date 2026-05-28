@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -335,7 +336,7 @@ def render_world_axes(
   return canvas
 
 
-def _ipt(p: np.ndarray) -> tuple[int, int]:
+def _ipt(p: Any) -> tuple[int, int]:
   return int(round(float(p[0]))), int(round(float(p[1])))
 
 
@@ -362,4 +363,5 @@ def _mat_border_samples_world(ol_cfg: ObjectLocalizationConfig,
   # (x0, y1) -> (x0, y0)
   pts.append(np.stack([np.full_like(ts, x0), y1 + ts * (y0 - y1)], axis=1))
   arr = np.concatenate(pts, axis=0)
-  return np.concatenate([arr, np.zeros((arr.shape[0], 1))], axis=1).astype(np.float64)
+  return np.asarray(
+    np.concatenate([arr, np.zeros((arr.shape[0], 1))], axis=1), dtype=np.float64)

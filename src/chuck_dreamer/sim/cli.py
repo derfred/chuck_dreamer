@@ -220,7 +220,9 @@ def show_scene_cmd(ctx, seed, step_delay, policy_type, checkpoint_path,
     elif policy_type == "cem_probe":
       if not probe_path:
         raise click.BadParameter("--probe is required for --policy cem_probe")
-      from chuck_dreamer.dreamer.cem_probe_policy import CEMProbePolicy, ProbeBundle
+      # NOTE: cem_probe_policy was removed in cleanup (commit 74c324f); this
+      # import (and the --policy cem_probe branch) is currently broken.
+      from chuck_dreamer.dreamer.cem_probe_policy import CEMProbePolicy, ProbeBundle  # type: ignore[import-untyped]
       from chuck_dreamer.reward import build_reward_fn
       c = cfg.real.policy.cem
       try:

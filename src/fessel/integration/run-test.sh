@@ -10,9 +10,11 @@ export NS IMAGE_TAG REGISTRY
 RESULTS_DIR="${RESULTS_DIR:-$HERE/../../../integration-results}"
 mkdir -p "$RESULTS_DIR"
 
-echo "== applying test Job =="
+echo "== applying test Job (rendered from jsonnet) =="
 kubectl delete job fessel-test -n "$NS" --ignore-not-found
-"$HERE/render.sh" < "$HERE/manifests/40-testjob.yaml.tmpl" | kubectl apply -n "$NS" -f -
+tk eval "$HERE/../deploy/jsonnet/envs/integration-testjob.jsonnet" \
+  -V ns="$NS" -V image_tag="$IMAGE_TAG" -V registry="$REGISTRY" \
+  | kubectl apply -n "$NS" -f -
 
 echo "== waiting for test Job to complete (timeout 8m) =="
 # Wait for either completion or failure.

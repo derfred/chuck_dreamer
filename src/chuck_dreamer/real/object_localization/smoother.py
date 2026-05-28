@@ -87,7 +87,7 @@ class SmoothedTrajectoryEstimator:
     return_diagnostics: bool = False,
   ):
     if not poses:
-      empty = []
+      empty: list[ObjectPose | None] = []
       if return_diagnostics:
         return empty, _SmootherDiagnostics(
           innovations       = np.zeros((0, 2), dtype=np.float64),
@@ -136,7 +136,7 @@ class SmoothedTrajectoryEstimator:
     x_post_seq[0] = x_post.copy()
     P_post_seq[0] = P_post.copy()
     visually_observed[0] = True
-    R_log[0] = self._observation_noise(poses[0])
+    R_log[0] = self._observation_noise(x0)
 
     for t in range(1, T):
       x_pred = F @ x_post
@@ -184,8 +184,8 @@ class SmoothedTrajectoryEstimator:
       x_post_seq[t] = x_post
       P_post_seq[t] = P_post
 
-    x_smooth = [None] * T   # type: ignore[var-annotated]
-    P_smooth = [None] * T   # type: ignore[var-annotated]
+    x_smooth: list[np.ndarray | None] = [None] * T
+    P_smooth: list[np.ndarray | None] = [None] * T
     x_smooth[T - 1] = x_post_seq[T - 1]
     P_smooth[T - 1] = P_post_seq[T - 1]
     for t in range(T - 2, -1, -1):
@@ -195,9 +195,11 @@ class SmoothedTrajectoryEstimator:
         x_smooth[t] = x_post_seq[t]
         P_smooth[t] = P_post_seq[t]
         continue
+      x_next, P_next = x_smooth[t + 1], P_smooth[t + 1]
+      assert x_next is not None and P_next is not None  # filled descending from T-1
       C = P_post_seq[t] @ F.T @ P_pred_next_inv
-      x_smooth[t] = x_post_seq[t] + C @ (x_smooth[t + 1] - x_pred_seq[t + 1])
-      P_smooth[t] = P_post_seq[t] + C @ (P_smooth[t + 1] - P_pred_seq[t + 1]) @ C.T
+      x_smooth[t] = x_post_seq[t] + C @ (x_next - x_pred_seq[t + 1])
+      P_smooth[t] = P_post_seq[t] + C @ (P_next - P_pred_seq[t + 1]) @ C.T
 
     gap_too_long = self._gap_too_long_mask(visually_observed)
 
@@ -205,6 +207,7 @@ class SmoothedTrajectoryEstimator:
     for t in range(T):
       xs = x_smooth[t]
       Ps = P_smooth[t]
+      assert xs is not None and Ps is not None  # every slot filled by the RTS pass
       frames.append(SmoothedFrame(
         xy_mm             = np.asarray(xs[:2], dtype=np.float64),
         covariance_mm2    = np.asarray(Ps[:2, :2], dtype=np.float64),

@@ -10,32 +10,28 @@
 set -euo pipefail
 : "${NS:?}" "${IMAGE_TAG:?}" "${REGISTRY:?}" "${FESSEL_WHEP_SECRET:?}" "${BASE_DOMAIN:?}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RENDER="$HERE/../render.sh"
+JSONNET="$HERE/../../deploy/jsonnet"
 
-export WRTC_UDP_NODEPORT="${WRTC_UDP_NODEPORT:-31554}"
-export WRTC_TCP_NODEPORT="${WRTC_TCP_NODEPORT:-31555}"
-export WEBUI_HOST="fessel-live.${BASE_DOMAIN}"
-export MEDIA_HOST="media-fessel-live.${BASE_DOMAIN}"
+WRTC_UDP_NODEPORT="${WRTC_UDP_NODEPORT:-31554}"
+WRTC_TCP_NODEPORT="${WRTC_TCP_NODEPORT:-31555}"
+WEBUI_HOST="fessel-live.${BASE_DOMAIN}"
+MEDIA_HOST="media-fessel-live.${BASE_DOMAIN}"
 
-# Node public IPs of schedulable worker nodes, as quoted YAML list items for
-# webrtcAdditionalHosts. Derived from the cluster (ExternalIP of Ready,
-# schedulable nodes).
+# Node public IPs of schedulable worker nodes (comma-separated) for the
+# library's webrtcAdditionalHosts.
 NODE_PUBLIC_IPS="$(
   kubectl get nodes -o jsonpath='{range .items[*]}{.spec.unschedulable}{" "}{.status.addresses[?(@.type=="ExternalIP")].address}{"\n"}{end}' \
-  | awk '$1!="true" && $2!="" {printf "%s\"%s\"", sep, $2; sep=","}'
+  | awk '$1!="true" && $2!="" {printf "%s%s", sep, $2; sep=","}'
 )"
-export NODE_PUBLIC_IPS
 echo "== node public IPs: ${NODE_PUBLIC_IPS} =="
 
-export NS IMAGE_TAG REGISTRY FESSEL_WHEP_SECRET
-
-echo "== namespace $NS =="
-kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
-
-echo "== render + apply live-preview manifests =="
-for tmpl in "$HERE"/0*.yaml.tmpl "$HERE"/[123]*.yaml.tmpl; do
-  "$RENDER" < "$tmpl"; echo "---"
-done | kubectl apply -n "$NS" -f -
+echo "== render + apply live-preview env (jsonnet, nodeport mode) =="
+tk eval "$JSONNET/envs/live-preview.jsonnet" \
+  -V ns="$NS" -V image_tag="$IMAGE_TAG" -V registry="$REGISTRY" \
+  -V whep_secret="$FESSEL_WHEP_SECRET" -V base_domain="$BASE_DOMAIN" \
+  -V node_public_ips="$NODE_PUBLIC_IPS" \
+  -V udp_nodeport="$WRTC_UDP_NODEPORT" -V tcp_nodeport="$WRTC_TCP_NODEPORT" \
+  | kubectl apply -f -
 
 echo "== wait for rollouts =="
 kubectl -n "$NS" rollout status deploy/mediamtx --timeout=120s

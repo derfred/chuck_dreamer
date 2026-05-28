@@ -37,6 +37,7 @@ import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 import numpy as np
@@ -52,6 +53,9 @@ from ..scene_bg import ensure_scene_bg
 from ..types import CameraCalibration
 from chuck_dreamer.cli import override_option
 from chuck_dreamer.common.episode_spec import EpisodeSpec
+
+if TYPE_CHECKING:
+  from ..estimator import ObjectPose
 
 logger = logging.getLogger(__name__)
 
@@ -342,7 +346,7 @@ class _Proposal:
   ep_rel: int                 # episode-relative frame index
   global_idx: int             # dataset-global frame index
   uv: tuple[int, int]         # back-projected mesh centroid in pixels
-  pose: object                # ObjectPose; opaque here, used only for the overlay
+  pose: "ObjectPose"          # used for the overlay (mesh transform + stats)
   confidence: float
   residual_px: float
   rgb: np.ndarray             # frame for the review UI
@@ -351,7 +355,7 @@ class _Proposal:
 @dataclass
 class _ChainState:
   """Mutable per-gap state: where the chain currently believes the object is."""
-  pose: object              # ObjectPose
+  pose: "ObjectPose"
   uv:   tuple[int, int]
   area: float               # rendered silhouette area in px
   rel:  int                 # episode-relative frame index this state came from
@@ -588,7 +592,7 @@ def _process_episode(ds, dataset_id: str, episode_idx: int, ep_len: int,
 def _anchor_pose(ds, ep_fr: int, ep_to: int, anchor_rel: int, prompt,
                  camera_key: str, estimator,
                  calibration: CameraCalibration,
-                 ) -> tuple[object, tuple[int, int], float] | None:
+                 ) -> "tuple[ObjectPose, tuple[int, int], float] | None":
   """Cold-start the estimator at a manual keyframe; return (pose, uv, area)."""
   from ..estimator import _EpisodeContext
 

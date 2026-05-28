@@ -49,11 +49,27 @@ class ActivateRequest(BaseModel):
     if self.mode:
       return self.mode
     if self.query:
-      from urllib.parse import parse_qs
+      from urllib.parse import parse_qs, unquote
 
-      vals = parse_qs(self.query).get("mode")
+      # mediamtx 1.18.2 url-encodes the ENTIRE $MTX_QUERY string (the '='
+      # and '&' separators become %3D/%26), sometimes on top of the
+      # browser's already-encoded WHEP query. Unquote the whole string until
+      # it has literal separators (or stops changing), THEN parse, THEN
+      # unquote the value's remaining layers. Recovers the canonical mode
+      # ('<W>x<H>@<fps>@<bps>') regardless of how many times it was encoded.
+      q = self.query.lstrip("?")
+      for _ in range(4):
+        if "%3D" not in q.upper() and "%26" not in q.upper():
+          break
+        q = unquote(q)
+      vals = parse_qs(q).get("mode")
       if vals:
-        return vals[0]
+        v = vals[0]
+        for _ in range(4):
+          if "%" not in v:
+            break
+          v = unquote(v)
+        return v
     raise ValueError("no mode in request (neither mode nor query[mode])")
 
 

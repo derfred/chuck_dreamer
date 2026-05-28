@@ -66,7 +66,7 @@ class SceneBackground:
       fg = m.astype(bool)
     if self.mat_mask is not None:
       fg = fg & self.mat_mask
-    return fg
+    return np.asarray(fg)
 
 
 def build_scene_bg(
@@ -121,7 +121,8 @@ def save_scene_bg(cache_dir: Path | str, dataset_id: str,
   }
   if bg.mat_mask is not None:
     payload["mat_mask"] = bg.mat_mask.astype(bool)
-  np.savez_compressed(p, **payload)
+  # numpy stub models savez_compressed's **kwds poorly (collides with allow_pickle: bool).
+  np.savez_compressed(p, **payload)  # type: ignore[arg-type]
   return p
 
 
@@ -216,7 +217,7 @@ def build_mat_mask(
     [extent_xmax_mm, extent_ymin_mm, 0.0],
   ], dtype=np.float64)
   uv, _ = cv2.projectPoints(corners_world, rvec, t, K, dist)
-  pts = uv.reshape(-1, 2)
+  pts: np.ndarray = uv.reshape(-1, 2)
   # Clip projected corners to the image bounds. Wide-angle lens
   # distortion can push corner points to inf when they fall outside
   # the camera FOV; the convex hull then becomes invalid.

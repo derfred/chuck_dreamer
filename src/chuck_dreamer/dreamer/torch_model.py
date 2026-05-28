@@ -675,7 +675,8 @@ class DreamerTorchModel:
       dec_channels    = tuple(config.model.decoder.cnn_channels)
       dec_kernels     = tuple(config.model.decoder.cnn_kernels)
       dec_strides     = tuple(config.model.decoder.cnn_strides)
-      self.image_size = int(config.model.encoder.image_size)
+      image_size = int(config.model.encoder.image_size)
+      self.image_size: int | None = image_size
     else:
       self.image_size = None
 
@@ -688,9 +689,9 @@ class DreamerTorchModel:
           raise ValueError(f"image component expects (H, W, C) shape; got {shape}")
         in_channels = int(shape[2])
         enc_branches[c] = CNNEncoder(in_channels, enc_channels, enc_kernels, enc_strides,
-                                     embed_dim=embed_size, image_size=self.image_size)
+                                     embed_dim=embed_size, image_size=image_size)
         dec_heads[c] = CNNDecoder(self.feat_dim, dec_channels, dec_kernels, dec_strides,
-                                  out_channels=in_channels, image_size=self.image_size)
+                                  out_channels=in_channels, image_size=image_size)
       else:
         if len(shape) != 1:
           raise ValueError(f"vector component {c!r} expects 1-D shape; got {shape}")

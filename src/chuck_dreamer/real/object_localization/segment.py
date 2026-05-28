@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _SAM2Cached:
-  image_predictor: object | None = None
-  video_predictor: object | None = None
+  image_predictor: Any | None = None
+  video_predictor: Any | None = None
 
 
 _SAM2_CACHE: dict[tuple[str, str], _SAM2Cached] = {}
@@ -157,7 +157,7 @@ def _largest_component(mask: np.ndarray) -> np.ndarray | None:
     return None
   areas = stats[1:, cv2.CC_STAT_AREA]
   best = int(np.argmax(areas)) + 1
-  return labels == best
+  return np.asarray(labels == best)
 
 
 def _bg_mask(rgb: np.ndarray,
@@ -205,7 +205,7 @@ def _bg_mask(rgb: np.ndarray,
     chosen = int(np.bincount(cand).argmax())
   if chosen == 0:
     return None
-  return labels == chosen
+  return np.asarray(labels == chosen)
 
 
 def _fallback_mask(rgb: np.ndarray, prompt: tuple[int, int] | list[tuple[int, int]]
@@ -247,7 +247,7 @@ def _fallback_mask(rgb: np.ndarray, prompt: tuple[int, int] | list[tuple[int, in
     return None
 
   # Tiny morphological closing fills 1-px gaps from camera noise + JPEG.
-  m = mask.astype(np.uint8)
+  m: np.ndarray = mask.astype(np.uint8)
   k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
   m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
-  return m.astype(bool)
+  return np.asarray(m.astype(bool))

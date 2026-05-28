@@ -117,7 +117,7 @@ def _to_backend(model, arr: np.ndarray):
 def _to_numpy(x) -> np.ndarray:
   """Best-effort lift back to numpy. Handles torch.Tensor, mlx.array, dict."""
   if hasattr(x, "detach"):  # torch
-    return x.detach().cpu().numpy()
+    return np.asarray(x.detach().cpu().numpy())
   # mlx: numpy bridge via np.asarray after eval-on-touch; just use np.asarray.
   return np.asarray(x)
 
@@ -203,7 +203,8 @@ def cmd_weights(args: argparse.Namespace) -> int:
     int(cfg.model.rssm.stoch_size), int(cfg.model.rssm.deter_size),
     args.batch, args.input_seed,
   )
-  np.savez(out_dir / INPUTS_FILENAME, **inputs)
+  # numpy 2.2 stub models savez's **kwds poorly (collides with allow_pickle: bool).
+  np.savez(str(out_dir / INPUTS_FILENAME), **inputs)  # type: ignore[arg-type]
 
   print(f"wrote {weights_path}")
   print(f"wrote {out_dir / INPUTS_FILENAME}")
@@ -241,7 +242,7 @@ def cmd_outputs(args: argparse.Namespace) -> int:
   out = _run_forwards(model, inputs)
 
   tag_path = out_dir / f"outputs_{args.tag}.npz"
-  np.savez(tag_path, **out)
+  np.savez(str(tag_path), **out)  # type: ignore[arg-type]  # numpy stub **kwds quirk
   print(f"wrote {tag_path}")
   for k, v in out.items():
     print(f"  {k:24s} shape={tuple(v.shape)} dtype={v.dtype}")

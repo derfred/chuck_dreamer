@@ -78,6 +78,24 @@ def test_activate_extracts_mode_from_raw_query(monkeypatch):
   assert activate[1]["mode"]["resolution"] == "640x480"
 
 
+def test_activate_extracts_mode_from_url_encoded_query(monkeypatch):
+  # mediamtx 1.18.2 passes $MTX_QUERY url-encoded, and the browser's WHEP
+  # query is already encoded -> '@' arrives double-encoded as %2540.
+  # supervisor must recover the canonical mode regardless.
+  client, published = make_client(monkeypatch)
+  with client:
+    for q in (
+      "mode=640x480%4030%401000000&jwt=abc",  # value single-encoded
+      "mode=640x480%254030%25401000000&jwt=abc",  # value double-encoded
+      "mode%3D640x480%254030%25401000000%26jwt%3Dabc",  # whole query encoded (1.18.2)
+    ):
+      r = client.post("/control/live/activate", json={"path": "pi", "query": q})
+      assert r.status_code == 200, (q, r.json())
+  activate = [p for p in published if p[0] == "arm/video/cmd/live/activate"][-1]
+  assert activate[1]["mode"]["resolution"] == "640x480"
+  assert activate[1]["mode"]["bitrate_bps"] == 1_000_000
+
+
 def test_deactivate_relays(monkeypatch):
   client, published = make_client(monkeypatch)
   with client:
