@@ -48,4 +48,23 @@ rollout mediamtx 120s
 rollout webui 120s
 rollout pi 180s
 
+# Post-rollout stability gate: a pod can pass rollout then crash-loop (e.g.
+# mediamtx's startup fd bug). Verify zero restarts after a short settle so
+# such failures surface here, not as a confusing "connection refused".
+echo "== stability check (no restarts after settle) =="
+sleep 15
+unstable=0
+for d in mediamtx webui pi; do
+  for p in $(kubectl -n "$NS" get pods -l app="$d" -o name); do
+    rc=$(kubectl -n "$NS" get "$p" -o jsonpath='{.status.containerStatuses[0].restartCount}')
+    echo "  $p restarts=$rc"
+    if [ "${rc:-0}" -gt 0 ]; then
+      unstable=1
+      echo "  !! $p is unstable — logs:"
+      kubectl -n "$NS" logs "$p" --previous --tail=40 || true
+    fi
+  done
+done
+[ "$unstable" -eq 0 ] || { echo "deploy unstable"; exit 1; }
+
 echo "== deploy complete in $NS =="

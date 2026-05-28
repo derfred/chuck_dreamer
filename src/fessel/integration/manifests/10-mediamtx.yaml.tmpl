@@ -68,19 +68,16 @@ spec:
     spec:
       containers:
         - name: mediamtx
-          # -ffmpeg variant is Alpine-based (has /bin/sh + wget), unlike the
-          # scratch default image. We need a shell to cap RLIMIT_NOFILE and
-          # for runOnDemand.
-          image: bluenviron/mediamtx:1.9.3-ffmpeg
-          # Cap the file-descriptor soft limit before launching mediamtx.
-          # On containerd/rke2 nodes the inherited RLIMIT_NOFILE is enormous
-          # and mediamtx crashes at startup with "too many open files"
-          # (bluenviron/mediamtx#3452). A sane cap fixes it.
+          # Pin 1.9.1: 1.9.3 crashes at startup on this rke2/containerd
+          # cluster with "too many open files" regardless of the nofile
+          # ulimit (a regression after 1.9.1; bluenviron/mediamtx#3452).
+          # 1.9.1 is proven stable on these exact nodes (the spike ran it
+          # for 22h). The -ffmpeg variant is Alpine-based (has /bin/sh +
+          # wget), which the scratch default image lacks; we need a shell to
+          # cap RLIMIT_NOFILE defensively and wget for runOnDemand.
+          image: bluenviron/mediamtx:1.9.1-ffmpeg
           command: ["/bin/sh", "-c"]
-          # Lower BOTH hard and soft nofile: mediamtx sizes allocations from
-          # the hard limit (RLIMIT_NOFILE.Max), so capping only the soft
-          # limit isn't enough (bluenviron/mediamtx#3452).
-          args: ["ulimit -H -n 65536 2>/dev/null || true; ulimit -n 65536; echo \"nofile soft=$(ulimit -Sn) hard=$(ulimit -Hn)\"; exec /mediamtx /config/mediamtx.yml"]
+          args: ["ulimit -n 65536 2>/dev/null || true; exec /mediamtx /config/mediamtx.yml"]
           env:
             # Advertise the pod IP as the WebRTC ICE host candidate.
             - name: POD_IP
