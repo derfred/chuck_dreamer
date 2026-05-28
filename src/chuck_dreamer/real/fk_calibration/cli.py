@@ -42,7 +42,8 @@ import click
 
 from chuck_dreamer.config import load_config
 
-from ..object_localization.cli.common import override_option
+from chuck_dreamer.cli import override_option
+
 from ..object_localization.runtime import init_from_config
 from ..object_localization.types import dataset_cache_dir
 from . import extract_joints as ej

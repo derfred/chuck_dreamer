@@ -30,7 +30,7 @@ from ..prompts import (
   click_object, load_keyframe_prompts, save_keyframe_prompt, sidecar_path,
 )
 from ..runtime import init_from_config
-from .common import override_option
+from chuck_dreamer.cli import override_option
 
 logger = logging.getLogger(__name__)
 

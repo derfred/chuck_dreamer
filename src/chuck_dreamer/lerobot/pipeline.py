@@ -32,8 +32,8 @@ import numpy as np
 # Stage: ee_pos / ee_quat / ee_action
 # ---------------------------------------------------------------------------
 
-# Path to the SO-101 MuJoCo model used by the FK module. Mirrors the
-# default used by ``_build_arm_calibration`` in ``main.py``.
+# Path to the SO-101 MuJoCo model used by the FK module. Shared with
+# ``_build_arm_calibration`` / ``_doctor_import_lerobot`` in ``lerobot/cli.py``.
 FK_MODEL_PATH = (
   Path(__file__).resolve().parents[3]
   / "assets" / "mujoco" / "so101_arm.xml"

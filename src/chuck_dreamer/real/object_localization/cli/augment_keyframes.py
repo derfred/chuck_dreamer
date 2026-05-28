@@ -41,7 +41,7 @@ from ..prompts import (
 from ..runtime import init_from_config
 from ..scene_bg import ensure_scene_bg
 from ..types import CameraCalibration
-from .common import override_option
+from chuck_dreamer.cli import override_option
 
 logger = logging.getLogger(__name__)
 

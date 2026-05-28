@@ -30,7 +30,7 @@ from ..types import (
   write_extrinsics,
   write_mat_annotation,
 )
-from .common import override_option
+from chuck_dreamer.cli import override_option
 
 logger = logging.getLogger(__name__)
 
