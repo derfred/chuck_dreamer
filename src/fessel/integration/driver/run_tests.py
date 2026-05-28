@@ -221,13 +221,23 @@ def main() -> int:
     page = browser.new_page()
     page.goto("about:blank")
 
-    def connect(url: str | None = None) -> dict:
+    def _log_candidates(label: str, sdp: str) -> None:
+      cands = [ln for ln in sdp.splitlines() if "candidate:" in ln]
+      print(f"[ice] {label} candidates ({len(cands)}):", flush=True)
+      for c in cands:
+        print(f"[ice]   {c.strip()}", flush=True)
+
+    def connect(url: str | None = None, debug: bool = False) -> dict:
       """Full WHEP handshake: browser offer -> Python POST -> browser answer."""
       signed = url if url is not None else mint_whep_url()
       offer_sdp = page.evaluate(OFFER_JS)
+      if debug:
+        _log_candidates("offer(chrome)", offer_sdp)
       status, body = whep_post(signed, offer_sdp)
       if status not in (200, 201):
         return {"ok": False, "status": status, "body": body[:300]}
+      if debug:
+        _log_candidates("answer(mediamtx)", body)
       page.evaluate(ANSWER_JS, body)
       return {"ok": True, "status": status}
 
@@ -237,7 +247,7 @@ def main() -> int:
     # --- T1.6.1 mint + happy path + activation propagation ---
     def t_happy_path():
       assert current_state() in (None, "off"), f"expected off at start, got {current_state()}"
-      res = connect()
+      res = connect(debug=True)
       assert res.get("ok"), f"WHEP failed: {res}"
       hist = wait_state("running", timeout=40)
       assert hist[:3] == ["off", "starting", "running"] or "running" in hist, f"bad history {hist}"
