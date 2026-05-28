@@ -65,6 +65,19 @@ def test_activate_rejects_bad_mode(monkeypatch):
     assert r.status_code == 400
 
 
+def test_activate_extracts_mode_from_raw_query(monkeypatch):
+  # mediamtx runOnDemand posts the raw WHEP query; supervisor extracts mode.
+  client, published = make_client(monkeypatch)
+  with client:
+    r = client.post(
+      "/control/live/activate",
+      json={"path": "pi", "query": "mode=640x480@30@1000000&token=abc.def.ghi"},
+    )
+    assert r.status_code == 200
+  activate = next(p for p in published if p[0] == "arm/video/cmd/live/activate")
+  assert activate[1]["mode"]["resolution"] == "640x480"
+
+
 def test_deactivate_relays(monkeypatch):
   client, published = make_client(monkeypatch)
   with client:

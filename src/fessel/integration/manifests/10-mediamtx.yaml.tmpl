@@ -37,14 +37,17 @@ data:
     paths:
       pi:
         source: publisher
+        # Pass the raw WHEP query string to supervisor, which extracts the
+        # mode. Avoids fragile nested-quote shell parsing. mediamtx expands
+        # $MTX_PATH and $MTX_QUERY in the runOnDemand environment.
         runOnDemand: >
-          sh -c 'curl -fsS -X POST -H "Content-Type: application/json"
-          --data "{\"path\":\"$MTX_PATH\",\"mode\":\"$(echo \"$MTX_QUERY\" | sed -n \"s/.*mode=\\([^&]*\\).*/\\1/p\")\"}"
-          http://supervisor:8443/control/live/activate'
+          curl -fsS -X POST -H "Content-Type: application/json"
+          --data "{\"path\":\"$MTX_PATH\",\"query\":\"$MTX_QUERY\"}"
+          http://supervisor:8443/control/live/activate
         runOnUnDemand: >
-          sh -c 'curl -fsS -X POST -H "Content-Type: application/json"
+          curl -fsS -X POST -H "Content-Type: application/json"
           --data "{\"path\":\"$MTX_PATH\"}"
-          http://supervisor:8443/control/live/deactivate'
+          http://supervisor:8443/control/live/deactivate
         runOnDemandStartTimeout: 15s
         runOnDemandCloseAfter: 10s
         runOnDemandRestart: no

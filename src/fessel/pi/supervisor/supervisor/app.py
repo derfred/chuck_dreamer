@@ -36,10 +36,25 @@ HEARTBEAT_INTERVAL_S = 5.0
 
 
 class ActivateRequest(BaseModel):
-  """mediamtx runOnDemand sends mode as the canonical string, not an object."""
+  """mediamtx runOnDemand provides path + either the canonical mode string
+  or the raw WHEP query (from which we extract mode). Accepting the raw
+  query avoids fragile shell quote-parsing in the mediamtx runOnDemand
+  command."""
 
   path: str
-  mode: str
+  mode: str | None = None
+  query: str | None = None
+
+  def resolved_mode(self) -> str:
+    if self.mode:
+      return self.mode
+    if self.query:
+      from urllib.parse import parse_qs
+
+      vals = parse_qs(self.query).get("mode")
+      if vals:
+        return vals[0]
+    raise ValueError("no mode in request (neither mode nor query[mode])")
 
 
 class DeactivateRequest(BaseModel):
@@ -136,7 +151,7 @@ def create_app(config: dict | None = None) -> FastAPI:
   @app.post("/control/live/activate")
   def live_activate(req: ActivateRequest) -> dict:
     try:
-      mode = mode_from_canonical(req.mode)
+      mode = mode_from_canonical(req.resolved_mode())
     except ValueError as e:
       raise HTTPException(status_code=400, detail=str(e)) from e
     cmd = LiveActivate(path=req.path, mode=mode)

@@ -30,8 +30,22 @@ for tmpl in "$HERE"/manifests/0*.yaml.tmpl "$HERE"/manifests/[123]*.yaml.tmpl; d
 done | kubectl apply -n "$NS" -f -
 
 echo "== waiting for rollouts =="
-kubectl -n "$NS" rollout status deploy/mediamtx --timeout=120s
-kubectl -n "$NS" rollout status deploy/webui --timeout=120s
-kubectl -n "$NS" rollout status deploy/pi --timeout=180s
+rollout() {
+  local d="$1" t="$2"
+  if ! kubectl -n "$NS" rollout status "deploy/$d" --timeout="$t"; then
+    echo "!! rollout failed for $d — diagnostics:"
+    kubectl -n "$NS" get pods -o wide || true
+    kubectl -n "$NS" describe deploy "$d" | tail -30 || true
+    for p in $(kubectl -n "$NS" get pods -l app="$d" -o name); do
+      echo "--- describe $p ---"; kubectl -n "$NS" describe "$p" | tail -40 || true
+      echo "--- logs $p (current) ---"; kubectl -n "$NS" logs "$p" --tail=50 || true
+      echo "--- logs $p (previous) ---"; kubectl -n "$NS" logs "$p" --previous --tail=50 || true
+    done
+    return 1
+  fi
+}
+rollout mediamtx 120s
+rollout webui 120s
+rollout pi 180s
 
 echo "== deploy complete in $NS =="
