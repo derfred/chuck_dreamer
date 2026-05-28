@@ -197,11 +197,19 @@ def main() -> int:
   suite = Suite()
 
   with sync_playwright() as p:
-    # Headed under Xvfb so Chromium has the H.264 decoder.
-    browser = p.chromium.launch(
+    # Use Google Chrome (channel=chrome), not bundled Chromium: the bundled
+    # build lacks the proprietary H.264 decoder, so its WHEP SDP offer omits
+    # H.264 and mediamtx rejects it with "codecs not supported by client".
+    # Headed under Xvfb. CHROME_CHANNEL lets the image fall back to chromium
+    # if Chrome isn't installed.
+    channel = os.environ.get("CHROME_CHANNEL", "chrome")
+    launch_kwargs = dict(
       headless=False,
       args=["--no-sandbox", "--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required"],
     )
+    if channel:
+      launch_kwargs["channel"] = channel
+    browser = p.chromium.launch(**launch_kwargs)
     page = browser.new_page()
     page.goto("about:blank")
 

@@ -6,7 +6,12 @@
 FROM mcr.microsoft.com/playwright/python:v1.48.0-noble
 
 WORKDIR /driver
-RUN pip install --no-cache-dir playwright==1.48.0 && python -m playwright install chromium
+# Install Google Chrome (has the proprietary H.264 decoder) in addition to
+# Chromium. The bundled Chromium lacks H.264, which mediamtx requires for
+# WHEP; the driver launches with channel=chrome.
+RUN pip install --no-cache-dir playwright==1.48.0 \
+    && python -m playwright install chromium \
+    && python -m playwright install chrome
 
 COPY run_tests.py /driver/run_tests.py
 COPY entrypoint.sh /driver/entrypoint.sh
