@@ -49,11 +49,21 @@ class ActivateRequest(BaseModel):
     if self.mode:
       return self.mode
     if self.query:
-      from urllib.parse import parse_qs
+      from urllib.parse import parse_qs, unquote
 
       vals = parse_qs(self.query).get("mode")
       if vals:
-        return vals[0]
+        # mediamtx 1.18.2 passes $MTX_QUERY already url-encoded, so the
+        # browser's already-encoded WHEP query ('@' -> %40) ends up
+        # double-encoded. parse_qs decodes one layer; unquote any remaining
+        # layers until stable so the canonical mode ('<W>x<H>@<fps>@<bps>')
+        # is recovered regardless of how many times it was encoded.
+        v = vals[0]
+        for _ in range(3):
+          if "%" not in v:
+            break
+          v = unquote(v)
+        return v
     raise ValueError("no mode in request (neither mode nor query[mode])")
 
 
