@@ -761,8 +761,10 @@ def _bg_blob_near(rgb: np.ndarray, center_uv: tuple[int, int] | None,
 
   H, W = fg.shape
   u0, v0 = center_uv
-  y0 = max(0, v0 - radius_px); y1 = min(H, v0 + radius_px + 1)
-  x0 = max(0, u0 - radius_px); x1 = min(W, u0 + radius_px + 1)
+  y0 = max(0, v0 - radius_px)
+  y1 = min(H, v0 + radius_px + 1)
+  x0 = max(0, u0 - radius_px)
+  x1 = min(W, u0 + radius_px + 1)
   window = fg[y0:y1, x0:x1].astype(np.uint8)
   if window.sum() < 20:
     return None

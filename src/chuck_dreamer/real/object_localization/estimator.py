@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Literal
 
 import numpy as np
 
@@ -73,6 +73,7 @@ _DZ_BOUND_MM    = 20.0
 _TILT_BOUND_RAD = 0.26    # ±15°
 _YAW_BOUND_RAD  = 10.0    # >2π; finite is required by trf
 
+
 def _build_bounds_6dof(xy_seed: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
   """Return TRF-compatible (lower, upper) bounds anchored to the seed.
 
@@ -85,6 +86,7 @@ def _build_bounds_6dof(xy_seed: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
   hi = np.array([xy_seed[0] + _XY_WANDER_MM, xy_seed[1] + _XY_WANDER_MM,
                   _DZ_BOUND_MM,  _TILT_BOUND_RAD,  _TILT_BOUND_RAD,  _YAW_BOUND_RAD])
   return lo, hi
+
 
 # Minimum number of points to resample the rendered contour / edges
 # to. The residual vector must be constant-length across optimizer
@@ -852,7 +854,7 @@ def _small_tilt(roll: float, pitch: float) -> np.ndarray:
     [0.0,  sr,  cr],
   ])
   Ry = np.array([
-    [ cp, 0.0,  sp],
+    [cp, 0.0,  sp],
     [0.0, 1.0, 0.0],
     [-sp, 0.0,  cp],
   ])

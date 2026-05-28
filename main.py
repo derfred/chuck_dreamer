@@ -26,14 +26,10 @@ from chuck_dreamer.training.cli import train_cmd
 from chuck_dreamer.eval.cli import eval_cmd
 from chuck_dreamer.real.object_localization.cli import (
   annotate_mat_cmd,
-  augment_keyframes_cmd,
   prompt_episodes_cmd,
-  test_calibration_cmd,
-  test_object_pose_cmd,
 )
 from chuck_dreamer.real.fk_calibration.cli import (
   calibrate_arm_from_episodes_cmd,
-  extract_joints_cmd,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -47,10 +43,6 @@ for _cmd in (
   eval_cmd,
   annotate_mat_cmd,
   prompt_episodes_cmd,
-  augment_keyframes_cmd,
-  test_calibration_cmd,
-  test_object_pose_cmd,
-  extract_joints_cmd,
   calibrate_arm_from_episodes_cmd,
 ):
   cli.add_command(_cmd)

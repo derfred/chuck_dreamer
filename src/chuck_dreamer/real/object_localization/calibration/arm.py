@@ -27,7 +27,6 @@ from ...fk_calibration.fk import FK
 __all__ = [
   "DEFAULT_TOUCH_SEQUENCE", "TouchRecord", "world_positions",
   "umeyama", "solve_arm_to_world", "run_arm_touch_calibration",
-  "calibrate_from_lerobot_dataset",
 ]
 
 # Default 4-touch sequence. The first three points are collinear (all on
@@ -65,7 +64,7 @@ def world_positions(L_mm: float, D_mm: float) -> dict[str, np.ndarray]:
   at the rectangle's left and right edges.
   """
   return {
-    "origin":       np.array([      0.0,         0.0, 0.0]),
+    "origin":       np.array([0.0,         0.0, 0.0]),
     "right-near":   np.array([+L_mm / 2.0, -D_mm / 2.0, 0.0]),
     "right-middle": np.array([+L_mm / 2.0,         0.0, 0.0]),
     "right-far":    np.array([+L_mm / 2.0, +D_mm / 2.0, 0.0]),
@@ -250,7 +249,7 @@ def solve_arm_to_world(
   return block, residuals, max_res, rms_res
 
 
-def _record_touch(arm: Arm, name: str) -> tuple[np.ndarray, np.ndarray]:
+def _record_touch(arm: Any, name: str) -> tuple[np.ndarray, np.ndarray]:
   """Sample joints for RECORD_WINDOW_SEC at RECORD_POLL_HZ, return
   ``(median_q5, spread_q5)`` for the 5 positioning joints (rad).
   """
@@ -268,7 +267,7 @@ def _record_touch(arm: Arm, name: str) -> tuple[np.ndarray, np.ndarray]:
 
 
 def run_arm_touch_calibration(
-  arm:          Arm,
+  arm:          Any,
   fk:           FK,
   L_mm:         float,
   D_mm:         float,
@@ -397,100 +396,3 @@ def run_arm_touch_calibration(
     click.echo(click.style(f"  OK ({max_res:.2f}mm < {RES_ACCEPT_MM:.0f}mm)",
                            fg="green"))
   return block
-
-
-# ---------------------------------------------------------------------------
-# Offline path: derive T_world_arm from a recorded LeRobot touch dataset.
-#
-# Used by ``import-lerobot`` so imported episodes carry their own arm-to-
-# world transform. Reuses the same Umeyama math as the live flow; the
-# only difference is where the joint medians come from (parquet
-# observation.state, in degrees) and how p_arm is computed (FK directly
-# rather than via the live MuJoCo handle).
-# ---------------------------------------------------------------------------
-
-
-def calibrate_from_lerobot_dataset(
-  dataset_id:        str,
-  episode_to_label:  dict[int, str],
-  fk:                FK,
-  L_mm:              float,
-  D_mm:              float,
-  *,
-  fk_dq:             np.ndarray | None = None,
-  fk_model_path:     str | Path | None = None,
-) -> tuple[dict[str, Any] | None, np.ndarray, float, float]:
-  """Compute T_world_arm from a LeRobot touch dataset.
-
-  ``episode_to_label`` maps LeRobot ``episode_index`` to one of the
-  canonical touch names (``"origin"``, ``"left-middle"``, …). We read
-  the per-frame ``observation.state`` (degrees) from the cached parquet,
-  take the per-joint median over each episode, convert to radians, run
-  FK to get the EE position in arm frame (meters → millimeters), pair
-  with the world-frame target from :func:`world_positions`, and solve
-  Umeyama.
-
-  Returns the same ``(block_or_None, residuals, max_res, rms_res)``
-  tuple as :func:`solve_arm_to_world`. ``block_or_None`` is ``None``
-  when the alignment is rejected (max residual ≥ 10 mm).
-
-  Joint-unit convention matches ``extract_joints.py``: the LeRobot
-  ``observation.state`` for these touch datasets is in degrees.
-  """
-  from ...fk_calibration.extract_joints import (
-    POSITIONING_JOINTS,
-    _load_episodes_table,
-    _state_joint_names,
-    _episode_state_array,
-  )
-
-  targets = world_positions(L_mm, D_mm)
-  unknown = [lab for lab in episode_to_label.values() if lab not in targets]
-  if unknown:
-    raise ValueError(f"unknown touch labels: {sorted(set(unknown))}; "
-                     f"valid: {sorted(targets)}")
-
-  df = _load_episodes_table(dataset_id)
-  joint_names = _state_joint_names(dataset_id)
-  try:
-    idxs = [joint_names.index(n) for n in POSITIONING_JOINTS]
-  except ValueError as e:
-    raise ValueError(
-      f"{dataset_id}: state feature names {joint_names} missing one of "
-      f"{POSITIONING_JOINTS}: {e}")
-
-  if fk_dq is None:
-    fk_dq = np.zeros(5, dtype=np.float64)
-
-  touches: list[TouchRecord] = []
-  for ep_idx in sorted(episode_to_label.keys()):
-    label = episode_to_label[ep_idx]
-    state = _episode_state_array(df, ep_idx)
-    if state.size == 0:
-      raise ValueError(f"{dataset_id} ep {ep_idx}: no frames in parquet")
-    pos_deg = state[:, idxs]                      # (T, 5) degrees
-    q_med_deg    = np.median(pos_deg, axis=0)
-    q_spread_deg = pos_deg.max(axis=0) - pos_deg.min(axis=0)
-
-    q_med_rad    = np.deg2rad(q_med_deg)
-    q_spread_rad = np.deg2rad(q_spread_deg)
-
-    p_arm_m  = fk(q_med_rad, dq=fk_dq)
-    p_arm_mm = p_arm_m * 1000.0
-
-    touches.append(TouchRecord(
-      name=label, q=q_med_rad, q_spread=q_spread_rad,
-      p_arm=p_arm_mm, p_world=targets[label],
-    ))
-
-  return solve_arm_to_world(
-    touches,
-    fk_dq=fk_dq,
-    fk_model_path=fk_model_path,
-    touch_sequence=[t.name for t in touches],
-    L_mm=L_mm, D_mm=D_mm,
-    extra_metadata={
-      "source":     "lerobot_dataset",
-      "dataset_id": dataset_id,
-    },
-  )

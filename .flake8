@@ -1,9 +1,11 @@
+# flake8 does not read pyproject.toml (no native PEP 518 support), so this
+# file is the single source of truth — do not re-add a [tool.flake8] block.
 [flake8]
 max-line-length = 160
 indent-size = 2
 # src/fessel is a self-contained sub-project with its own CI, lint, and
 # dependency manifests; exclude it from the host repo's lint/type checks.
 exclude = .git,__pycache__,.venv,src/fessel
-extend-ignore = E203, W503, E111, E114, E117, E121, E127, E128, E131, E221, E272
+extend-ignore = E203, W503, E111, E114, E116, E117, E121, E124, E127, E128, E131, E221, E251, E261, E272
 per-file-ignores =
     src/chuck_dreamer/sim/scene_builder.py:E501

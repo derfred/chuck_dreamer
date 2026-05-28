@@ -81,10 +81,6 @@ line_length = 160
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-[tool.flake8]
-max-line-length = 160
-extend-ignore = ["E203", "W503"]
-
 [tool.mypy]
 python_version = "3.12"
 warn_return_any = true

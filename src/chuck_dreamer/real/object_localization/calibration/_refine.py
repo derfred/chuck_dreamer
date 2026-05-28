@@ -199,11 +199,16 @@ def _find_perp_peak(gray: np.ndarray, centre: np.ndarray, normal: np.ndarray
 
 
 def _bilinear_sample(gray: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
-  u0 = np.floor(u).astype(int); v0 = np.floor(v).astype(int)
-  u1 = u0 + 1; v1 = v0 + 1
-  du = u - u0; dv = v - v0
-  Ia = gray[v0, u0]; Ib = gray[v0, u1]
-  Ic = gray[v1, u0]; Id = gray[v1, u1]
+  u0 = np.floor(u).astype(int)
+  v0 = np.floor(v).astype(int)
+  u1 = u0 + 1
+  v1 = v0 + 1
+  du = u - u0
+  dv = v - v0
+  Ia = gray[v0, u0]
+  Ib = gray[v0, u1]
+  Ic = gray[v1, u0]
+  Id = gray[v1, u1]
   return (1 - du) * (1 - dv) * Ia + du * (1 - dv) * Ib \
        + (1 - du) * dv       * Ic + du * dv       * Id
 

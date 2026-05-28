@@ -9,7 +9,6 @@ projects toward the bottom of the image, so "line 1 (bottom)" sits at
 """
 from __future__ import annotations
 
-from typing import Iterable
 
 import numpy as np
 
@@ -17,9 +16,9 @@ import numpy as np
 def line_endpoints_world(L_mm: float, D_mm: float) -> dict[str, np.ndarray]:
   """4 known line endpoints, each a ``(3,)`` world-frame point in mm."""
   return {
-    "line1_near": np.array([ 0.0,    +D_mm / 2.0, 0.0]),
+    "line1_near": np.array([0.0,    +D_mm / 2.0, 0.0]),
     "line1_far":  np.array([-L_mm,   +D_mm / 2.0, 0.0]),
-    "line2_near": np.array([ 0.0,    -D_mm / 2.0, 0.0]),
+    "line2_near": np.array([0.0,    -D_mm / 2.0, 0.0]),
     "line2_far":  np.array([-L_mm,   -D_mm / 2.0, 0.0]),
   }
 

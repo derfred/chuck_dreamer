@@ -14,7 +14,7 @@ real-time filter would have to.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, overload
 
 import numpy as np
@@ -74,6 +74,7 @@ class SmoothedTrajectoryEstimator:
   def smooth_episode(
     self, poses: list[ObjectPose | None],
   ) -> list[SmoothedFrame]: ...
+
   @overload
   def smooth_episode(
     self, poses: list[ObjectPose | None], *, return_diagnostics: bool,
@@ -228,9 +229,9 @@ class SmoothedTrajectoryEstimator:
     dt    = self.dt
     alpha = self.alpha
     return np.array([
-      [1.0, 0.0, dt,    0.0  ],
-      [0.0, 1.0, 0.0,   dt   ],
-      [0.0, 0.0, alpha, 0.0  ],
+      [1.0, 0.0, dt,    0.0],
+      [0.0, 1.0, 0.0,   dt],
+      [0.0, 0.0, alpha, 0.0],
       [0.0, 0.0, 0.0,   alpha],
     ], dtype=np.float64)
 

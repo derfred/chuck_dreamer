@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable, Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -233,8 +233,10 @@ def _bg_mask(rgb: np.ndarray,
   if chosen == 0:
     # Search a small window around the click for the nearest foreground.
     R = 30
-    y0 = max(0, v0 - R); y1 = min(H, v0 + R + 1)
-    x0 = max(0, u0 - R); x1 = min(W, u0 + R + 1)
+    y0 = max(0, v0 - R)
+    y1 = min(H, v0 + R + 1)
+    x0 = max(0, u0 - R)
+    x1 = min(W, u0 + R + 1)
     window = labels[y0:y1, x0:x1]
     cand = window[window != 0]
     if cand.size == 0:
@@ -267,7 +269,6 @@ def _fallback_mask(rgb: np.ndarray, prompt: tuple[int, int] | list[tuple[int, in
   v0 = max(0, min(rgb.shape[0] - 1, v0))
 
   gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-  seed = int(gray[v0, u0])
 
   # Floodfill with a per-channel tolerance. cv2.floodFill mutates the
   # input mask in-place; ours is (H+2, W+2) per its API.

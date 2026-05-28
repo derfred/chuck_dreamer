@@ -99,5 +99,3 @@ def project_visible_edges(vertices_world: np.ndarray, triangles: np.ndarray,
       seen.add(key)
       out.append((uvs[i], uvs[j]))
   return out
-
-
