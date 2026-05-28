@@ -1,12 +1,10 @@
 """Episode-selection spec: the ``dataset#episodes:frames`` CLI syntax.
 
-A single :class:`EpisodeSpec` both *parses* the CLI token and *applies*
-the selection to a list of per-episode metadata objects, so any command
-that takes a ``DATASET[#EPISODES[:FRAMES]]`` argument can share one
-primitive. Each consumer supplies its own metadata reader (the importer
-reads rich per-episode slices; the calibration CLIs read episode bounds)
-and uses :meth:`EpisodeSpec.select_episodes` to keep only the requested
-episodes — the spec never knows the concrete metadata type.
+A single :class:`EpisodeSpec` parses the CLI token and resolves it to the
+dataset's episodes: :meth:`EpisodeSpec.read_episodes` reads the LeRobot
+metadata and returns one :class:`EpisodeSlice` per *selected* episode, so
+any command taking a ``DATASET[#EPISODES[:FRAMES]]`` argument shares one
+primitive for both parsing and resolution.
 
 Spec grammar (ABNF-ish):
 
@@ -37,11 +35,31 @@ Examples:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, TypeVar
+from pathlib import Path
 
 import click
 
-_T = TypeVar("_T")
+
+@dataclass
+class EpisodeSlice:
+  """One episode's metadata: frame bounds, video-decode window, and the
+  chunk/file coordinates for both the data parquet and the video file."""
+  episode_index: int
+  data_from: int
+  data_to: int                    # exclusive
+  video_from_ts: float
+  video_to_ts: float              # exclusive
+  data_chunk: int
+  data_file: int
+  video_chunk: int
+  video_file: int
+  task: str
+  length: int
+
+  @property
+  def bounds(self) -> tuple[int, int]:
+    """``(from_idx, to_idx_exclusive)`` for this episode."""
+    return self.data_from, self.data_to
 
 
 @dataclass
@@ -49,7 +67,7 @@ class EpisodeSpec:
   """A parsed ``dataset#episodes[:frames]`` selection.
 
   ``episodes`` is None when the user didn't specify an episode filter
-  (= "all"); :meth:`select_episodes` then keeps every episode. ``frames``
+  (= "all"); :meth:`read_episodes` then returns every episode. ``frames``
   is None when no frame filter was given (the resolver auto-samples);
   otherwise it holds the episode-relative frame indices.
   """
@@ -93,21 +111,76 @@ class EpisodeSpec:
     """``episodes`` as a set, or ``None`` for "all episodes"."""
     return set(self.episodes) if self.episodes is not None else None
 
-  def select_episodes(
-    self, items: list[_T], *, key: Callable[[_T], int],
-  ) -> list[_T]:
-    """Keep only ``items`` whose ``key(item)`` is in this spec's
-    ``episodes`` selection, preserving input order.
-
-    Returns the list unchanged when ``episodes`` is None ("all"). ``key``
-    maps each item to its episode index — e.g.
-    ``lambda s: s.episode_index`` for the importer's episode slices, or
-    ``lambda t: t[0]`` for ``(episode_idx, bounds)`` tuples.
-    """
+  def _select_episodes(self, slices: list[EpisodeSlice]) -> list[EpisodeSlice]:
+    """Keep only ``slices`` whose ``episode_index`` is in this spec's
+    ``episodes`` selection, preserving input order. Returns the list
+    unchanged when ``episodes`` is None ("all"). Used by
+    :meth:`read_episodes`."""
     if self.episodes is None:
-      return list(items)
+      return slices
     keep = set(self.episodes)
-    return [it for it in items if key(it) in keep]
+    return [s for s in slices if s.episode_index in keep]
+
+  # ---- resolution to LeRobot episode metadata ----------------------------
+  def read_episodes(
+    self, *,
+    video_key: str | None = None,
+    root: str | Path | None = None,
+  ) -> tuple[list[EpisodeSlice], str]:
+    """Read this spec's dataset and return ``(slices, resolved_video_key)``:
+    one :class:`EpisodeSlice` per **selected** episode (sorted by index,
+    filtered by this spec's ``episodes``) plus the video key the slices'
+    video fields were populated from.
+
+    Reads only the parquet sidecars under ``meta/`` via
+    ``LeRobotDatasetMetadata`` (no video touch). ``video_key`` selects
+    which ``observation.images.*`` feature's chunk/file/timestamp columns
+    populate the video fields (defaults to the dataset's first video key);
+    ``root`` points at an on-disk dataset directory.
+
+    The LeRobot import is deferred to call time so that merely parsing a
+    spec string (the CLIs' common case) doesn't pull in the LeRobot stack.
+    """
+    from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # type: ignore
+
+    meta = LeRobotDatasetMetadata(self.dataset_id, root=root)
+    vkey = _resolve_video_key(meta, self.dataset_id, video_key)
+
+    vcol_chunk = f"videos/{vkey}/chunk_index"
+    vcol_file = f"videos/{vkey}/file_index"
+    vcol_from = f"videos/{vkey}/from_timestamp"
+    vcol_to = f"videos/{vkey}/to_timestamp"
+
+    slices: list[EpisodeSlice] = []
+    for row in meta.episodes:
+      tasks = row.get("tasks") or []
+      slices.append(EpisodeSlice(
+        episode_index=int(row["episode_index"]),
+        data_from=int(row["dataset_from_index"]),
+        data_to=int(row["dataset_to_index"]),
+        video_from_ts=float(row[vcol_from]),
+        video_to_ts=float(row[vcol_to]),
+        data_chunk=int(row["data/chunk_index"]),
+        data_file=int(row["data/file_index"]),
+        video_chunk=int(row[vcol_chunk]),
+        video_file=int(row[vcol_file]),
+        task=str(tasks[0]) if tasks else "",
+        length=int(row["length"]),
+      ))
+    slices.sort(key=lambda s: s.episode_index)
+    return self._select_episodes(slices), vkey
+
+
+def _resolve_video_key(meta, dataset_id: str, video_key: str | None) -> str:
+  video_keys = list(meta.video_keys)
+  if video_key is not None:
+    if video_key not in video_keys:
+      raise ValueError(
+        f"{dataset_id}: video key {video_key!r} not among {video_keys}")
+    return video_key
+  if not video_keys:
+    raise ValueError(f"{dataset_id}: no video features found")
+  return video_keys[0]
 
 
 # ---------------------------------------------------------------------------

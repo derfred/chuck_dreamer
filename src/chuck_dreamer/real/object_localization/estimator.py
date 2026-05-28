@@ -228,39 +228,65 @@ class ObjectPoseEstimator:
       return None
     return self._fit_pose(image, mask, prev_pose)
 
-  def estimate_episode(
-    self,
-    frames: Iterable[np.ndarray],
-    first_frame_prompt: tuple[int, int] | list[tuple[int, int]] | None = None,
-    keyframe_prompts: dict[int, "tuple[int, int] | list[tuple[int, int]]"] | None = None,
-  ) -> list[ObjectPose | None]:
-    """Estimate poses across a whole episode.
-
-    ``first_frame_prompt`` is the click at frame 0 (required if no
-    ``keyframe_prompts`` is given). ``keyframe_prompts`` is an
-    ``{episode_relative_frame_idx: prompt}`` map; at each keyframe the
-    estimator re-runs the cold-start path (rest hypothesis stays
-    cached, but the (x, y) is re-anchored to the prompt's
-    back-projection) so the warm-start chain can't drift forever.
-
-    If both are given, ``keyframe_prompts[0]`` wins for frame 0.
-    """
-    frame_list = list(frames)
-    if not frame_list:
-      return []
-
+  @staticmethod
+  def _resolve_keyframes(
+    first_frame_prompt: tuple[int, int] | list[tuple[int, int]] | None,
+    keyframe_prompts: dict[int, "tuple[int, int] | list[tuple[int, int]]"] | None,
+    *, caller: str,
+  ) -> dict[int, Any]:
     kfs: dict[int, Any] = dict(keyframe_prompts or {})
     if 0 not in kfs and first_frame_prompt is not None:
       kfs[0] = first_frame_prompt
     if 0 not in kfs:
       raise ValueError(
-        "estimate_episode(): a frame-0 prompt is required (pass via "
+        f"{caller}(): a frame-0 prompt is required (pass via "
         "first_frame_prompt or keyframe_prompts[0]).")
+    return kfs
 
+  def segment_episode(
+    self,
+    frames: Iterable[np.ndarray],
+    first_frame_prompt: tuple[int, int] | list[tuple[int, int]] | None = None,
+    keyframe_prompts: dict[int, "tuple[int, int] | list[tuple[int, int]]"] | None = None,
+    target_name: str = "object",
+  ) -> list[np.ndarray | None]:
+    """Run SAM2 across an episode and return per-frame masks.
+
+    Segmentation half of :meth:`estimate_episode`, separated so callers
+    can obtain masks without pose fitting (and, in future, segment
+    targets other than the pushed object). ``target_name`` selects which
+    target is being masked; only ``"object"`` is wired today, so it does
+    not yet thread into the SAM2 ``obj_id``.
+    """
+    frame_list = list(frames)
+    if not frame_list:
+      return []
+    kfs = self._resolve_keyframes(
+      first_frame_prompt, keyframe_prompts, caller="segment_episode")
     masks = segment_video(frame_list, kfs[0], self.use_sam2,
                           self.sam2_checkpoint, self.device,
                           scene_bg=self.scene_bg)
     self.last_masks = masks
+    return masks
+
+  def fit_poses_from_masks(
+    self,
+    frames: Iterable[np.ndarray],
+    masks: list[np.ndarray | None],
+    first_frame_prompt: tuple[int, int] | list[tuple[int, int]] | None = None,
+    keyframe_prompts: dict[int, "tuple[int, int] | list[tuple[int, int]]"] | None = None,
+  ) -> list[ObjectPose | None]:
+    """Fit per-frame poses given pre-computed masks.
+
+    Pose-fitting half of :meth:`estimate_episode`. ``masks`` is the
+    output of :meth:`segment_episode`; keyframe handling matches the
+    original orchestration.
+    """
+    frame_list = list(frames)
+    if not frame_list:
+      return []
+    kfs = self._resolve_keyframes(
+      first_frame_prompt, keyframe_prompts, caller="fit_poses_from_masks")
 
     out: list[ObjectPose | None] = []
     prev: ObjectPose | None = None
@@ -287,6 +313,33 @@ class ObjectPoseEstimator:
       if pose is not None:
         prev = pose
     return out
+
+  def estimate_episode(
+    self,
+    frames: Iterable[np.ndarray],
+    first_frame_prompt: tuple[int, int] | list[tuple[int, int]] | None = None,
+    keyframe_prompts: dict[int, "tuple[int, int] | list[tuple[int, int]]"] | None = None,
+  ) -> list[ObjectPose | None]:
+    """Estimate poses across a whole episode.
+
+    ``first_frame_prompt`` is the click at frame 0 (required if no
+    ``keyframe_prompts`` is given). ``keyframe_prompts`` is an
+    ``{episode_relative_frame_idx: prompt}`` map; at each keyframe the
+    estimator re-runs the cold-start path (rest hypothesis stays
+    cached, but the (x, y) is re-anchored to the prompt's
+    back-projection) so the warm-start chain can't drift forever.
+
+    If both are given, ``keyframe_prompts[0]`` wins for frame 0.
+
+    Thin wrapper over :meth:`segment_episode` + :meth:`fit_poses_from_masks`.
+    """
+    frame_list = list(frames)
+    if not frame_list:
+      return []
+    masks = self.segment_episode(
+      frame_list, first_frame_prompt, keyframe_prompts)
+    return self.fit_poses_from_masks(
+      frame_list, masks, first_frame_prompt, keyframe_prompts)
 
   # -------------------------------------------------------------------------
   # Pose fitting
