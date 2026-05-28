@@ -70,13 +70,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install kubectl (no root/apt needed)
+      - name: Install kubectl + tk (no root/apt needed)
         run: |
           mkdir -p "$HOME/bin"
           curl -sSLo "$HOME/bin/kubectl" "https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/kubectl"
           chmod +x "$HOME/bin/kubectl"
+          # Tanka (provides the jsonnet evaluator used to render the deploy
+          # library — the single source of truth in src/fessel/deploy/jsonnet).
+          curl -sSLo "$HOME/bin/tk" "https://github.com/grafana/tanka/releases/download/v0.31.3/tk-linux-amd64"
+          chmod +x "$HOME/bin/tk"
           echo "$HOME/bin" >> "$GITHUB_PATH"
           "$HOME/bin/kubectl" version --client
+          "$HOME/bin/tk" --version
 
       - name: Deploy + run integration test (fresh namespace)
         id: itest

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Deploy the full Fessel system into a fresh namespace for an integration
-# test run, render-substituting environment values. Stands in for the Tanka
-# test environment (T1.4): same shape, but self-contained in the repo under
-# test so CI needs no cross-repo Tanka render.
+# test run, rendered from the jsonnet deploy library (deploy/jsonnet) — the
+# single source of truth shared with production (bugzoo-infrastructure).
 #
-# Two tailnet-substituted endpoints become in-cluster Service DNS:
+# Two tailnet-substituted endpoints become in-cluster Service DNS (the
+# library's webrtc.mode=podip + includeTestPi handle this):
 #   - mediamtx -> supervisor (runOnDemand): supervisor.<ns>.svc:8443
 #   - video -> mediamtx (SRT publish): mediamtx-srt.<ns>.svc:8890
 #
@@ -14,20 +14,19 @@
 #   REGISTRY           e.g. ghcr.io/derfred
 #   FESSEL_WHEP_SECRET shared HMAC/JWT secret (one value -> backend + mediamtx)
 set -euo pipefail
-
 : "${NS:?}" "${IMAGE_TAG:?}" "${REGISTRY:?}" "${FESSEL_WHEP_SECRET:?}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JSONNET="$HERE/../deploy/jsonnet"
 
-export NS IMAGE_TAG REGISTRY FESSEL_WHEP_SECRET
+echo "== rendering integration env from jsonnet =="
+render() {
+  tk eval "$JSONNET/envs/integration.jsonnet" \
+    -V ns="$NS" -V image_tag="$IMAGE_TAG" -V registry="$REGISTRY" \
+    -V whep_secret="$FESSEL_WHEP_SECRET"
+}
 
-echo "== creating namespace $NS =="
-kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
-
-echo "== rendering + applying infra manifests (00-30) =="
-for tmpl in "$HERE"/manifests/0*.yaml.tmpl "$HERE"/manifests/[123]*.yaml.tmpl; do
-  "$HERE/render.sh" < "$tmpl"
-  echo "---"
-done | kubectl apply -n "$NS" -f -
+echo "== applying (creates namespace + infra) =="
+render | kubectl apply -f -
 
 echo "== waiting for rollouts =="
 rollout() {
@@ -48,9 +47,7 @@ rollout mediamtx 120s
 rollout webui 120s
 rollout pi 180s
 
-# Post-rollout stability gate: a pod can pass rollout then crash-loop (e.g.
-# mediamtx's startup fd bug). Verify zero restarts after a short settle so
-# such failures surface here, not as a confusing "connection refused".
+# Post-rollout stability gate: a pod can pass rollout then crash-loop.
 echo "== stability check (no restarts after settle) =="
 sleep 15
 unstable=0

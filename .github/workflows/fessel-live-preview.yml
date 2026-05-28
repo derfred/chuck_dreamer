@@ -39,7 +39,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/login-action@v3
-        with: { registry: ghcr.io, username: ${{ github.actor }}, password: ${{ secrets.GITHUB_TOKEN }} }
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@v3
       - name: Build + push webui
         uses: docker/build-push-action@v6
@@ -72,11 +75,12 @@ jobs:
     runs-on: bugzoo
     steps:
       - uses: actions/checkout@v4
-      - name: Install kubectl
+      - name: Install kubectl + tk
         run: |
           mkdir -p "$HOME/bin"
           curl -sSLo "$HOME/bin/kubectl" "https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/kubectl"
-          chmod +x "$HOME/bin/kubectl"; echo "$HOME/bin" >> "$GITHUB_PATH"
+          curl -sSLo "$HOME/bin/tk" "https://github.com/grafana/tanka/releases/download/v0.31.3/tk-linux-amd64"
+          chmod +x "$HOME/bin/kubectl" "$HOME/bin/tk"; echo "$HOME/bin" >> "$GITHUB_PATH"
       - name: Deploy live preview
         env:
           FESSEL_WHEP_SECRET: live-preview-secret-${{ github.run_id }}

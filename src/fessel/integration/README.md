@@ -103,25 +103,25 @@ gh run view <run-id> --log-failed               # only failed steps
   stability diagnostics already printed the crash logs.
 
 **3. Reproduce live in the fixed dev namespace.** The per-run `fessel-it-*`
-namespace is auto-deleted, but you can redeploy the exact stack into the
-persistent `fessel-integration-test` namespace and poke at it directly
-(this is how the original bring-up was debugged):
+namespace is auto-deleted, but you can render the exact stack from the
+jsonnet library into the persistent `fessel-integration-test` namespace and
+poke at it directly (this is how the original bring-up was debugged):
 ```
 export KUBECONFIG=~/.kube/config-bugzoo-direct
 cd src/fessel
 TAG=<an image tag that exists, e.g. a recent run id or 'live-preview'>
-for f in 00-secret 10-mediamtx 20-webui 30-pi; do
-  NS=fessel-integration-test IMAGE_TAG=$TAG REGISTRY=ghcr.io/derfred \
-    FESSEL_WHEP_SECRET=devsecret integration/render.sh < integration/manifests/$f.yaml.tmpl
-  echo ---
-done | kubectl apply -n fessel-integration-test -f -
+tk eval deploy/jsonnet/envs/integration.jsonnet \
+  -V ns=fessel-integration-test -V image_tag=$TAG \
+  -V registry=ghcr.io/derfred -V whep_secret=devsecret \
+  | kubectl apply -f -
 kubectl rollout status deploy/mediamtx -n fessel-integration-test
 # then: kubectl logs / exec / get events, run a driver-probe pod, etc.
 # clean up:  kubectl delete deploy,svc,cm,secret,job --all -n fessel-integration-test
 ```
-Bump mediamtx logging by piping the rendered config through
-`sed 's/logLevel: info/logLevel: debug/'` before `kubectl apply` — that
-reveals per-session ICE / DTLS / auth detail.
+Bump mediamtx logging by piping the rendered output through
+`sed 's/logLevel: info/logLevel: debug/'` before `kubectl apply` (or set it
+in `deploy/jsonnet/mediamtx.libsonnet`) — reveals per-session ICE / DTLS /
+auth detail.
 
 **4. Watch a CI run live.** While the `integration` job runs, its
 `fessel-it-<run-id>` namespace exists for ~5 min:
@@ -144,11 +144,32 @@ kubectl logs -f driver-probe -n fessel-integration-test
 ```
 
 **Knobs for more logging:**
-- mediamtx: `logLevel: debug` in `manifests/10-mediamtx.yaml.tmpl`.
+- mediamtx: set `logLevel: debug` in `deploy/jsonnet/mediamtx.libsonnet`.
 - supervisor/video: already structured JSON to stdout; `/state/live` on
   supervisor exposes the live-state history over HTTP.
 - driver: `happy_path` already calls `connect(debug=True)` to dump ICE
   candidates; pass `debug=True` in other `connect()` calls to see their SDP.
+
+## Deploy library (single source of truth)
+
+All cluster objects are rendered from the jsonnet library in
+`src/fessel/deploy/jsonnet/` — the **single source of truth** shared by
+production and the tests (per architecture §5.4). One library, three shapes
+selected by config:
+
+| Env file | Mode | Used by |
+|---|---|---|
+| `envs/integration.jsonnet` | `webrtc=podip`, in-cluster test-Pi, no ingress | per-PR integration test |
+| `envs/live-preview.jsonnet` | `webrtc=nodeport`, public ingress, test-Pi | on-demand live preview |
+| (production) | `webrtc=nodeport`, Tailscale Services, real off-cluster Pi | `bugzoo-infrastructure` |
+
+**Production consumes the same library via reverse import**: it's a
+`jsonnet-bundler` git dependency in `bugzoo-infrastructure`
+(`jsonnetfile.json` → `derfred/chuck_dreamer//src/fessel/deploy/jsonnet`),
+wrapped by `lib/fessel/` there and merged into `environments/bugzoo`. So the
+library is *owned* with the Fessel code and *consumed* by infra — bump it by
+re-running `jb update` in the infra repo. This removes the prior drift where
+test and shipped manifests were separate copies.
 
 ## Other deviations from the plan
 
@@ -156,6 +177,3 @@ kubectl logs -f driver-probe -n fessel-integration-test
   `v4l2loopback`. The loopback module isn't loaded on the bugzoo nodes and
   loading it means modifying shared production nodes. The MJPG `v4l2src`
   capture preamble is therefore not exercised here (already a §6 gap).
-- **Deploy**: self-contained templated manifests (`manifests/*.yaml.tmpl`
-  rendered by `render.sh`) instead of a cross-repo Tanka environment, so CI
-  in this repo needs no Tanka render. Same shape; same single-Secret wiring.
