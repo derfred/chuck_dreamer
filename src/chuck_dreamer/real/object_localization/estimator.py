@@ -265,9 +265,8 @@ class ObjectPoseEstimator:
       return []
     kfs = self._resolve_keyframes(
       first_frame_prompt, keyframe_prompts, caller="segment_episode")
-    masks = segment_video(frame_list, kfs[0], self.use_sam2,
-                          self.sam2_checkpoint, self.device,
-                          scene_bg=self.scene_bg)
+    masks = segment_video(frame_list, kfs,
+                          self.sam2_checkpoint, self.device)
     self.last_masks = masks
     return masks
 

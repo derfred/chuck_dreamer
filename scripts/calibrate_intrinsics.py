@@ -233,14 +233,16 @@ def _coverage_fill(views: list[DetectedView], image_size: tuple[int, int],
   return filled, int(filled.sum()), int(gx * gy)
 
 
-def _distortion_flags(cv2_mod: Any, n_coeffs: int) -> int:
+def _distortion_flags(n_coeffs: int) -> int:
+  import cv2
+
   if n_coeffs == 5:
     return 0
   if n_coeffs == 2:
-    return cv2_mod.CALIB_ZERO_TANGENT_DIST | cv2_mod.CALIB_FIX_K3
+    return int(cv2.CALIB_ZERO_TANGENT_DIST | cv2.CALIB_FIX_K3)
   if n_coeffs == 0:
-    return (cv2_mod.CALIB_ZERO_TANGENT_DIST
-            | cv2_mod.CALIB_FIX_K1 | cv2_mod.CALIB_FIX_K2 | cv2_mod.CALIB_FIX_K3)
+    return int(cv2.CALIB_ZERO_TANGENT_DIST
+               | cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3)
   raise ValueError(f"unsupported distortion coefficient count: {n_coeffs}")
 
 
@@ -279,7 +281,7 @@ def calibrate_from_frames(
 
   ck_size = (int(ol_cfg.checkerboard_size[0]), int(ol_cfg.checkerboard_size[1]))
   ck_obj = _checkerboard_object_points(ck_size, ol_cfg.checkerboard_square_mm)
-  grid = tuple(int(x) for x in ol_cfg.intrinsics_coverage_grid)
+  grid = (int(ol_cfg.intrinsics_coverage_grid[0]), int(ol_cfg.intrinsics_coverage_grid[1]))
 
   views: list[DetectedView] = []
   image_size: tuple[int, int] | None = None
@@ -311,7 +313,7 @@ def calibrate_from_frames(
   obj_points = [ck_obj.copy() for _ in views]
   img_points = [v.corners for v in views]
 
-  calib_flags = _distortion_flags(cv2, ol_cfg.intrinsics_distortion_model)
+  calib_flags = _distortion_flags(ol_cfg.intrinsics_distortion_model)
   if ol_cfg.intrinsics_fix_aspect_ratio:
     calib_flags |= cv2.CALIB_FIX_ASPECT_RATIO
   if ol_cfg.intrinsics_fix_principal_point:
@@ -328,18 +330,20 @@ def calibrate_from_frames(
     dist_init = np.zeros(5, dtype=np.float64)
     calib_flags |= cv2.CALIB_USE_INTRINSIC_GUESS
 
-  rms_px, K, dist, rvecs, tvecs = cv2.calibrateCamera(
-    obj_points, img_points, image_size, K_init, dist_init,
+  rms_px, K_raw, dist_raw, rvecs, tvecs = cv2.calibrateCamera(
+    obj_points, img_points, image_size,
+    K_init,  # type: ignore[arg-type]  # None is valid (OpenCV default)
+    dist_init,  # type: ignore[arg-type]
     flags=calib_flags, criteria=criteria,
   )
-  K = np.asarray(K, dtype=np.float64)
-  dist = np.asarray(dist, dtype=np.float64).reshape(-1)
+  K = np.asarray(K_raw, dtype=np.float64)
+  dist: np.ndarray = np.asarray(dist_raw, dtype=np.float64).reshape(-1)
   if dist.size < 5:
     dist = np.concatenate([dist, np.zeros(5 - dist.size, dtype=np.float64)])
   else:
     dist = dist[:5]
 
-  per_view = _per_view_rms(obj_points, img_points, rvecs, tvecs, K, dist)
+  per_view = _per_view_rms(obj_points, img_points, list(rvecs), list(tvecs), K, dist)
   _filled, filled_n, total_n = _coverage_fill(views, image_size, grid)
 
   intrinsics = Intrinsics(
@@ -412,11 +416,11 @@ def render_coverage(result: CalibrationResult, ol_cfg: ObjectLocalizationConfig,
   import cv2
 
   W, H = result.intrinsics.image_size
-  grid = tuple(int(x) for x in ol_cfg.intrinsics_coverage_grid)
+  grid = (int(ol_cfg.intrinsics_coverage_grid[0]), int(ol_cfg.intrinsics_coverage_grid[1]))
   gx, gy = max(1, grid[0]), max(1, grid[1])
   cell_w, cell_h = W / gx, H / gy
 
-  canvas = np.full((H, W, 3), 32, dtype=np.uint8)
+  canvas: np.ndarray = np.full((H, W, 3), 32, dtype=np.uint8)
   filled, _, _ = _coverage_fill(result.views, (W, H), grid)
 
   overlay = canvas.copy()
@@ -438,8 +442,9 @@ def render_coverage(result: CalibrationResult, ol_cfg: ObjectLocalizationConfig,
   n = len(result.views)
   for k, v in enumerate(result.views):
     hue = int(180 * (k / max(1, n)))
-    color = tuple(int(c) for c in cv2.cvtColor(
-      np.uint8([[[hue, 200, 255]]]), cv2.COLOR_HSV2BGR)[0, 0])
+    hsv = np.array([[[hue, 200, 255]]], dtype=np.uint8)
+    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
+    color = (int(bgr[0]), int(bgr[1]), int(bgr[2]))
     for u, vv in v.corners.reshape(-1, 2):
       cv2.circle(canvas, (int(u), int(vv)), 2, color, -1)
 
@@ -567,7 +572,9 @@ def _camera_config(cfg: Any) -> dict[str, Any]:
   real = cfg.get("real", {}) if hasattr(cfg, "get") else {}
   cam = real.get("camera", {}) if real else {}
   out = OmegaConf.to_container(cam, resolve=True) if cam else {}
-  return out if isinstance(out, dict) else {}
+  if not isinstance(out, dict):
+    return {}
+  return {str(k): v for k, v in out.items()}
 
 
 if __name__ == "__main__":
