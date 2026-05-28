@@ -197,24 +197,13 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key, max_episodes,
   """
   from tqdm import tqdm
 
-  from chuck_dreamer.real.object_localization.calibration.spec_parser import (
-    parse_calibration_source,
-  )
+  from chuck_dreamer.common.episode_spec import EpisodeSpec
   from chuck_dreamer.lerobot.importer import import_dataset
 
-  try:
-    spec = parse_calibration_source(repo_id)
-  except ValueError as e:
-    raise click.ClickException(str(e))
-  if spec.frames is not None:
-    raise click.ClickException(
-      "import-lerobot doesn't accept the :FRAMES portion of the spec "
-      "(only #EPISODES is meaningful). Got: "
-      f"{repo_id!r}")
+  spec = EpisodeSpec.parse(
+    repo_id, allow_frames=False, command="import-lerobot")
   parsed_repo_id = spec.dataset_id
-  episode_filter: set[int] | None = (
-    set(spec.episodes) if spec.episodes is not None else None
-  )
+  episode_filter = spec.episode_filter  # for display/progress only
 
   if not doctor and not output:
     raise click.UsageError("--output is required (unless --doctor is passed).")
@@ -250,7 +239,7 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key, max_episodes,
         with_ee_pos=with_ee_pos,
         with_object_pose=with_object_pose,
         name_prefix=name_prefix,
-        episode_filter=episode_filter,
+        source=spec,
         arm_calibration=arm_calibration,
       ),
       desc="Episodes",

@@ -26,8 +26,11 @@ data:
     # via the MTX_WEBRTCADDITIONALHOSTS env from the downward API below.
     webrtcLocalUDPAddress: :8189
     webrtcLocalTCPAddress: :8189
-    webrtcICEServers2:
-      - url: stun:stun.l.google.com:19302
+    # No STUN: client and mediamtx are both in-cluster with routable pod IPs,
+    # so only host candidates are needed. A STUN srflx candidate (the
+    # cluster's public NAT IP) is unreachable from inside and just stalls
+    # ICE until the handshake deadline — drop it for fast in-cluster ICE.
+    webrtcICEServers2: []
     # HTTP auth: mediamtx calls webui /auth per request. webui validates the
     # WHEP JWT (jwt= query param) for read; publish (the Pi's trusted SRT
     # ingest) is excluded so it doesn't need a token. JWT mode can't exclude
