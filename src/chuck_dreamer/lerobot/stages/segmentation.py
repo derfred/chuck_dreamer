@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
+
 import numpy as np
 
 from .base import Requirement, StageContext, as_uint8_hwc
@@ -24,6 +26,7 @@ _SEG_KEYS: dict[str, tuple[str, str]] = {
 def seg_keys(target_name: str) -> tuple[str, str]:
   return _SEG_KEYS.get(
     target_name, (f"segmentation_{target_name}", f"{target_name}_uv"))
+
 
 def _store_masks_and_uv(episode: dict[str, Any],
                         imgs: list[np.ndarray],
@@ -76,12 +79,12 @@ def _dump_debug_masks(out_root: Path, source_repo: str, episode_index: int,
   drop-outs are visible by scrubbing the folder.
   """
   if masks is None:
-    print(f"[debug-masks] no masks available on estimator; skipping dump")
+    print("[debug-masks] no masks available on estimator; skipping dump")
     return
   try:
     from PIL import Image
   except ImportError:
-    print(f"[debug-masks] PIL not available; skipping dump")
+    print("[debug-masks] PIL not available; skipping dump")
     return
 
   from chuck_dreamer.real.object_localization.types import dataset_slug
@@ -111,7 +114,6 @@ def _dump_debug_masks(out_root: Path, source_repo: str, episode_index: int,
         f"({n_with_mask} with mask) to {ep_dir}")
 
 
-
 class SegmentationStage:
   """Run SAM2 for one target, caching masks on ``ctx`` for downstream
   stages (e.g. pose fitting) and filling the per-target seg/uv arrays."""
@@ -120,7 +122,7 @@ class SegmentationStage:
   def __init__(self, target_name: str = "object") -> None:
     self.target_name = target_name
     self.name = f"segment:{target_name}"
-    self.produces = seg_keys(target_name)
+    self.produces: tuple[str, ...] = seg_keys(target_name)
 
   def requirements(self, ctx: StageContext) -> list[Requirement]:
     from chuck_dreamer.real.object_localization.types import dataset_cache_dir

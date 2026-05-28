@@ -172,7 +172,7 @@ class EpisodeSpec:
 
 
 def _resolve_video_key(meta, dataset_id: str, video_key: str | None) -> str:
-  video_keys = list(meta.video_keys)
+  video_keys = [str(k) for k in meta.video_keys]
   if video_key is not None:
     if video_key not in video_keys:
       raise ValueError(
@@ -196,12 +196,12 @@ def _parse(raw: str) -> EpisodeSpec:
   dataset_id, _, rest = raw.partition("#")
   if not dataset_id:
     raise ValueError(f"{raw!r}: empty dataset id before '#'.")
-  episodes_str, sep, frames_str = rest.partition(":")
-  episodes_str = episodes_str.strip()
-  frames_str   = frames_str.strip() if sep else None
+  episodes_str, sep, frames_raw = rest.partition(":")
+  frames_str: str | None = frames_raw.strip() if sep else None
 
-  episodes = _parse_episodes(raw, episodes_str)
-  frames   = _parse_range_list(raw, frames_str, what="frames") if frames_str else None
+  episodes = _parse_episodes(raw, episodes_str.strip())
+  frames = (_parse_range_list(raw, frames_str, what="frames")
+            if frames_str else None)
   return EpisodeSpec(dataset_id=dataset_id, episodes=episodes, frames=frames)
 
 

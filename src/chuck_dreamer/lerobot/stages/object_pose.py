@@ -10,8 +10,8 @@ from .base import Requirement, StageContext, as_uint8_hwc
 
 class ObjectPoseStage:
   name = "object_pose"
-  produces = ("object_xy", "object_gap_too_long")
-  requires = ("segment:object",)
+  produces: tuple[str, ...] = ("object_xy", "object_gap_too_long")
+  requires: tuple[str, ...] = ("segment:object",)
 
   def requirements(self, ctx: StageContext) -> list[Requirement]:
     ol_cfg = ctx.ol_cfg()
@@ -25,8 +25,12 @@ class ObjectPoseStage:
     if images is None or len(images) == 0:
       return
     cfg = metadata.get("config")
-    source_repo = cfg.get("source_repo") if isinstance(cfg, dict) else None
-    episode_index = int(cfg.get("episode_index", 0)) if isinstance(cfg, dict) else 0
+    if not isinstance(cfg, dict):
+      raise RuntimeError("object_pose: metadata['config'] missing or invalid")
+    source_repo = cfg.get("source_repo")
+    if not isinstance(source_repo, str) or not source_repo:
+      raise RuntimeError("object_pose: metadata['config']['source_repo'] missing")
+    episode_index = int(cfg.get("episode_index", 0))
 
     masks = ctx.masks.get("object")
     if masks is None:

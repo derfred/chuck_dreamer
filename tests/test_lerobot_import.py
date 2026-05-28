@@ -1,15 +1,18 @@
 """Tests for the LeRobot v3 → repo-episode importer.
 
-The importer talks to Hugging Face via :func:`hf_hub_download`. To keep
-tests offline we build a tiny synthetic dataset (info.json + episodes
-parquet + data parquet + MP4) inside ``tmp_path`` and monkeypatch
-``hf_hub_download`` so it resolves repo-relative paths to those local
-files.
+Two collaborators are stubbed to keep tests offline:
+
+* Episode metadata is read through ``EpisodeSpec.read_episodes``, which
+  constructs a ``LeRobotDatasetMetadata``. We monkeypatch that class with
+  a fake exposing ``.video_keys`` and an ``.episodes`` table built from
+  in-test rows.
+* Per-episode data parquet + video MP4 are still fetched via the importer's
+  resolver (``hf_hub_download``), which we patch to resolve repo-relative
+  paths against a synthetic dataset dir under ``tmp_path``.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -19,13 +22,11 @@ import pytest
 
 av = pytest.importorskip("av")
 
-from chuck_dreamer.sim import lerobot_import as li  # noqa: E402
+from chuck_dreamer.lerobot import importer as li  # noqa: E402
+from chuck_dreamer.common import episode_spec as es  # noqa: E402
 from chuck_dreamer.training.episode_dataset import Episode  # noqa: E402
 
 
-# Tests in this file pre-date the Episode wrapper and read raw arrays
-# directly. ``load_hdf5_episode`` is a thin shim around
-# ``Episode.from_file(...).data`` to keep call sites short.
 def load_hdf5_episode(path):
   return Episode.from_file(path, format="hdf5").data
 
@@ -41,12 +42,7 @@ H, W = 32, 32
 
 
 def _write_mp4(path: Path, n_frames: int) -> None:
-  """Write an MP4 whose i-th frame is the constant greyscale value ``i * 8``.
-
-  ``mpeg4`` + ``yuv420p`` keeps R==G==B, so per-frame brightness survives
-  the chroma-subsampling round-trip closely enough for ``np.isclose``
-  with a small tolerance.
-  """
+  """Write an MP4 whose i-th frame is the constant greyscale value ``i * 8``."""
   path.parent.mkdir(parents=True, exist_ok=True)
   container = av.open(str(path), mode="w")
   stream = container.add_stream("mpeg4", rate=FPS)
@@ -79,68 +75,59 @@ def _write_data_parquet(path: Path, n_frames: int) -> None:
   pq.write_table(tbl, path)
 
 
-def _write_episodes_parquet(path: Path, episodes: list[dict]) -> None:
-  """``episodes`` is a list of ``dict`` with keys matching v3 column names."""
-  cols: dict[str, list] = {
-    "episode_index":                       [e["episode_index"] for e in episodes],
-    "tasks":                               [e["tasks"]         for e in episodes],
-    "length":                              [e["length"]        for e in episodes],
-    "data/chunk_index":                    [0] * len(episodes),
-    "data/file_index":                     [0] * len(episodes),
-    "dataset_from_index":                  [e["data_from"]     for e in episodes],
-    "dataset_to_index":                    [e["data_to"]       for e in episodes],
-    f"videos/{VIDEO_KEY}/chunk_index":     [0] * len(episodes),
-    f"videos/{VIDEO_KEY}/file_index":      [0] * len(episodes),
-    f"videos/{VIDEO_KEY}/from_timestamp":  [e["v_from"]        for e in episodes],
-    f"videos/{VIDEO_KEY}/to_timestamp":    [e["v_to"]          for e in episodes],
-  }
-  schema = pa.schema([
-    ("episode_index",                       pa.int64()),
-    ("tasks",                               pa.list_(pa.string())),
-    ("length",                              pa.int64()),
-    ("data/chunk_index",                    pa.int64()),
-    ("data/file_index",                     pa.int64()),
-    ("dataset_from_index",                  pa.int64()),
-    ("dataset_to_index",                    pa.int64()),
-    (f"videos/{VIDEO_KEY}/chunk_index",     pa.int64()),
-    (f"videos/{VIDEO_KEY}/file_index",      pa.int64()),
-    (f"videos/{VIDEO_KEY}/from_timestamp",  pa.float32()),
-    (f"videos/{VIDEO_KEY}/to_timestamp",    pa.float32()),
-  ])
-  path.parent.mkdir(parents=True, exist_ok=True)
-  pq.write_table(pa.table(cols, schema=schema), path)
+# ---------------------------------------------------------------------------
+# Fake LeRobotDatasetMetadata
+# ---------------------------------------------------------------------------
 
 
-def _write_info(path: Path, with_video: bool = True) -> None:
-  info = {
-    "codebase_version": "v3.0",
-    "fps":              FPS,
-    "features": {
-      "action":            {"dtype": "float32", "shape": [6]},
-      "observation.state": {"dtype": "float32", "shape": [6]},
-      "timestamp":         {"dtype": "float32", "shape": [1]},
-    },
-  }
-  if with_video:
-    info["features"][VIDEO_KEY] = {
-      "dtype": "video",
-      "shape": [H, W, 3],
-      "info":  {"video.height": H, "video.width": W, "video.fps": FPS},
-    }
-  path.parent.mkdir(parents=True, exist_ok=True)
-  with open(path, "w") as f:
-    json.dump(info, f)
+class _FakeMeta:
+  """Stand-in for ``LeRobotDatasetMetadata``.
+
+  ``read_episodes`` only touches ``.video_keys`` and iterates
+  ``.episodes`` reading the v3 column keys off each row, so a list of
+  plain dicts is enough.
+  """
+
+  def __init__(self, repo_id, root=None, **kwargs):
+    self.video_keys = [VIDEO_KEY]
+    self.episodes = [
+      {
+        "episode_index": 0, "tasks": ["pick"], "length": 6,
+        "dataset_from_index": 0, "dataset_to_index": 6,
+        "data/chunk_index": 0, "data/file_index": 0,
+        f"videos/{VIDEO_KEY}/chunk_index": 0,
+        f"videos/{VIDEO_KEY}/file_index": 0,
+        f"videos/{VIDEO_KEY}/from_timestamp": 0.0,
+        f"videos/{VIDEO_KEY}/to_timestamp": 6 / FPS,
+      },
+      {
+        "episode_index": 1, "tasks": ["place"], "length": 4,
+        "dataset_from_index": 6, "dataset_to_index": 10,
+        "data/chunk_index": 0, "data/file_index": 0,
+        f"videos/{VIDEO_KEY}/chunk_index": 0,
+        f"videos/{VIDEO_KEY}/file_index": 0,
+        f"videos/{VIDEO_KEY}/from_timestamp": 6 / FPS,
+        f"videos/{VIDEO_KEY}/to_timestamp": 10 / FPS,
+      },
+    ]
+
+
+class _FakeMetaNoVideo(_FakeMeta):
+  def __init__(self, repo_id, root=None, **kwargs):
+    super().__init__(repo_id, root=root, **kwargs)
+    self.video_keys = []
 
 
 @pytest.fixture
 def fake_repo(tmp_path, monkeypatch):
-  """Build a 2-episode synthetic LeRobot v3 dataset under ``tmp_path/repo``.
+  """Build a 2-episode synthetic dataset + stub its metadata reader.
 
   Episode 0: frames [0, 6),  video ts [0.0, 0.6)
   Episode 1: frames [6, 10), video ts [0.6, 1.0)
 
-  Patches ``hf_hub_download`` and ``HfApi.list_repo_files`` to resolve
-  ``REPO_ID`` paths against this directory.
+  Patches ``LeRobotDatasetMetadata`` (used by ``read_episodes``) with
+  ``_FakeMeta`` and ``hf_hub_download`` (used by the importer's resolver)
+  to resolve repo-relative paths against ``tmp_path/repo``.
   """
   root = tmp_path / "repo"
   root.mkdir()
@@ -148,16 +135,6 @@ def fake_repo(tmp_path, monkeypatch):
   n_frames = 10
   _write_mp4(root / f"videos/{VIDEO_KEY}/chunk-000/file-000.mp4", n_frames)
   _write_data_parquet(root / "data/chunk-000/file-000.parquet", n_frames)
-  _write_episodes_parquet(
-    root / "meta/episodes/chunk-000/file-000.parquet",
-    [
-      {"episode_index": 0, "tasks": ["pick"], "length": 6,
-       "data_from": 0, "data_to": 6, "v_from": 0.0, "v_to": 6 / FPS},
-      {"episode_index": 1, "tasks": ["place"], "length": 4,
-       "data_from": 6, "data_to": 10, "v_from": 6 / FPS, "v_to": 10 / FPS},
-    ],
-  )
-  _write_info(root / "meta/info.json")
 
   def fake_download(repo_id, filename, repo_type=None, **kwargs):
     p = root / filename
@@ -165,12 +142,9 @@ def fake_repo(tmp_path, monkeypatch):
       raise FileNotFoundError(f"fake_download: missing {filename!r} under {root}")
     return str(p)
 
-  class FakeApi:
-    def list_repo_files(self, repo_id, repo_type=None):
-      return [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()]
-
   monkeypatch.setattr(li, "hf_hub_download", fake_download)
-  monkeypatch.setattr("huggingface_hub.HfApi", lambda: FakeApi())
+  monkeypatch.setattr(
+    "lerobot.datasets.lerobot_dataset.LeRobotDatasetMetadata", _FakeMeta)
   return root
 
 
@@ -186,8 +160,6 @@ def test_decode_video_range_returns_expected_frames(tmp_path):
 
   assert frames.shape == (10, H, W, 3)
   assert frames.dtype == np.uint8
-  # i-th frame was encoded as constant i*8. mpeg4+yuv420p drifts a few
-  # units; mean within a single unit is plenty of headroom.
   for i in range(10):
     assert abs(float(frames[i].mean()) - i * 8) < 4, f"frame {i}"
 
@@ -195,7 +167,6 @@ def test_decode_video_range_returns_expected_frames(tmp_path):
 def test_decode_video_range_skips_frames_before_from_ts(tmp_path):
   mp4 = tmp_path / "v.mp4"
   _write_mp4(mp4, 10)
-  # Frames at indices 4..7 → ts 0.4..0.7 in a 10 fps stream.
   frames = li._decode_video_range(str(mp4), 0.4, 0.8, expected=4)
 
   assert frames.shape == (4, H, W, 3)
@@ -206,7 +177,6 @@ def test_decode_video_range_skips_frames_before_from_ts(tmp_path):
 def test_decode_video_range_caps_at_expected(tmp_path):
   mp4 = tmp_path / "v.mp4"
   _write_mp4(mp4, 10)
-  # Window is wider than the cap; decoder should stop after ``expected``.
   frames = li._decode_video_range(str(mp4), 0.0, 1.0, expected=3)
   assert frames.shape[0] == 3
 
@@ -219,38 +189,44 @@ def test_decode_video_range_raises_on_empty_window(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _select_video_key
+# read_episodes — video-key resolution off the (faked) metadata
 # ---------------------------------------------------------------------------
 
 
-def _resolver_to(path: Path):
-  return lambda _rel: str(path)
+def test_read_episodes_picks_first_video_key_when_unspecified(monkeypatch):
+  monkeypatch.setattr(
+    "lerobot.datasets.lerobot_dataset.LeRobotDatasetMetadata", _FakeMeta)
+  slices, vkey = es.EpisodeSpec("any/repo").read_episodes()
+  assert vkey == VIDEO_KEY
+  assert [s.episode_index for s in slices] == [0, 1]
 
 
-def test_select_video_key_picks_first_when_unspecified(tmp_path):
-  info_path = tmp_path / "meta/info.json"
-  _write_info(info_path)
-  assert li._select_video_key("repo", None, _resolver_to(info_path)) == VIDEO_KEY
+def test_read_episodes_honors_preferred_video_key(monkeypatch):
+  monkeypatch.setattr(
+    "lerobot.datasets.lerobot_dataset.LeRobotDatasetMetadata", _FakeMeta)
+  _, vkey = es.EpisodeSpec("any/repo").read_episodes(video_key=VIDEO_KEY)
+  assert vkey == VIDEO_KEY
 
 
-def test_select_video_key_honors_preferred(tmp_path):
-  info_path = tmp_path / "meta/info.json"
-  _write_info(info_path)
-  assert li._select_video_key("repo", VIDEO_KEY, _resolver_to(info_path)) == VIDEO_KEY
+def test_read_episodes_rejects_unknown_video_key(monkeypatch):
+  monkeypatch.setattr(
+    "lerobot.datasets.lerobot_dataset.LeRobotDatasetMetadata", _FakeMeta)
+  with pytest.raises(ValueError, match="not among"):
+    es.EpisodeSpec("any/repo").read_episodes(video_key="observation.images.nope")
 
 
-def test_select_video_key_rejects_unknown_key(tmp_path):
-  info_path = tmp_path / "meta/info.json"
-  _write_info(info_path)
-  with pytest.raises(ValueError, match="not in dataset"):
-    li._select_video_key("repo", "observation.images.nope", _resolver_to(info_path))
+def test_read_episodes_raises_when_no_video_features(monkeypatch):
+  monkeypatch.setattr(
+    "lerobot.datasets.lerobot_dataset.LeRobotDatasetMetadata", _FakeMetaNoVideo)
+  with pytest.raises(ValueError, match="no video features"):
+    es.EpisodeSpec("any/repo").read_episodes()
 
 
-def test_select_video_key_raises_when_no_video_features(tmp_path):
-  info_path = tmp_path / "meta/info.json"
-  _write_info(info_path, with_video=False)
-  with pytest.raises(RuntimeError, match="no video features"):
-    li._select_video_key("repo", None, _resolver_to(info_path))
+def test_read_episodes_applies_spec_filter(monkeypatch):
+  monkeypatch.setattr(
+    "lerobot.datasets.lerobot_dataset.LeRobotDatasetMetadata", _FakeMeta)
+  slices, _ = es.EpisodeSpec.parse("any/repo#1").read_episodes()
+  assert [s.episode_index for s in slices] == [1]
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +236,9 @@ def test_select_video_key_raises_when_no_video_features(tmp_path):
 
 def test_import_dataset_writes_one_file_per_episode(tmp_path, fake_repo):
   out = tmp_path / "out"
-  results = list(li.import_dataset("any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False))
+  results = list(li.import_dataset(
+    "any/repo", str(out), format="hdf5",
+    with_ee_pos=False, with_object_pose=False))
 
   assert [idx for idx, _ in results] == [0, 1]
   for _, path in results:
@@ -270,12 +248,13 @@ def test_import_dataset_writes_one_file_per_episode(tmp_path, fake_repo):
 
 def test_import_dataset_per_episode_shapes_and_metadata(tmp_path, fake_repo):
   out = tmp_path / "out"
-  list(li.import_dataset("any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False))
+  list(li.import_dataset(
+    "any/repo", str(out), format="hdf5",
+    with_ee_pos=False, with_object_pose=False))
 
   ep0 = load_hdf5_episode(out / "episode-00000.hdf5")
   ep1 = load_hdf5_episode(out / "episode-00001.hdf5")
 
-  # Episode 0 has 6 frames, episode 1 has 4 — matching the meta we wrote.
   assert ep0["image"].shape == (6, H, W, 3)
   assert ep0["joint_qpos"].shape == (6, 6)
   assert ep0["joint_action"].shape == (6, 6)
@@ -287,10 +266,11 @@ def test_import_dataset_per_episode_shapes_and_metadata(tmp_path, fake_repo):
 
 def test_import_dataset_zero_fills_missing_signals(tmp_path, fake_repo):
   out = tmp_path / "out"
-  list(li.import_dataset("any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False))
+  list(li.import_dataset(
+    "any/repo", str(out), format="hdf5",
+    with_ee_pos=False, with_object_pose=False))
 
   ep0 = load_hdf5_episode(out / "episode-00000.hdf5")
-  # Fields LeRobot teleop doesn't carry must come back as zeros.
   assert np.all(ep0["reward"]    == 0)
   assert np.all(ep0["ee_pos"]    == 0)
   assert np.all(ep0["ee_quat"]   == 0)
@@ -299,34 +279,33 @@ def test_import_dataset_zero_fills_missing_signals(tmp_path, fake_repo):
 
 def test_import_dataset_carries_action_state_and_timestamps(tmp_path, fake_repo):
   out = tmp_path / "out"
-  list(li.import_dataset("any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False))
+  list(li.import_dataset(
+    "any/repo", str(out), format="hdf5",
+    with_ee_pos=False, with_object_pose=False))
 
   ep0 = load_hdf5_episode(out / "episode-00000.hdf5")
   ep1 = load_hdf5_episode(out / "episode-00001.hdf5")
 
-  # We wrote action[i, j] = i + 0.1 * j and state[i, j] = i + 0.01 * j.
   np.testing.assert_allclose(
     ep0["joint_action"][0], [0.0, 0.1, 0.2, 0.3, 0.4, 0.5], atol=1e-5)
   np.testing.assert_allclose(
     ep0["joint_qpos"][3],
     [3.0, 3.01, 3.02, 3.03, 3.04, 3.05], atol=1e-5)
-  # Episode 1 starts at row 6 of the parquet.
   np.testing.assert_allclose(
     ep1["joint_action"][0], [6.0, 6.1, 6.2, 6.3, 6.4, 6.5], atol=1e-5)
-  # Timestamps are taken verbatim from the parquet, not re-zeroed per episode.
   np.testing.assert_allclose(ep0["timestamp"], np.arange(6) / FPS, atol=1e-5)
   np.testing.assert_allclose(ep1["timestamp"], np.arange(6, 10) / FPS, atol=1e-5)
 
 
 def test_import_dataset_image_content_per_episode(tmp_path, fake_repo):
   out = tmp_path / "out"
-  list(li.import_dataset("any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False))
+  list(li.import_dataset(
+    "any/repo", str(out), format="hdf5",
+    with_ee_pos=False, with_object_pose=False))
 
   ep0 = load_hdf5_episode(out / "episode-00000.hdf5")
   ep1 = load_hdf5_episode(out / "episode-00001.hdf5")
 
-  # Episode 0 → frames 0..5; episode 1 → frames 6..9. Synth frames have
-  # mean ≈ i*8, drift bounded by chroma subsampling.
   for i in range(6):
     assert abs(float(ep0["image"][i].mean()) - i * 8) < 4, f"ep0 frame {i}"
   for offset, i in enumerate(range(6, 10)):
@@ -336,24 +315,40 @@ def test_import_dataset_image_content_per_episode(tmp_path, fake_repo):
 def test_import_dataset_respects_max_episodes(tmp_path, fake_repo):
   out = tmp_path / "out"
   results = list(li.import_dataset(
-    "any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False, max_episodes=1))
+    "any/repo", str(out), format="hdf5",
+    with_ee_pos=False, with_object_pose=False, max_episodes=1))
 
   assert [idx for idx, _ in results] == [0]
   assert (out / "episode-00000.hdf5").exists()
   assert not (out / "episode-00001.hdf5").exists()
 
 
+def test_import_dataset_respects_source_episode_filter(tmp_path, fake_repo):
+  out = tmp_path / "out"
+  spec = es.EpisodeSpec.parse("any/repo#1")
+  results = list(li.import_dataset(
+    "any/repo", str(out), format="hdf5",
+    with_ee_pos=False, with_object_pose=False, source=spec))
+
+  assert [idx for idx, _ in results] == [1]
+  assert (out / "episode-00001.hdf5").exists()
+  assert not (out / "episode-00000.hdf5").exists()
+
+
 def test_import_dataset_rejects_unknown_video_key(tmp_path, fake_repo):
   out = tmp_path / "out"
-  with pytest.raises(ValueError, match="not in dataset"):
+  with pytest.raises(ValueError, match="not among"):
     list(li.import_dataset(
-      "any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False, video_key="observation.images.nope"))
+      "any/repo", str(out), format="hdf5",
+      with_ee_pos=False, with_object_pose=False,
+      video_key="observation.images.nope"))
 
 
 def test_import_dataset_stamps_tags_on_each_episode(tmp_path, fake_repo):
   out = tmp_path / "out"
   list(li.import_dataset(
-    "any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False, tags=("real", "demo")))
+    "any/repo", str(out), format="hdf5",
+    with_ee_pos=False, with_object_pose=False, tags=("real", "demo")))
 
   for ep_idx in (0, 1):
     ep = Episode.from_file(out / f"episode-{ep_idx:05d}.hdf5")
@@ -362,7 +357,9 @@ def test_import_dataset_stamps_tags_on_each_episode(tmp_path, fake_repo):
 
 def test_import_dataset_no_tags_by_default(tmp_path, fake_repo):
   out = tmp_path / "out"
-  list(li.import_dataset("any/repo", str(out), format="hdf5", with_ee_pos=False, with_object_pose=False))
+  list(li.import_dataset(
+    "any/repo", str(out), format="hdf5",
+    with_ee_pos=False, with_object_pose=False))
   ep = Episode.from_file(out / "episode-00000.hdf5")
   assert "tags" not in ep.metadata
 
@@ -370,6 +367,7 @@ def test_import_dataset_no_tags_by_default(tmp_path, fake_repo):
 def test_import_dataset_rerun_round_trip_carries_tags(tmp_path, fake_repo):
   out = tmp_path / "out"
   list(li.import_dataset(
-    "any/repo", str(out), format="rerun", with_ee_pos=False, with_object_pose=False, tags=("real",)))
+    "any/repo", str(out), format="rerun",
+    with_ee_pos=False, with_object_pose=False, tags=("real",)))
   ep = Episode.from_file(out / "episode-00000.rrd")
   assert ep.metadata.get("tags") == ("real",)
