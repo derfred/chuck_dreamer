@@ -52,12 +52,15 @@ def create_app() -> FastAPI:
     # signature locally — no per-request callback to the backend. The
     # symmetric key is the shared WHEP secret exposed as an `oct` JWK.
     secret = _require_secret()
+    from .token import WHEP_KID
+
     return {
       "keys": [
         {
           "kty": "oct",
           "alg": "HS256",
           "use": "sig",
+          "kid": WHEP_KID,
           "k": _b64url(secret.encode("utf-8")),
         }
       ]

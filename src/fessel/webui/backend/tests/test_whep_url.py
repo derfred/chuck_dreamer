@@ -50,6 +50,17 @@ def test_jwks_exposes_shared_key(client):
   keys = r.json()["keys"]
   assert keys[0]["kty"] == "oct"
   assert keys[0]["alg"] == "HS256"
+  # kid must be present and match the token header so mediamtx can resolve
+  # the key (mediamtx errors "could not find kid in JWT header" otherwise).
+  assert keys[0]["kid"]
+
+
+def test_jwt_header_has_matching_kid(client):
+  r = client.get("/api/auth/whep-url", params={"path": "pi", "mode": "640x480@30@1000000"})
+  token = parse_qs(urlparse(r.json()["url"]).query)["jwt"][0]
+  jwks = client.get("/jwks").json()["keys"][0]
+  header = jwt.get_unverified_header(token)
+  assert header.get("kid") == jwks["kid"]
 
 
 def test_token_rejected_with_wrong_secret(client):
