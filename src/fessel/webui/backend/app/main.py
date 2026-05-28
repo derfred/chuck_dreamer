@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import base64
 import os
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qs, quote, urlencode
 
-from fastapi import FastAPI, HTTPException, Query
+import jwt as pyjwt
+from fastapi import FastAPI, HTTPException, Query, Response
 from fessel_schemas import mode_from_canonical
+from pydantic import BaseModel
 
 from .token import mint_whep_token
 
@@ -35,6 +37,20 @@ def _require_secret() -> str:
   if not secret:
     raise RuntimeError("FESSEL_WHEP_SECRET must be set (shared with mediamtx)")
   return secret
+
+
+class MediamtxAuthRequest(BaseModel):
+  """Body mediamtx POSTs to authHTTPAddress. Fields are all optional so a
+  partial payload (or future field additions) doesn't 422."""
+
+  user: str | None = None
+  password: str | None = None
+  ip: str | None = None
+  action: str | None = None
+  path: str | None = None
+  protocol: str | None = None
+  id: str | None = None
+  query: str | None = None
 
 
 def create_app() -> FastAPI:
@@ -65,6 +81,33 @@ def create_app() -> FastAPI:
         }
       ]
     }
+
+  @app.post("/auth")
+  def mediamtx_auth(req: MediamtxAuthRequest, response: Response):
+    # mediamtx authMethod:http callback. Publish is excluded at mediamtx
+    # (authHTTPExclude), so we only ever see read/playback here — gate those
+    # on a valid WHEP JWT carried in the query (jwt=...). Returns 200 to
+    # allow, 401 to deny (mediamtx treats non-2xx as deny).
+    if req.action in ("api", "metrics", "pprof", "publish"):
+      return {"ok": True}
+    token = None
+    if req.query:
+      vals = parse_qs(req.query).get("jwt")
+      if vals:
+        token = vals[0]
+    if not token:
+      response.status_code = 401
+      return {"error": "JWT not provided"}
+    try:
+      claims = pyjwt.decode(token, _require_secret(), algorithms=["HS256"])
+    except pyjwt.PyJWTError as e:
+      response.status_code = 401
+      return {"error": f"invalid token: {e}"}
+    # Path must match the token's path claim.
+    if req.path and claims.get("path") not in (None, req.path):
+      response.status_code = 403
+      return {"error": "path mismatch"}
+    return {"ok": True}
 
   @app.get("/api/capabilities")
   def capabilities() -> dict:

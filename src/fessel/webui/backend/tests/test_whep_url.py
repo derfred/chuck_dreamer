@@ -63,6 +63,36 @@ def test_jwt_header_has_matching_kid(client):
   assert header.get("kid") == jwks["kid"]
 
 
+def _mint_jwt(client, path="pi", mode="640x480@30@1000000"):
+  r = client.get("/api/auth/whep-url", params={"path": path, "mode": mode})
+  return parse_qs(urlparse(r.json()["url"]).query)["jwt"][0]
+
+
+def test_auth_allows_read_with_valid_jwt(client):
+  tok = _mint_jwt(client)
+  r = client.post("/auth", json={"action": "read", "path": "pi", "protocol": "webrtc", "query": f"mode=640x480@30@1000000&jwt={tok}"})
+  assert r.status_code == 200
+
+
+def test_auth_denies_read_without_jwt(client):
+  r = client.post("/auth", json={"action": "read", "path": "pi", "query": "mode=640x480@30@1000000"})
+  assert r.status_code == 401
+
+
+def test_auth_denies_tampered_jwt(client):
+  tok = _mint_jwt(client)
+  bad = tok[:-3] + ("aaa" if not tok.endswith("aaa") else "bbb")
+  r = client.post("/auth", json={"action": "read", "path": "pi", "query": f"jwt={bad}"})
+  assert r.status_code == 401
+
+
+def test_auth_allows_publish_without_jwt(client):
+  # publish is excluded at mediamtx, but if it ever reaches /auth it must
+  # be allowed (the Pi's trusted SRT ingest carries no token).
+  r = client.post("/auth", json={"action": "publish", "path": "pi", "query": ""})
+  assert r.status_code == 200
+
+
 def test_token_rejected_with_wrong_secret(client):
   r = client.get("/api/auth/whep-url", params={"path": "pi", "mode": "640x480@30@1000000"})
   token = parse_qs(urlparse(r.json()["url"]).query)["jwt"][0]

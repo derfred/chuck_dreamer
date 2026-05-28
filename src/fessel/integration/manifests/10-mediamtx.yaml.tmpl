@@ -28,10 +28,17 @@ data:
     webrtcLocalTCPAddress: :8189
     webrtcICEServers2:
       - url: stun:stun.l.google.com:19302
-    # JWT auth: validate the HS256 token locally against the backend JWKS.
-    authMethod: jwt
-    authJWTJWKS: http://webui:8000/jwks
-    authJWTClaimKey: mediamtx_permissions
+    # HTTP auth: mediamtx calls webui /auth per request. webui validates the
+    # WHEP JWT (jwt= query param) for read; publish (the Pi's trusted SRT
+    # ingest) is excluded so it doesn't need a token. JWT mode can't exclude
+    # publish, hence HTTP auth here.
+    authMethod: http
+    authHTTPAddress: http://webui:8000/auth
+    authHTTPExclude:
+      - action: publish
+      - action: api
+      - action: metrics
+      - action: pprof
     pathDefaults:
       source: publisher
     paths:
