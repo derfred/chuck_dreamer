@@ -76,68 +76,50 @@ def _doctor_import_lerobot(ctx, dataset_id: str, *,
                            episode_config_path: Path | None) -> bool:
   """Check calibration / model files required by import-lerobot.
 
-  Returns True if everything is present, False otherwise. Prints one
-  status line per artifact and, for missing items, the command to
-  produce them.
+  Generic over the enabled stages: it resolves the same stage list the
+  importer would run and prints each stage's :meth:`Stage.requirements`,
+  so adding a stage surfaces its prerequisites here automatically. The
+  ``--episode-config`` / ``T_world_arm`` check is importer-level (not a
+  stage) and is handled separately at the end.
   """
-  from chuck_dreamer.real.object_localization.runtime import init_from_config
-  from chuck_dreamer.real.object_localization.types import dataset_cache_dir
-
   from .pipeline import FK_MODEL_PATH
+  from .stages import (
+    Requirement, StageContext, enabled_from_flags, resolve_stages,
+  )
 
   click.echo(f"Doctor check for import-lerobot {dataset_id}")
   click.echo(f"  with_ee_pos={with_ee_pos}  with_object_pose={with_object_pose}  "
              f"episode_config={'yes' if episode_config_path else 'no'}")
 
   missing: list[str] = []
+  seen: set[Path] = set()
 
-  def check(label: str, path: Path, remediation: str) -> None:
-    if path.exists():
-      click.echo(click.style(f"  OK    ", fg="green") + f"{label}: {path}")
+  def check(req: Requirement) -> None:
+    if req.path in seen:
+      return
+    seen.add(req.path)
+    if req.satisfied():
+      click.echo(click.style("  OK    ", fg="green") + f"{req.label}: {req.path}")
     else:
-      click.echo(click.style(f"  MISS  ", fg="red") + f"{label}: {path}")
-      click.echo(f"        run: {remediation}")
-      missing.append(label)
+      click.echo(click.style("  MISS  ", fg="red") + f"{req.label}: {req.path}")
+      click.echo(f"        run: {req.remediation}")
+      missing.append(req.label)
 
-  if with_ee_pos:
-    check(
-      "FK MuJoCo model", FK_MODEL_PATH,
-      "restore assets/mujoco/so101_arm.xml from git",
-    )
-
-  if with_object_pose:
-    cfg = load_config(ctx.obj["config_path"])
-    ol_cfg = init_from_config(cfg)
-    cache_dir = Path(ol_cfg.calibration_cache)
-    ds_dir = dataset_cache_dir(cache_dir, dataset_id)
-
-    check(
-      "camera intrinsics", ds_dir / "intrinsics.json",
-      f"uv run python main.py calibrate-intrinsics {dataset_id}",
-    )
-    check(
-      "camera extrinsics", ds_dir / "extrinsics.json",
-      f"uv run python main.py annotate-mat {dataset_id}",
-    )
-    check(
-      "frame-0 object prompts", ds_dir / "object_prompts.json",
-      f"uv run python main.py prompt-episodes --dataset {dataset_id}",
-    )
-    check(
-      "object mesh", Path(ol_cfg.mesh_path),
-      f"set object_localization.mesh_path in configs/default.yaml to a valid .obj/.ply",
-    )
+  sctx = StageContext(source_repo=dataset_id)
+  enabled = enabled_from_flags(
+    with_ee_pos=with_ee_pos, with_object_pose=with_object_pose)
+  for stage in resolve_stages(enabled):
+    for req in stage.requirements(sctx):
+      check(req)
 
   if episode_config_path is not None:
-    check(
+    check(Requirement(
       "fk_episode_config.json", episode_config_path,
-      f"create {episode_config_path} listing touch episodes for {dataset_id}",
-    )
-    if not with_ee_pos:
-      check(
-        "FK MuJoCo model", FK_MODEL_PATH,
-        "restore assets/mujoco/so101_arm.xml from git",
-      )
+      f"create {episode_config_path} listing touch episodes for {dataset_id}"))
+    # T_world_arm derivation runs the FK regardless of --with-ee-pos.
+    check(Requirement(
+      "FK MuJoCo model", FK_MODEL_PATH,
+      "restore assets/mujoco/so101_arm.xml from git"))
 
   if missing:
     click.echo(click.style(

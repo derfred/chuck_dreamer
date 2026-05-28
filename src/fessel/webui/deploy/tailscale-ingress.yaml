@@ -1,0 +1,24 @@
+# I1.3 — Tailscale INGRESS Service (Pi -> cluster SRT).
+# The cluster exposes mediamtx's SRT port TO the tailnet so the Pi can push
+# to it. The operator publishes this at <name>.<tailnet>.ts.net; the Pi
+# resolves that magicDNS name and dials <name>:8890. This <name> is the SRT
+# host the video srtsink URI points at (V1.2).
+#
+# Direction matters: this is the EXPOSE annotation, correct ONLY for the
+# ingress (Pi -> cluster) direction. The egress direction uses a different
+# shape (see tailscale-egress.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mediamtx-srt
+  namespace: fessel
+  annotations:
+    tailscale.com/expose: "true"
+    tailscale.com/hostname: mediamtx-srt
+spec:
+  selector:
+    app: mediamtx
+  ports:
+    - port: 8890
+      protocol: UDP
+      targetPort: 8890

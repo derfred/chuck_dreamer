@@ -1,0 +1,12 @@
+# Example supervisor config. Copied to /etc/fessel/supervisor.yaml.
+mqtt:
+  host: 127.0.0.1
+  port: 1883
+
+http:
+  host: 0.0.0.0
+  port: 8443
+  # In production, terminate HTTPS here (reachable from the cluster over
+  # Tailscale). For local dev, leave these unset to serve plain HTTP.
+  # tls_certfile: /etc/fessel/tls/supervisor.crt
+  # tls_keyfile: /etc/fessel/tls/supervisor.key

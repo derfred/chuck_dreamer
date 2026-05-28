@@ -1,0 +1,13 @@
+# Example unit for running the Fessel-internal mosquitto broker. The Pi
+# package may rely on the distro mosquitto package instead; this example
+# documents the expected invocation with the Fessel config.
+[Unit]
+Description=Fessel MQTT broker (Pi-internal)
+After=network.target
+
+[Service]
+ExecStart=/usr/sbin/mosquitto -c /etc/fessel/mosquitto.conf
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
