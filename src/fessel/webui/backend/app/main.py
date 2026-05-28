@@ -96,7 +96,10 @@ def create_app() -> FastAPI:
       mode=mode_triplet,
       ttl_seconds=ttl_s,
     )
-    query = urlencode({"mode": mode, "token": token})
+    # mediamtx (authMethod: jwt) reads the JWT from the `jwt` query
+    # parameter (or an Authorization: Bearer header). `mode` is carried
+    # alongside for the runOnDemand pass-through.
+    query = urlencode({"mode": mode, "jwt": token})
     url = f"{media_base}/{quote(path)}/whep?{query}"
     return {"url": url}
 

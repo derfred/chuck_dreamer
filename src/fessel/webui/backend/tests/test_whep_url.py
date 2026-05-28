@@ -31,7 +31,7 @@ def test_whep_url_mints_valid_token(client):
 
   # The token validates against the shared secret (the HMAC-over-claims
   # contract mediamtx will verify), and carries path + mode + exp.
-  token = q["token"][0]
+  token = q["jwt"][0]
   claims = jwt.decode(token, SECRET, algorithms=["HS256"])
   assert claims["path"] == "pi"
   assert claims["mode"] == "1280x720@30@2500000"
@@ -54,6 +54,6 @@ def test_jwks_exposes_shared_key(client):
 
 def test_token_rejected_with_wrong_secret(client):
   r = client.get("/api/auth/whep-url", params={"path": "pi", "mode": "640x480@30@1000000"})
-  token = parse_qs(urlparse(r.json()["url"]).query)["token"][0]
+  token = parse_qs(urlparse(r.json()["url"]).query)["jwt"][0]
   with pytest.raises(jwt.InvalidSignatureError):
     jwt.decode(token, "wrong", algorithms=["HS256"])
