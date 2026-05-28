@@ -100,6 +100,14 @@ def create_app() -> FastAPI:
     url = f"{media_base}/{quote(path)}/whep?{query}"
     return {"url": url}
 
+  # Serve the built React app at / when present (single-image deploy). The
+  # API routes above are registered first, so they take precedence.
+  static_dir = os.environ.get("FESSEL_STATIC_DIR", "/app/static")
+  if os.path.isdir(static_dir):
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+
   return app
 
 

@@ -92,6 +92,8 @@ warn_unused_configs = true
 mypy_path = "src"
 explicit_package_bases = true
 namespace_packages = true
+# src/fessel is a self-contained sub-project with its own CI/type-checking.
+exclude = '^src/fessel/'
 
 [tool.uv.sources]
 lerobot = { git = "https://github.com/huggingface/lerobot", branch = "main" }

@@ -58,6 +58,10 @@ class VideoApp:
     self._srt_port = srt_cfg.get("port", 8890)
     self._device = cam_cfg.get("device", "/dev/video0")
     self._use_test_source = bool(cam_cfg.get("use_test_source", False))
+    # Test-only seam: x264enc software encoder. Off by default; only the
+    # integration-test container sets this. Production stays fail-loud
+    # hardware-only.
+    self._allow_software_encoder = bool(cam_cfg.get("allow_software_encoder", False))
 
     self._sm = LiveStateMachine(
       pipeline_factory=self._make_pipeline,
@@ -75,6 +79,7 @@ class VideoApp:
       srt_port=self._srt_port,
       device=self._device,
       use_test_source=self._use_test_source,
+      allow_software_encoder=self._allow_software_encoder,
     )
 
   def _publish_live_state(

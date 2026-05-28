@@ -1,6 +1,9 @@
 [flake8]
 max-line-length = 160
 indent-size = 2
+# src/fessel is a self-contained sub-project with its own CI, lint, and
+# dependency manifests; exclude it from the host repo's lint/type checks.
+exclude = .git,__pycache__,.venv,src/fessel
 extend-ignore = E203, W503, E111, E114, E117, E121, E127, E128, E131, E221, E272
 per-file-ignores =
     src/chuck_dreamer/sim/scene_builder.py:E501

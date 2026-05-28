@@ -58,11 +58,32 @@ class Relay:
     )
     self._stop = threading.Event()
     self._hb_thread = threading.Thread(target=self._heartbeat_loop, name="hb", daemon=True)
+    # Cache of the latest retained live state + an ordered history of state
+    # values, so the integration test can assert the off->starting->running
+    # ->off progression via an HTTP read path (no MQTT exposed off-Pi).
+    self._live_state: dict | None = None
+    self._live_history: list[str] = []
+    self._lock = threading.Lock()
 
   def start(self) -> None:
     self._mqtt.connect()
+    self._mqtt.subscribe(topics.STATE_LIVE, self._on_live_state, qos=topics.QOS_STATE)
     self._mqtt.loop_start()
     self._hb_thread.start()
+
+  def _on_live_state(self, _topic: str, payload: dict) -> None:
+    with self._lock:
+      self._live_state = payload
+      state = payload.get("state")
+      if state and (not self._live_history or self._live_history[-1] != state):
+        self._live_history.append(state)
+
+  def live_state(self) -> dict:
+    with self._lock:
+      return {
+        "current": self._live_state,
+        "history": list(self._live_history),
+      }
 
   def stop(self) -> None:
     self._stop.set()
@@ -105,6 +126,12 @@ def create_app(config: dict | None = None) -> FastAPI:
   @app.get("/healthz")
   def healthz() -> dict:
     return {"status": "ok"}
+
+  @app.get("/state/live")
+  def state_live() -> dict:
+    # Observability read path for the integration harness: the cached
+    # retained arm/video/state/live plus the ordered state history.
+    return relay.live_state()
 
   @app.post("/control/live/activate")
   def live_activate(req: ActivateRequest) -> dict:

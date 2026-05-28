@@ -1,7 +1,7 @@
 [Unit]
 Description=Fessel video (GStreamer pipeline + live state machine)
-After=network.target mosquitto.service
-Wants=mosquitto.service
+After=network.target fessel-mosquitto.service
+Wants=fessel-mosquitto.service
 
 [Service]
 Environment=VIDEO_CONFIG=/etc/fessel/video.yaml

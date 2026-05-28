@@ -1,0 +1,10 @@
+# Test-image supervisor config. Plain HTTP (no TLS) on 0.0.0.0:8443 so
+# mediamtx's runOnDemand curl and the test Job can reach it over in-cluster
+# Service DNS (stands in for the Tailscale egress).
+mqtt:
+  host: 127.0.0.1
+  port: 1883
+
+http:
+  host: 0.0.0.0
+  port: 8443

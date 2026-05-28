@@ -1,0 +1,105 @@
+# Slice 1.5 integration test (T1.10). Two jobs:
+#  1) build-and-push (GitHub-hosted): unit-relevant build + 3 images pushed
+#     to ghcr (public), tagged with the run id.
+#  2) integration (self-hosted bugzoo runner, in-cluster): deploy into a
+#     fresh namespace, run the WHEP-client test Job, report JUnit as a
+#     separate check, always tear down the namespace.
+name: fessel-integration
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ["src/fessel/**", ".github/workflows/fessel-integration.yml"]
+
+permissions:
+  contents: read
+  packages: write
+  checks: write
+  pull-requests: write
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  IMAGE_TAG: ${{ github.run_id }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build + push webui
+        uses: docker/build-push-action@v6
+        with:
+          context: src/fessel
+          file: src/fessel/webui/deploy/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/fessel-webui:${{ env.IMAGE_TAG }}
+
+      - name: Build + push test-pi
+        uses: docker/build-push-action@v6
+        with:
+          context: src/fessel
+          file: src/fessel/pi/deploy/test-pi/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/fessel-test-pi:${{ env.IMAGE_TAG }}
+
+      - name: Build + push test-driver
+        uses: docker/build-push-action@v6
+        with:
+          context: src/fessel/integration/driver
+          file: src/fessel/integration/driver/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/fessel-test-driver:${{ env.IMAGE_TAG }}
+
+  integration:
+    needs: build-and-push
+    runs-on: bugzoo
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubectl (no root/apt needed)
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -sSLo "$HOME/bin/kubectl" "https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/kubectl"
+          chmod +x "$HOME/bin/kubectl"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/kubectl" version --client
+
+      - name: Deploy + run integration test (fresh namespace)
+        id: itest
+        env:
+          NS: fessel-it-${{ github.run_id }}
+          FESSEL_WHEP_SECRET: ci-shared-secret-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cd src/fessel
+          chmod +x integration/*.sh
+          NS="$NS" IMAGE_TAG="$IMAGE_TAG" REGISTRY="$REGISTRY" \
+            FESSEL_WHEP_SECRET="$FESSEL_WHEP_SECRET" integration/deploy.sh
+          NS="$NS" IMAGE_TAG="$IMAGE_TAG" REGISTRY="$REGISTRY" \
+            RESULTS_DIR="$GITHUB_WORKSPACE/integration-results" integration/run-test.sh
+
+      - name: Tear down namespace (always)
+        if: always()
+        run: kubectl delete namespace "fessel-it-${{ github.run_id }}" --ignore-not-found --wait=false
+
+      - name: Publish integration JUnit as a separate check
+        if: always()
+        uses: mikepenz/action-junit-report@v4
+        with:
+          report_paths: integration-results/junit.xml
+          check_name: "fessel integration"
+          require_tests: true

@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+# Reload systemd and (re)start units on install/upgrade. In a container
+# without a running systemd, these are no-ops guarded by the check.
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || true
+  systemctl enable fessel-mosquitto.service fessel-supervisor.service fessel-video.service || true
+  systemctl restart fessel-mosquitto.service || true
+  systemctl restart fessel-supervisor.service || true
+  systemctl restart fessel-video.service || true
+fi
+
+exit 0

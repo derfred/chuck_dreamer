@@ -1,0 +1,112 @@
+# mediamtx for the integration test: WHEP + SRT + WebRTC, with the
+# runOnDemand curl targeting the in-cluster supervisor Service (stands in
+# for the Tailscale egress), and JWT auth validated against the webui
+# backend JWKS. WebRTC is reachable in-cluster (the test Job is a cluster
+# pod), so we advertise the pod IP as the ICE host candidate instead of the
+# production NodePort/public-IP set.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mediamtx-config
+data:
+  mediamtx.yml: |
+    logLevel: info
+    logDestinations: [stdout]
+    readTimeout: 10s
+    writeTimeout: 10s
+    rtsp: no
+    rtmp: no
+    hls: no
+    srt: yes
+    webrtc: yes
+    api: yes
+    metrics: yes
+    srtAddress: :8890
+    # ICE host candidate = the pod IP (test client is in-cluster). Injected
+    # via the MTX_WEBRTCADDITIONALHOSTS env from the downward API below.
+    webrtcLocalUDPAddress: :8189
+    webrtcLocalTCPAddress: :8189
+    webrtcICEServers2:
+      - url: stun:stun.l.google.com:19302
+    # JWT auth: validate the HS256 token locally against the backend JWKS.
+    authMethod: jwt
+    authJWTJWKS: http://webui:8000/jwks
+    authJWTClaimKey: mediamtx_permissions
+    pathDefaults:
+      source: publisher
+    paths:
+      pi:
+        source: publisher
+        runOnDemand: >
+          sh -c 'curl -fsS -X POST -H "Content-Type: application/json"
+          --data "{\"path\":\"$MTX_PATH\",\"mode\":\"$(echo \"$MTX_QUERY\" | sed -n \"s/.*mode=\\([^&]*\\).*/\\1/p\")\"}"
+          http://supervisor:8443/control/live/activate'
+        runOnUnDemand: >
+          sh -c 'curl -fsS -X POST -H "Content-Type: application/json"
+          --data "{\"path\":\"$MTX_PATH\"}"
+          http://supervisor:8443/control/live/deactivate'
+        runOnDemandStartTimeout: 15s
+        runOnDemandCloseAfter: 10s
+        runOnDemandRestart: no
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mediamtx
+  labels: { app: mediamtx }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: mediamtx }
+  template:
+    metadata:
+      labels: { app: mediamtx }
+    spec:
+      containers:
+        - name: mediamtx
+          image: bluenviron/mediamtx:1.9.3
+          args: ["/config/mediamtx.yml"]
+          env:
+            # Advertise the pod IP as the WebRTC ICE host candidate.
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: MTX_WEBRTCADDITIONALHOSTS
+              value: "$(POD_IP)"
+          ports:
+            - { name: whep, containerPort: 8889, protocol: TCP }
+            - { name: srt, containerPort: 8890, protocol: UDP }
+            - { name: webrtc-udp, containerPort: 8189, protocol: UDP }
+            - { name: webrtc-tcp, containerPort: 8189, protocol: TCP }
+            - { name: api, containerPort: 9997, protocol: TCP }
+            - { name: metrics, containerPort: 9998, protocol: TCP }
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+          volumeMounts:
+            - { name: config, mountPath: /config }
+      volumes:
+        - name: config
+          configMap: { name: mediamtx-config }
+---
+# WHEP signaling (browser/test-job entry).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mediamtx
+spec:
+  selector: { app: mediamtx }
+  ports:
+    - { name: whep, port: 8889, targetPort: 8889, protocol: TCP }
+    - { name: webrtc-udp, port: 8189, targetPort: 8189, protocol: UDP }
+    - { name: webrtc-tcp, port: 8189, targetPort: 8189, protocol: TCP }
+    - { name: api, port: 9997, targetPort: 9997, protocol: TCP }
+---
+# SRT ingest (video publishes here; stands in for the Tailscale ingress).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mediamtx-srt
+spec:
+  selector: { app: mediamtx }
+  ports:
+    - { name: srt, port: 8890, targetPort: 8890, protocol: UDP }

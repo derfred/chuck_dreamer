@@ -34,6 +34,7 @@ class GstLivePipeline(PipelineHandle):
     srt_port: int,
     device: str,
     use_test_source: bool,
+    allow_software_encoder: bool = False,
   ) -> None:
     self._sm = sm
     launch = build_live_launch(
@@ -43,6 +44,7 @@ class GstLivePipeline(PipelineHandle):
       srt_port=srt_port,
       device=device,
       use_test_source=use_test_source,
+      allow_software_encoder=allow_software_encoder,
     )
     log.info("live launch: %s", launch)
     self._pipeline = build_pipeline(launch)  # fails loud if encoder missing

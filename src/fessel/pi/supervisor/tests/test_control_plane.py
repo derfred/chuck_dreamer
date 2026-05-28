@@ -18,6 +18,9 @@ def make_client(monkeypatch):
     def connect(self):
       pass
 
+    def subscribe(self, topic, handler, qos=0):
+      pass
+
     def loop_start(self):
       pass
 
@@ -68,3 +71,18 @@ def test_deactivate_relays(monkeypatch):
     r = client.post("/control/live/deactivate", json={"path": "pi"})
     assert r.status_code == 200
   assert any(p[0] == "arm/video/cmd/live/deactivate" for p in published)
+
+
+def test_state_live_tracks_history(monkeypatch):
+  client, _ = make_client(monkeypatch)
+  with client:
+    relay = client.app.state.relay
+    # Simulate retained live-state messages arriving from video.
+    for st in ["off", "starting", "running", "starting", "off"]:
+      relay._on_live_state("arm/video/state/live", {"state": st, "path": "pi"})
+    r = client.get("/state/live")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["current"]["state"] == "off"
+    # Consecutive duplicates collapse; transitions preserved in order.
+    assert body["history"] == ["off", "starting", "running", "starting", "off"]
