@@ -24,17 +24,24 @@ echo "== staging package tree at $STAGE =="
 # Build clean venvs against system python3 with --system-site-packages so
 # `video` can bind to the apt-installed gi/GStreamer. supervisor doesn't
 # need gi but a single venv strategy keeps the package simple.
+# Build each venv at its FINAL install path (/opt/fessel/...) so the venv
+# shebangs and pyvenv paths are correct, then copy the tree into the
+# staging dir for packaging. (Building under $STAGE would bake the staging
+# path into the venv and break it after install.)
 for proc in supervisor video; do
-  install -d "$STAGE/opt/fessel/$proc"
-  python3 -m venv --system-site-packages "$STAGE/opt/fessel/$proc/.venv"
-  "$STAGE/opt/fessel/$proc/.venv/bin/pip" install --no-cache-dir -q --upgrade pip
-  "$STAGE/opt/fessel/$proc/.venv/bin/pip" install --no-cache-dir -q \
+  FINAL="/opt/fessel/$proc"
+  rm -rf "$FINAL"
+  install -d "$FINAL"
+  python3 -m venv --system-site-packages "$FINAL/.venv"
+  "$FINAL/.venv/bin/pip" install --no-cache-dir -q --upgrade pip
+  "$FINAL/.venv/bin/pip" install --no-cache-dir -q \
     "$FESSEL_ROOT/schemas" "$FESSEL_ROOT/pi/shared" "$FESSEL_ROOT/pi/$proc"
-  # Ensure a real pydantic lives in the venv (system namespace pkg can shadow).
-  "$STAGE/opt/fessel/$proc/.venv/bin/pip" install --no-cache-dir -q \
+  # Ensure a real pydantic lives in the venv (a system namespace pkg can
+  # shadow the dependency-installed one).
+  "$FINAL/.venv/bin/pip" install --no-cache-dir -q \
     --ignore-installed "pydantic>=2.6" pydantic-core
-  # Rewrite the venv to its installed location so shebangs are correct.
-  python3 -m venv --system-site-packages --upgrade "$STAGE/opt/fessel/$proc/.venv" >/dev/null 2>&1 || true
+  install -d "$STAGE/opt/fessel"
+  cp -a "$FINAL" "$STAGE/opt/fessel/$proc"
 done
 
 # --- systemd units ---

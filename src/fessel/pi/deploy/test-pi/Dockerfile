@@ -1,12 +1,16 @@
 # Test-only Pi image (Slice 1.5, T1.1). Installs the REAL dpkg (built in a
 # first stage) so the integration test exercises the install asset, then
-# adds the synthetic-feed generator and a process-supervisor entrypoint.
+# adds a process-supervisor entrypoint. Camera is video's built-in
+# videotestsrc (no /dev/video0, no v4l2loopback).
+#
+# Debian trixie is used because it ships Python 3.13 (bookworm ships 3.11,
+# but fessel requires >=3.12).
 #
 # Build context is src/fessel/ (so the build can see schemas/, pi/, etc.).
 #   docker build -f pi/deploy/test-pi/Dockerfile -t <tag> .
 
 # ---- stage 1: build the .deb ----
-FROM debian:bookworm AS deb-builder
+FROM debian:trixie AS deb-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-venv python3-pip dpkg-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -16,11 +20,9 @@ RUN chmod +x pi/deploy/dpkg/build-dpkg.sh \
     && pi/deploy/dpkg/build-dpkg.sh 0.1.0
 
 # ---- stage 2: the runtime test-Pi image ----
-FROM debian:bookworm
+FROM debian:trixie
 
-# System deps the dpkg declares + the ones video needs for gi/GStreamer,
-# plus v4l-utils and the loopback userspace. (The v4l2loopback *module* is
-# loaded on the node; the container just opens the device.)
+# System deps the dpkg declares + the ones video needs for gi/GStreamer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-venv python3-gi \
       gir1.2-gst-plugins-bad-1.0 \
