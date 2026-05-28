@@ -205,7 +205,15 @@ def main() -> int:
     channel = os.environ.get("CHROME_CHANNEL", "chrome")
     launch_kwargs = dict(
       headless=False,
-      args=["--no-sandbox", "--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required"],
+      args=[
+        "--no-sandbox",
+        "--use-fake-ui-for-media-stream",
+        "--autoplay-policy=no-user-gesture-required",
+        # Disable mDNS host-candidate obfuscation: by default Chrome hides
+        # local IPs behind <uuid>.local candidates, which mediamtx can't
+        # resolve in-cluster, so ICE never connects. Expose real host IPs.
+        "--disable-features=WebRtcHideLocalIpsWithMdns",
+      ],
     )
     if channel:
       launch_kwargs["channel"] = channel
