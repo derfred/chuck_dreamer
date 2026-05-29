@@ -5,7 +5,9 @@ Wants=fessel-mosquitto.service
 
 [Service]
 Environment=SUPERVISOR_CONFIG=/etc/fessel/supervisor.yaml
-ExecStart=/opt/fessel/supervisor/.venv/bin/supervisor
+# Launcher wrapper (ships in /usr/bin from the dpkg); it prepends
+# /opt/fessel/lib to sys.path and runs supervisor.main:main on system python3.
+ExecStart=/usr/bin/fessel-supervisor
 Restart=on-failure
 RestartSec=2
 

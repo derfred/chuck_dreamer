@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Build the fessel-monitor .deb. Runs inside a Debian container (the host
-# may be macOS without dpkg-deb). Produces dist/fessel-monitor_<ver>_all.deb.
+# Build the fessel-monitor .deb. Runs inside a Debian (trixie) container (the
+# host may be macOS without dpkg-deb). Produces dist/fessel-monitor_<ver>_all.deb.
 #
-# The package installs `supervisor` and `video` as system-site-packages
-# venvs under /opt/fessel, registers the systemd units, declares the
-# GStreamer/PyGObject apt dependencies, and seeds /etc/fessel config as
-# dpkg conffiles (so operator edits survive upgrades — T1.8).
+# The package ships the Fessel Python modules as plain files under
+# /opt/fessel/lib (NO venv, NO pip), relies on Debian python3-* packages for
+# all libraries (declared in control.in Depends), installs two launcher
+# wrappers in /usr/bin, registers the systemd units, and seeds /etc/fessel
+# config as dpkg conffiles (so operator edits survive upgrades).
 #
-# Usage (in a debian:bookworm container with the repo at /src):
+# Usage (in a debian:trixie container with the repo at /src):
 #   pi/deploy/dpkg/build-dpkg.sh <version>
 set -euo pipefail
 
@@ -20,35 +21,32 @@ mkdir -p "$OUT_DIR"
 
 echo "== staging package tree at $STAGE =="
 
-# --- payload: per-process venvs under /opt/fessel ---
-# Build clean venvs against system python3 with --system-site-packages so
-# `video` can bind to the apt-installed gi/GStreamer. supervisor doesn't
-# need gi but a single venv strategy keeps the package simple.
-# Build each venv at its FINAL install path (/opt/fessel/...) so the venv
-# shebangs and pyvenv paths are correct, then copy the tree into the
-# staging dir for packaging. (Building under $STAGE would bake the staging
-# path into the venv and break it after install.)
-for proc in supervisor video; do
-  FINAL="/opt/fessel/$proc"
-  rm -rf "$FINAL"
-  install -d "$FINAL"
-  python3 -m venv --system-site-packages "$FINAL/.venv"
-  "$FINAL/.venv/bin/pip" install --no-cache-dir -q --upgrade pip
-  "$FINAL/.venv/bin/pip" install --no-cache-dir -q \
-    "$FESSEL_ROOT/schemas" "$FESSEL_ROOT/pi/shared" "$FESSEL_ROOT/pi/$proc"
-  # Ensure a real pydantic lives in the venv (a system namespace pkg can
-  # shadow the dependency-installed one).
-  "$FINAL/.venv/bin/pip" install --no-cache-dir -q \
-    --ignore-installed "pydantic>=2.6" pydantic-core
-  install -d "$STAGE/opt/fessel"
-  cp -a "$FINAL" "$STAGE/opt/fessel/$proc"
-done
+# --- payload: pure-Python modules under /opt/fessel/lib (no venv, no pip) ---
+# The four modules are pure Python and import each other by top-level name
+# (fessel_schemas, fessel_shared) + relative imports, so a flat directory on
+# sys.path resolves correctly. /opt/fessel/lib is private (not dist-packages)
+# so generic names `supervisor`/`video` can't collide with other system
+# packages; the /usr/bin wrappers put it on sys.path for our processes only.
+install -d "$STAGE/opt/fessel/lib"
+cp -a "$FESSEL_ROOT/schemas/fessel_schemas"      "$STAGE/opt/fessel/lib/"
+cp -a "$FESSEL_ROOT/pi/shared/fessel_shared"     "$STAGE/opt/fessel/lib/"
+cp -a "$FESSEL_ROOT/pi/supervisor/supervisor"    "$STAGE/opt/fessel/lib/"
+cp -a "$FESSEL_ROOT/pi/video/video"              "$STAGE/opt/fessel/lib/"
+# Don't ship build-host bytecode.
+find "$STAGE/opt/fessel/lib" -type d -name __pycache__ -prune -exec rm -rf {} +
+find "$STAGE/opt/fessel/lib" -type f -name '*.pyc' -delete
 
-# --- systemd units ---
+# --- launcher wrappers in /usr/bin ---
+install -d "$STAGE/usr/bin"
+install -m 755 "$HERE/bin/fessel-supervisor" "$STAGE/usr/bin/fessel-supervisor"
+install -m 755 "$HERE/bin/fessel-video"      "$STAGE/usr/bin/fessel-video"
+
+# --- systemd units (source filenames match the installed fessel-* names;
+# mosquitto ships from the .example which the package treats as the real unit) ---
 install -d "$STAGE/lib/systemd/system"
-install -m 644 "$FESSEL_ROOT/pi/deploy/systemd/supervisor.service" "$STAGE/lib/systemd/system/fessel-supervisor.service"
-install -m 644 "$FESSEL_ROOT/pi/deploy/systemd/video.service" "$STAGE/lib/systemd/system/fessel-video.service"
-install -m 644 "$FESSEL_ROOT/pi/deploy/systemd/mosquitto.service.example" "$STAGE/lib/systemd/system/fessel-mosquitto.service"
+install -m 644 "$FESSEL_ROOT/pi/deploy/systemd/fessel-supervisor.service" "$STAGE/lib/systemd/system/fessel-supervisor.service"
+install -m 644 "$FESSEL_ROOT/pi/deploy/systemd/fessel-video.service" "$STAGE/lib/systemd/system/fessel-video.service"
+install -m 644 "$FESSEL_ROOT/pi/deploy/systemd/fessel-mosquitto.service.example" "$STAGE/lib/systemd/system/fessel-mosquitto.service"
 
 # --- config (conffiles: preserved on upgrade) ---
 install -d "$STAGE/etc/fessel"
