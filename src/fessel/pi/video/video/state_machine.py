@@ -63,6 +63,16 @@ class PipelineHandle:
     """Request graceful teardown (EOS); must eventually emit EXITED."""
     raise NotImplementedError
 
+  def force_idr(self) -> None:  # pragma: no cover - interface
+    """Ask the encoder to emit an IDR keyframe at the next frame (V2.2).
+
+    Called once when the publisher connects, so a WHEP reader that joined
+    during runOnDemand gets a keyframe immediately rather than waiting up
+    to a full GOP. A no-op by default: it is an optional best-effort
+    optimisation, and an encoder that ignores the force-key-unit event
+    simply falls back to the short-GOP + UI-spinner behaviour.
+    """
+
 
 PipelineFactory = Callable[[ModeTriplet, str], PipelineHandle]
 StatePublisher = Callable[[LiveStateValue, str | None, ModeTriplet | None], None]
@@ -176,6 +186,15 @@ class LiveStateMachine:
     if ev.kind is _EventKind.CONNECTED:
       self._connect_deadline = None
       self._backoff = self._backoff_base
+      # Force an IDR now (V2.2): the publisher has just connected, so a WHEP
+      # reader waiting on runOnDemand gets a keyframe immediately instead of
+      # waiting up to a full GOP. Once per connect — not on every reconnect
+      # retry's CONNECTED — and best-effort (no-op if the encoder ignores it).
+      if self._pipeline is not None:
+        try:
+          self._pipeline.force_idr()
+        except Exception:  # noqa: BLE001
+          log.exception("force_idr failed (continuing; short GOP covers it)")
       self._set_state(LiveStateValue.running)
     elif ev.kind is _EventKind.CONNECT_FAILED:
       self._connect_deadline = None

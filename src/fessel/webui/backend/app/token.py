@@ -38,6 +38,7 @@ def mint_whep_token(
   path: str,
   mode: ModeTriplet,
   ttl_seconds: int,
+  operator: str | None = None,
 ) -> str:
   """Sign an HS256 JWT authorising a WHEP read of `path` at `mode`.
 
@@ -45,6 +46,11 @@ def mint_whep_token(
   JWT claim set. mediamtx recomputes/verifies the HMAC against the same
   secret and checks exp; it reads `mode` from the WHEP query parameter and
   the request path from the URL.
+
+  `operator` (the authenticated oauth2-proxy user, Slice 2) is folded in
+  as an audit aid so mint logs can attribute a token to a user. It is NOT
+  part of `mediamtx_permissions`: mediamtx still authorises by path/action,
+  not by user.
   """
   now = int(time.time())
   claims = {
@@ -56,4 +62,6 @@ def mint_whep_token(
     # mediamtx JWT authorization: grant the read (WHEP) action on this path.
     "mediamtx_permissions": [{"action": "read", "path": path}],
   }
+  if operator is not None:
+    claims["operator"] = operator
   return jwt.encode(claims, secret, algorithm="HS256", headers={"kid": WHEP_KID})

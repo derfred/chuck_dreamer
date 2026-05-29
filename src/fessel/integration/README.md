@@ -12,6 +12,7 @@ build+push images (GitHub-hosted) → deploy + test on the self-hosted
 |---|---|
 | `happy_path_activation` | Browser fetches a signed WHEP URL from webui → mediamtx validates the JWT locally against webui's JWKS (no callback) → `runOnDemand` → supervisor (in-cluster DNS) → MQTT → `video` state machine `off→starting→running` → SRT publish to mediamtx (`is publishing … H264`). |
 | `teardown_returns_off` | Disconnect → `runOnDemandCloseAfter` → deactivate → state machine returns to `off`. |
+| `mint_requires_auth` | A WHEP-URL mint **without** the operator identity header is refused (401) — the Slice 2 auth gate. No token is issued, so there is no path to Pi activation. |
 | `token_rejection_no_activation` | A tampered token is rejected at mediamtx/webui **before** any Pi activation (state stays `off`). The core security property. |
 | `rapid_reconnect_no_leak` | N rapid connect/disconnect cycles leave the state machine in `off` with no leaked encoder — the regression the live state machine exists to prevent. |
 
@@ -25,6 +26,17 @@ The two cluster↔Pi legs use in-cluster Service DNS instead of Tailscale:
 - video → mediamtx (SRT publish): `mediamtx-srt:8890` (ingress stand-in)
 
 Both are config-only on the Fessel side, so the same dpkg/images run unmodified.
+
+## Auth substitution (Slice 2)
+
+oauth2-proxy is **not** in the integration loop (Slice 2 §6). The driver
+reaches webui directly via the in-cluster Service — the same network
+position oauth2-proxy forwards from in production. Slice 2 gates the
+WHEP-URL mint on the identity header oauth2-proxy injects, so the driver
+supplies that header itself (`X-Auth-Request-User`, overridable via
+`FESSEL_AUTH_USER_HEADER` / `FESSEL_TEST_OPERATOR`) — a faithful stand-in
+for the proxy. The in-cluster JWT-validation property is what this tier
+covers; a full oauth2-proxy-fronted variant is a later-slice activity.
 
 ## Why there's no automated data-plane (video-bytes) assertion
 

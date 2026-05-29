@@ -32,6 +32,11 @@ log = logging.getLogger(__name__)
 # risk IP fragmentation over cellular paths.
 SRT_PKT_SIZE = 1316
 
+# Element name for the live encoder, so the pipeline handle can look it up to
+# send a force-key-unit (IDR) event on activation (V2.2). Stable name kept in
+# one place so the builder and the handle agree.
+LIVE_ENCODER_NAME = "live_enc"
+
 
 def _resolution_wh(mode: ModeTriplet) -> tuple[int, int]:
   w, h = (int(x) for x in mode.resolution.split("x"))
@@ -61,25 +66,30 @@ def _source_chain(device: str, width: int, height: int, fps: int, use_test_sourc
 
 
 def _encoder_chain(prof: EncoderProfile, mode: ModeTriplet, gop: int) -> str:
-  """H.264 encode parameterised by the mode triplet, per encoder style."""
+  """H.264 encode parameterised by the mode triplet, per encoder style.
+
+  The encoder element is named `LIVE_ENCODER_NAME` so the pipeline handle
+  can resolve it and send a force-key-unit (IDR) event on activation (V2.2).
+  """
+  name = LIVE_ENCODER_NAME
   if prof.bitrate_style is BitrateStyle.EXTRA_CONTROLS:
     # v4l2h264enc: bitrate + GOP via the control string.
     enc = (
-      f'{prof.element} extra-controls="controls,'
+      f'{prof.element} name={name} extra-controls="controls,'
       f"video_bitrate={mode.bitrate_bps},h264_i_frame_period={gop}\""
     )
   elif prof.is_software:
     # x264enc (test-only): bitrate in kbit/s; key-int-max gives the short
     # GOP; zerolatency for low-latency streaming; baseline for broad decode.
     enc = (
-      f"{prof.element} bitrate={mode.bitrate_bps // 1000} "
+      f"{prof.element} name={name} bitrate={mode.bitrate_bps // 1000} "
       f"key-int-max={gop} tune=zerolatency speed-preset=ultrafast"
     )
   else:
     # vtenc_h264 (macOS dev): bitrate is a plain property (bits/s);
     # max-keyframe-interval gives the short GOP.
     enc = (
-      f"{prof.element} bitrate={mode.bitrate_bps // 1000} "
+      f"{prof.element} name={name} bitrate={mode.bitrate_bps // 1000} "
       f"max-keyframe-interval={gop} realtime=true allow-frame-reordering=false"
     )
   return f"{enc} ! {prof.output_caps} ! h264parse config-interval=1"

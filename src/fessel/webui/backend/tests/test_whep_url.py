@@ -1,6 +1,5 @@
-"""Backend WHEP-URL minting tests, incl. the token contract."""
+"""Backend WHEP-URL minting tests, incl. the token contract and auth gating."""
 
-import os
 from urllib.parse import parse_qs, urlparse
 
 import jwt
@@ -8,6 +7,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 SECRET = "test-secret"
+
+# Default oauth2-proxy identity header names (matches app.auth defaults).
+USER_HEADER = "X-Auth-Request-User"
+EMAIL_HEADER = "X-Auth-Request-Email"
+# An authenticated operator, as oauth2-proxy would forward it.
+AUTHED = {USER_HEADER: "octocat", EMAIL_HEADER: "octocat@example.com"}
 
 
 @pytest.fixture()
@@ -21,7 +26,11 @@ def client(monkeypatch):
 
 
 def test_whep_url_mints_valid_token(client):
-  r = client.get("/api/auth/whep-url", params={"path": "pi", "mode": "1280x720@30@2500000"})
+  r = client.get(
+    "/api/auth/whep-url",
+    params={"path": "pi", "mode": "1280x720@30@2500000"},
+    headers=AUTHED,
+  )
   assert r.status_code == 200
   url = r.json()["url"]
   parsed = urlparse(url)
@@ -37,10 +46,33 @@ def test_whep_url_mints_valid_token(client):
   assert claims["mode"] == "1280x720@30@2500000"
   assert "exp" in claims
   assert claims["mediamtx_permissions"] == [{"action": "read", "path": "pi"}]
+  # Operator identity is folded in as an audit aid (B2.2), and must NOT
+  # leak into the mediamtx authorization claim.
+  assert claims["operator"] == "octocat"
+
+
+def test_whep_url_requires_identity(client):
+  # No oauth2-proxy identity headers -> unauthenticated -> 401, no token.
+  r = client.get("/api/auth/whep-url", params={"path": "pi", "mode": "1280x720@30@2500000"})
+  assert r.status_code == 401
+
+
+def test_capabilities_requires_identity(client):
+  assert client.get("/api/capabilities").status_code == 401
+  r = client.get("/api/capabilities", headers=AUTHED)
+  assert r.status_code == 200
+  assert r.json()["modes"]
+
+
+def test_me_returns_identity(client):
+  assert client.get("/api/me").status_code == 401
+  r = client.get("/api/me", headers=AUTHED)
+  assert r.status_code == 200
+  assert r.json() == {"user": "octocat", "email": "octocat@example.com", "groups": []}
 
 
 def test_bad_mode_rejected(client):
-  r = client.get("/api/auth/whep-url", params={"path": "pi", "mode": "nope"})
+  r = client.get("/api/auth/whep-url", params={"path": "pi", "mode": "nope"}, headers=AUTHED)
   assert r.status_code == 400
 
 
@@ -55,8 +87,16 @@ def test_jwks_exposes_shared_key(client):
   assert keys[0]["kid"]
 
 
+def test_jwks_rejects_spoofed_identity_headers(client):
+  # /jwks bypasses oauth2-proxy and is in-cluster only (B2.3). Identity
+  # headers must never arrive here — their presence means a direct caller
+  # is forging an identity, so the request is rejected.
+  r = client.get("/jwks", headers=AUTHED)
+  assert r.status_code == 400
+
+
 def test_jwt_header_has_matching_kid(client):
-  r = client.get("/api/auth/whep-url", params={"path": "pi", "mode": "640x480@30@1000000"})
+  r = client.get("/api/auth/whep-url", params={"path": "pi", "mode": "640x480@30@1000000"}, headers=AUTHED)
   token = parse_qs(urlparse(r.json()["url"]).query)["jwt"][0]
   jwks = client.get("/jwks").json()["keys"][0]
   header = jwt.get_unverified_header(token)
@@ -64,7 +104,7 @@ def test_jwt_header_has_matching_kid(client):
 
 
 def test_token_rejected_with_wrong_secret(client):
-  r = client.get("/api/auth/whep-url", params={"path": "pi", "mode": "640x480@30@1000000"})
+  r = client.get("/api/auth/whep-url", params={"path": "pi", "mode": "640x480@30@1000000"}, headers=AUTHED)
   token = parse_qs(urlparse(r.json()["url"]).query)["jwt"][0]
   with pytest.raises(jwt.InvalidSignatureError):
     jwt.decode(token, "wrong", algorithms=["HS256"])

@@ -6,10 +6,8 @@ correct off/starting/running/stopping flow incl. connect timeout and
 disconnect-with-backoff.
 """
 
-import threading
 import time
 
-import pytest
 from fessel_schemas import LiveStateValue, ModeTriplet
 
 from video.state_machine import LiveStateMachine, PipelineHandle
@@ -21,6 +19,7 @@ class FakePipeline(PipelineHandle):
   def __init__(self, registry: list, sm_box: list) -> None:
     self.started = False
     self.stopped = False
+    self.idr_count = 0
     self._registry = registry
     self._sm_box = sm_box
     registry.append(self)
@@ -32,6 +31,9 @@ class FakePipeline(PipelineHandle):
     self.stopped = True
     # Graceful teardown reports EXITED back to the SM.
     self._sm_box[0].on_exited()
+
+  def force_idr(self) -> None:
+    self.idr_count += 1
 
 
 def make_sm():
@@ -102,6 +104,24 @@ def test_no_overlapping_pipelines_under_rapid_cycles():
   # at most one pipeline is un-stopped at any settle point.
   unstopped = [p for p in live if p.started and not p.stopped]
   assert len(unstopped) <= 1
+  sm.shutdown()
+
+
+def test_force_idr_fired_once_per_connect():
+  # V2.2: IDR is forced exactly once when the publisher connects, and an
+  # idempotent re-activate in running does not re-fire it on the same
+  # pipeline (over-triggering can cause bitrate spikes).
+  sm, live, _ = make_sm()
+  sm.start()
+  sm.request_activate(MODE, "pi")
+  assert wait_until(lambda: sm.state is LiveStateValue.starting)
+  sm.on_connected()
+  assert wait_until(lambda: sm.state is LiveStateValue.running)
+  assert wait_until(lambda: live[0].idr_count == 1)
+  # Idempotent activate while running must not re-force IDR.
+  sm.request_activate(MODE, "pi")
+  time.sleep(0.1)
+  assert live[0].idr_count == 1
   sm.shutdown()
 
 

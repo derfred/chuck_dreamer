@@ -61,7 +61,16 @@ function(cfg)
     metadata: {
       name: 'webui',
       namespace: ns,
-      annotations: { 'cert-manager.io/cluster-issuer': cfg.clusterIssuer },
+      annotations: {
+        'cert-manager.io/cluster-issuer': cfg.clusterIssuer,
+        // Proxy-bypass split (I2.1): /jwks must NEVER be reachable on the
+        // public ingress — an `oct` JWK *is* the signing secret. mediamtx
+        // fetches it via the in-cluster Service (http://webui:8000/jwks),
+        // not this host, so denying it publicly costs nothing. This is the
+        // deployment-level half of the split; the backend's
+        // forbid_identity_headers guard is the in-cluster half.
+        'nginx.ingress.kubernetes.io/server-snippet': 'location = /jwks { return 404; }\n',
+      },
     },
     spec: {
       ingressClassName: cfg.ingressClass,

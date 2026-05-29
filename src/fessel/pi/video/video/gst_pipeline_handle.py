@@ -13,11 +13,12 @@ import threading
 import gi
 
 gi.require_version("Gst", "1.0")
-from gi.repository import GLib, Gst  # noqa: E402
+gi.require_version("GstVideo", "1.0")
+from gi.repository import GLib, Gst, GstVideo  # noqa: E402
 
 from fessel_schemas import ModeTriplet  # noqa: E402
 
-from .pipeline import build_live_launch, build_pipeline  # noqa: E402
+from .pipeline import LIVE_ENCODER_NAME, build_live_launch, build_pipeline  # noqa: E402
 from .state_machine import LiveStateMachine, PipelineHandle  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -64,6 +65,30 @@ class GstLivePipeline(PipelineHandle):
     self._pipeline.send_event(Gst.Event.new_eos())
     # Guard against a pipeline that never delivers EOS (e.g. never linked):
     GLib.timeout_add_seconds(5, self._force_exit)
+
+  def force_idr(self) -> None:
+    # V2.2: ask the encoder to emit an IDR at the next frame. Standard
+    # GStreamer mechanism — a downstream/upstream force-key-unit event on
+    # the encoder's sink pad. Best-effort: an encoder that doesn't honour it
+    # (the open question for v4l2h264enc on the Pi kernel, see
+    # docs/force-idr-spike.md) simply ignores the event, and the short GOP +
+    # WaitingForVideo spinner remain the fallback. Never raises into the
+    # state machine: a missing element or failed send is logged, not fatal.
+    enc = self._pipeline.get_by_name(LIVE_ENCODER_NAME)
+    if enc is None:
+      log.warning("force_idr: encoder %r not found in pipeline", LIVE_ENCODER_NAME)
+      return
+    sink = enc.get_static_pad("sink")
+    if sink is None:
+      log.warning("force_idr: encoder has no sink pad")
+      return
+    # all-headers=True so the keyframe carries SPS/PPS, letting a fresh
+    # reader decode it standalone.
+    event = GstVideo.video_event_new_upstream_force_key_unit(
+      Gst.CLOCK_TIME_NONE, all_headers=True, count=0
+    )
+    if not sink.send_event(event):
+      log.info("force_idr: encoder did not accept force-key-unit (ignored)")
 
   def _force_exit(self) -> bool:
     self._teardown_and_report()

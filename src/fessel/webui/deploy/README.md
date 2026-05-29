@@ -1,0 +1,70 @@
+# webui deployment topology
+
+The cluster-side webui manifests live in the Tanka/jsonnet library under
+`src/fessel/deploy/jsonnet/` (`webui.libsonnet`, `mediamtx.libsonnet`,
+`main.libsonnet`, `config.libsonnet`). This note documents the **auth
+routing topology** so the next person doesn't have to reverse-engineer
+which endpoints are guarded (Slice 2, I2.1).
+
+## Two endpoint classes
+
+The backend's HTTP surface splits into two buckets that the deployment
+routes differently.
+
+### Behind oauth2-proxy (browser, interactive)
+
+- `/` — the React app shell
+- `/live`
+- `/api/me`, `/api/capabilities`, `/api/auth/whep-url` (and the rest of
+  the `/api/...` surface in later slices)
+
+oauth2-proxy runs the GitHub OIDC flow in front of the webui hostname and
+forwards authenticated requests with identity headers
+(`X-Auth-Request-User`, `X-Auth-Request-Email`, optionally
+`X-Auth-Request-Groups`). The backend trusts these headers when present
+and 401s when absent (`require_identity`). **oauth2-proxy itself is out of
+scope for this slice** — it is assumed already deployed and configured to
+guard the webui hostname. The header names are backend config
+(`FESSEL_AUTH_*_HEADER`); they must match what the proxy emits.
+
+### Bypass oauth2-proxy (machine-to-machine)
+
+- `/jwks` — fetched by **mediamtx**, not a browser. A login redirect would
+  break the fetch.
+
+mediamtx fetches the JWK via the **in-cluster Service**
+(`authJWTJWKS: http://webui:8000/jwks` in `mediamtx.libsonnet`), so the
+fetch never traverses the public ingress or oauth2-proxy. It happens once
+at mediamtx startup (refreshed on a long interval); there is no
+per-request callback.
+
+## Enforcement (two layers)
+
+`/jwks` returns an `oct` JWK that **is** the WHEP signing secret. It must
+never be reachable publicly, and a direct in-cluster caller must not be
+able to forge an operator identity against it. Two layers enforce this:
+
+1. **Deployment / ingress (this library).** The public webui Ingress
+   (`webui.libsonnet`, nodeport mode only) carries an nginx
+   `server-snippet` returning 404 for `location = /jwks`. The public host
+   therefore never serves the JWK. mediamtx's in-cluster Service path is
+   unaffected.
+
+2. **Application (`forbid_identity_headers`).** `/jwks` rejects (400) any
+   request carrying identity headers. On the bypass path those headers are
+   anomalous — only oauth2-proxy sets them — so their presence means a
+   direct caller is forging an identity. This is the single-listener model
+   from the Slice 2 plan (B2.1): one backend listener, bypass endpoints
+   reject identity rather than running a second listener on another port.
+
+If a future endpoint becomes supervisor-callable (mediamtx → backend),
+apply the same split: in-cluster Service reachability, deny on the public
+ingress, and `forbid_identity_headers` on the route.
+
+## TLS / ingress
+
+- Public HTTPS ingress exists only in `nodeport` mode (production /
+  live-preview). The `podip` integration env is ClusterIP-only and the
+  test driver reaches services in-cluster, so the split is moot there
+  (no public surface, no proxy).
+- cert-manager issues the webui TLS cert (`cfg.clusterIssuer`).

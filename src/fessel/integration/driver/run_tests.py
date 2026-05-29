@@ -40,6 +40,15 @@ JUNIT_OUT = os.environ.get("JUNIT_OUT", "/results/junit.xml")
 
 RECONNECT_CYCLES = int(os.environ.get("RECONNECT_CYCLES", "50"))
 
+# oauth2-proxy is out of the integration loop (Slice 2 §6): the driver reaches
+# webui directly via the in-cluster Service, which is the same network position
+# oauth2-proxy forwards from. Slice 2 gates the mint on the identity headers the
+# proxy would inject, so the driver supplies them itself — a faithful stand-in
+# for the proxy. Header name + value are overridable to match the backend's
+# FESSEL_AUTH_USER_HEADER config.
+AUTH_USER_HEADER = os.environ.get("FESSEL_AUTH_USER_HEADER", "X-Auth-Request-User")
+AUTH_USER = os.environ.get("FESSEL_TEST_OPERATOR", "integration-driver")
+
 
 # ---------- tiny JUnit emitter ----------
 
@@ -110,8 +119,9 @@ def _xml(s: str) -> str:
 # ---------- helpers ----------
 
 
-def http_get_json(url: str, timeout: float = 5.0) -> dict:
-  with urllib.request.urlopen(url, timeout=timeout) as r:  # noqa: S310
+def http_get_json(url: str, timeout: float = 5.0, headers: dict | None = None) -> dict:
+  req = urllib.request.Request(url, headers=headers or {})  # noqa: S310
+  with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310
     import json
 
     return json.loads(r.read())
@@ -139,7 +149,12 @@ def current_state() -> str | None:
 
 
 def mint_whep_url() -> str:
-  body = http_get_json(f"{WEBUI}/api/auth/whep-url?path={PATH}&mode={MODE}")
+  # Carry the operator identity header oauth2-proxy would inject (Slice 2),
+  # so the gated mint endpoint treats the driver as an authenticated operator.
+  body = http_get_json(
+    f"{WEBUI}/api/auth/whep-url?path={PATH}&mode={MODE}",
+    headers={AUTH_USER_HEADER: AUTH_USER},
+  )
   return body["url"]
 
 
@@ -267,6 +282,17 @@ def main() -> int:
         time.sleep(1)
       raise AssertionError(f"state did not return to off; current={current_state()}")
 
+    # --- Slice 2: mint requires operator identity (no headers -> 401) ---
+    def t_mint_requires_auth():
+      # Without the oauth2-proxy identity header the gated mint must refuse,
+      # so no signed token can be obtained -> no path to Pi activation.
+      try:
+        http_get_json(f"{WEBUI}/api/auth/whep-url?path={PATH}&mode={MODE}")
+      except urllib.error.HTTPError as e:
+        assert e.code == 401, f"expected 401 without identity, got {e.code}"
+        return
+      raise AssertionError("unauthenticated mint unexpectedly succeeded")
+
     # --- T1.6.2 token rejection: no activation ---
     def t_token_rejection():
       assert current_state() in (None, "off")
@@ -303,6 +329,7 @@ def main() -> int:
     # browser. See integration/README.md.
     suite.run("happy_path_activation", t_happy_path)
     suite.run("teardown_returns_off", t_teardown)
+    suite.run("mint_requires_auth", t_mint_requires_auth)
     suite.run("token_rejection_no_activation", t_token_rejection)
     suite.run("rapid_reconnect_no_leak", t_rapid_reconnect)
 
