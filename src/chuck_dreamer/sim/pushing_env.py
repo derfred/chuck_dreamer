@@ -505,6 +505,7 @@ class PushingEnv(gym.Env):
 
   def _setup_seg_ids(self):
     """Resolve the geoms we care about to their IDs, once."""
+    assert self.model is not None, "_setup_seg_ids runs after reset() builds the model"
     # goal_marker may be absent when the scene draws its own goal visual
     # (e.g. the "real" preset's ring of clutter boxes); skip it if missing.
     names = ['target_object_geom']

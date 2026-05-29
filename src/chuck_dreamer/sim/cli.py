@@ -9,6 +9,7 @@ opens the interactive viewer with a scripted or trained policy.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import click
 from omegaconf import OmegaConf
@@ -191,6 +192,7 @@ def show_scene_cmd(ctx, seed, step_delay, policy_type, checkpoint_path,
   scene  = env.generate_scene()
   obs, _ = env.reset(scene=scene)
 
+  policy: ScriptedPolicy | GatedPolicy
   if policy_type == "scripted":
     policy = ScriptedPolicy()
     policy.reset(scene)
@@ -200,6 +202,9 @@ def show_scene_cmd(ctx, seed, step_delay, policy_type, checkpoint_path,
     from chuck_dreamer.eval.checkpoint import load_checkpoint
 
     loaded = load_checkpoint(checkpoint_path)
+    # inner is one of CEMPolicy / CEMProbePolicy / DreamerPolicy depending on
+    # the branch; they share no base class (duck-typed via GatedPolicy).
+    inner: Any
     if policy_type == "cem":
       from chuck_dreamer.dreamer import CEMPolicy
       c = cfg.real.policy.cem

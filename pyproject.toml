@@ -85,6 +85,7 @@ testpaths = ["tests"]
 python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
+check_untyped_defs = true
 mypy_path = "src"
 explicit_package_bases = true
 namespace_packages = true

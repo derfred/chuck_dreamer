@@ -21,7 +21,7 @@ from typing import Any
 import click
 import numpy as np
 
-from ...fk_calibration.fk import FK
+from chuck_dreamer.real.fk_calibration.fk import FK
 
 # Re-exported so callers don't need a second import.
 __all__ = [

@@ -1,5 +1,5 @@
 import os
-from typing import cast
+from typing import Any, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -831,7 +831,8 @@ class DreamerMLXModel:
 
     bad = (not np.isfinite(loss_val)
            or (grad_norm_val is not None and not np.isfinite(grad_norm_val))
-           or any(not np.isfinite(np.asarray(g)).all() for _, g in tree_flatten(grads)))
+           or any(not np.isfinite(np.asarray(g)).all()
+                  for _, g in cast("list[tuple[str, Any]]", tree_flatten(grads))))
     if bad:
       if tracker is not None:
         tracker.log({"wm/skipped": 1.0})
@@ -880,7 +881,8 @@ class DreamerMLXModel:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
     def flat(prefix, tree):
-      return {f"{prefix}.{k}": v for k, v in tree_flatten(tree)}
+      return {f"{prefix}.{k}": v
+              for k, v in cast("list[tuple[str, Any]]", tree_flatten(tree))}
 
     weights: dict = {}
     wm_bundle = self._wm_bundle if self.training else _WMBundle(

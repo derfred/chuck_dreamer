@@ -174,7 +174,7 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
           name_prefix=name_prefix,
         ),
         desc="Episodes",
-        total=len(episode_filter),
+        total=len(episode_filter) if episode_filter is not None else None,
       ):
         count += 1
         logger.info("episode %d → %s", ep_idx, out_path)
