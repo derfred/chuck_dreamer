@@ -9,10 +9,10 @@
 # Build context is src/fessel/ (so the build can see schemas/, pi/, etc.).
 #   docker build -f pi/deploy/test-pi/Dockerfile -t <tag> .
 
-# ---- stage 1: build the .deb ----
+# ---- stage 1: build the .deb (no venv/pip — just dpkg-deb) ----
 FROM debian:trixie AS deb-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-venv python3-pip dpkg-dev ca-certificates \
+      dpkg-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . /src
@@ -22,9 +22,14 @@ RUN chmod +x pi/deploy/dpkg/build-dpkg.sh \
 # ---- stage 2: the runtime test-Pi image ----
 FROM debian:trixie
 
-# System deps the dpkg declares + the ones video needs for gi/GStreamer.
+# The dpkg's Depends pull these, but listing them keeps the image build
+# deterministic. The Python libs (pydantic/fastapi/uvicorn[+extras]/paho/yaml)
+# are now apt packages, not a venv.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-venv python3-gi \
+      python3 python3-gi \
+      python3-pydantic python3-paho-mqtt python3-yaml \
+      python3-fastapi python3-uvicorn python3-uvloop python3-httptools \
+      python3-websockets python3-watchfiles \
       gir1.2-gst-plugins-bad-1.0 \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-tools \

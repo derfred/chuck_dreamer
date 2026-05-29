@@ -109,7 +109,6 @@ def import_dataset(
   *,
   format: str = "hdf5",
   video_key: str | None = None,
-  max_episodes: int | None = None,
   tags: tuple[str, ...] = (),
   with_ee_pos: bool = True,
   with_object_pose: bool = True,
@@ -159,35 +158,20 @@ def import_dataset(
     resolver = _hf_resolver(repo_id)
 
   spec = source if source is not None else EpisodeSpec(dataset_id=repo_id)
-  slices, resolved_video_key = spec.read_episodes(
-    video_key=video_key, root=local_root)
-  if max_episodes is not None:
-    slices = slices[:max_episodes]
+  slices, resolved_video_key = spec.read_episodes(video_key=video_key, root=local_root)
   if not slices:
     raise RuntimeError(f"{repo_id}: no episodes to import")
 
   writer = EpisodeWriter(output_dir, format=format)
 
-  # Cache the parquet + video downloads keyed by (chunk, file) so we don't
-  # re-download or re-read the parquet on every episode.
-  parquet_cache: dict[tuple[int, int], dict] = {}
-  video_cache: dict[tuple[int, int], str] = {}
-
   for sl in slices:
-    pkey = (sl.data_chunk, sl.data_file)
-    if pkey not in parquet_cache:
-      pq_path = resolver(_data_path(*pkey))
-      tbl = pq.read_table(pq_path, columns=[
-        "action", "observation.state", "timestamp",
-        "frame_index", "episode_index",
-      ])
-      parquet_cache[pkey] = tbl.to_pydict()
-    cols = parquet_cache[pkey]
+    pq_path = resolver(_data_path(sl.data_chunk, sl.data_file))
+    cols = pq.read_table(pq_path, columns=[
+      "action", "observation.state", "timestamp",
+      "frame_index", "episode_index",
+    ]).to_pydict()
 
-    vkey = (sl.video_chunk, sl.video_file)
-    if vkey not in video_cache:
-      video_cache[vkey] = resolver(_video_path(resolved_video_key, *vkey))
-    video_local = video_cache[vkey]
+    video_local = resolver(_video_path(resolved_video_key, sl.video_chunk, sl.video_file))
 
     s, e = sl.data_from, sl.data_to
     action = np.asarray(cols["action"][s:e], dtype=np.float32)

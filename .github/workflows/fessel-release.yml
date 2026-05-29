@@ -1,30 +1,51 @@
-# Build the Fessel production deploy artifacts on demand:
-#   - the webui Docker image, pushed to ghcr under a stable tag
-#   - the Pi dpkg (fessel-monitor_*.deb), uploaded as a workflow artifact
+# Build + publish the Fessel production artifacts:
+#   - webui Docker image -> ghcr (cluster pulls it)
+#   - Pi dpkg (fessel-monitor_*.deb) -> added to the SIGNED apt repo on the
+#     gh-pages branch (https://derfred.github.io/chuck_dreamer); the Pi
+#     installs/upgrades via apt. See src/fessel/pi/deploy/apt/README.md.
 #
-# The cluster (bugzoo-infrastructure -> lib/fessel) pulls the webui image by
-# this tag; the dpkg is installed on the real Pi by hand from the artifact.
+# Triggered by a git tag (vX.Y.Z) or manually with an explicit version.
 name: fessel release
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Image tag to publish (e.g. prod, v0.1.0)"
-        default: prod
-      dpkg_version:
-        description: "dpkg version string"
+      version:
+        description: "Package version (dpkg), e.g. 0.2.0"
         default: "0.1.0"
+      tag:
+        description: "webui image tag"
+        default: prod
 
 permissions:
-  contents: read
-  packages: write
+  contents: write   # push to gh-pages
+  packages: write   # push webui image to ghcr
 
 env:
   REGISTRY: ghcr.io/${{ github.repository_owner }}
 
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      image_tag: ${{ steps.v.outputs.image_tag }}
+    steps:
+      - id: v
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            V="${GITHUB_REF_NAME#v}"
+            echo "version=$V" >> "$GITHUB_OUTPUT"
+            echo "image_tag=$V" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "image_tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
   webui-image:
+    needs: setup
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,19 +62,20 @@ jobs:
           file: src/fessel/webui/deploy/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ${{ env.REGISTRY }}/fessel-webui:${{ inputs.tag }}
+          tags: ${{ env.REGISTRY }}/fessel-webui:${{ needs.setup.outputs.image_tag }}
 
   pi-dpkg:
+    needs: setup
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build the Pi dpkg in a Debian container
+      - name: Build the Pi dpkg in a Debian trixie container (no venv)
         run: |
           docker run --rm -v "$PWD/src/fessel:/src" -w /src debian:trixie bash -c '
             set -e
             apt-get update
-            apt-get install -y --no-install-recommends python3 python3-venv python3-pip dpkg-dev ca-certificates
-            pi/deploy/dpkg/build-dpkg.sh "${{ inputs.dpkg_version }}"
+            apt-get install -y --no-install-recommends dpkg-dev ca-certificates
+            pi/deploy/dpkg/build-dpkg.sh "${{ needs.setup.outputs.version }}"
           '
           ls -la src/fessel/dist
       - name: Upload dpkg artifact
@@ -62,3 +84,41 @@ jobs:
           name: fessel-monitor-dpkg
           path: src/fessel/dist/*.deb
           if-no-files-found: error
+
+  publish-apt-repo:
+    needs: [setup, pi-dpkg]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src-repo
+      - name: Checkout gh-pages (the apt repo; preserves prior pool versions)
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+      - name: Download the built .deb
+        uses: actions/download-artifact@v4
+        with:
+          name: fessel-monitor-dpkg
+          path: deb
+      - name: Install apt-utils (apt-ftparchive) + gnupg
+        run: sudo apt-get update && sudo apt-get install -y apt-utils gnupg
+      - name: Import signing key
+        env:
+          KEY: ${{ secrets.FESSEL_APT_GPG_PRIVATE_KEY }}
+        run: echo "$KEY" | gpg --batch --import
+      - name: Build + sign the apt repo into gh-pages
+        run: |
+          chmod +x src-repo/src/fessel/pi/deploy/apt/build-apt-repo.sh
+          src-repo/src/fessel/pi/deploy/apt/build-apt-repo.sh \
+            "$PWD/gh-pages" deb/*.deb
+      - name: Commit + push gh-pages
+        run: |
+          cd gh-pages
+          git config user.name "fessel-ci"
+          git config user.email "fessel-ci@users.noreply.github.com"
+          git add -A
+          git commit -m "apt repo: fessel-monitor ${{ needs.setup.outputs.version }}" || {
+            echo "nothing to commit"; exit 0; }
+          git push

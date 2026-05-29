@@ -78,8 +78,6 @@ def _doctor_import_lerobot(ctx, dataset_id: str, *,
               help="Episode output format (hdf5 or rerun)")
 @click.option("--video-key", default=None, type=str,
               help="Video feature key (e.g. observation.images.wrist). Defaults to the first one.")
-@click.option("--max-episodes", default=None, type=int,
-              help="Cap on number of episodes to convert (default: all)")
 @click.option("--with-ee-pos/--no-ee-pos", default=True,
               help="Convert joint_qpos to radians and run the MuJoCo FK "
                    "(chuck_dreamer.real.fk_calibration.fk) to fill ee_pos "
@@ -113,7 +111,7 @@ def _doctor_import_lerobot(ctx, dataset_id: str, *,
                    "without importing. Prints the exact remediation command "
                    "for each missing artifact.")
 @click.pass_context
-def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key, max_episodes,
+def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
                        with_ee_pos, with_object_pose, tags, name_prefix,
                        episode_config_path, doctor):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
@@ -157,31 +155,32 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key, max_episodes,
       episode_config_path=episode_config_path,
     )
     ctx.exit(0 if ok else 1)
+  else:
 
-  click.echo(
-    f"Importing {parsed_repo_id} → {output}  (format={fmt}, "
-    f"with_ee_pos={with_ee_pos}, with_object_pose={with_object_pose}, "
-    f"tags={list(tags)}, name_prefix={name_prefix!r}, "
-    f"episodes={'all' if episode_filter is None else sorted(episode_filter)}, "
-  )
-  count = 0
-  try:
-    for ep_idx, out_path in tqdm(
-      import_dataset(
-        parsed_repo_id, output,
-        format=fmt, video_key=video_key, max_episodes=max_episodes,
-        tags=tuple(tags),
-        with_ee_pos=with_ee_pos,
-        with_object_pose=with_object_pose,
-        name_prefix=name_prefix,
-        source=spec,
-        arm_calibration=None,
-      ),
-      desc="Episodes",
-      total=(len(episode_filter) if episode_filter is not None else max_episodes),
-    ):
-      count += 1
-      logger.info("episode %d → %s", ep_idx, out_path)
-  except FileNotFoundError as e:
-    raise click.ClickException(str(e))
-  click.echo(f"Done. Wrote {count} episodes.")
+    click.echo(
+      f"Importing {parsed_repo_id} → {output}  (format={fmt}, "
+      f"with_ee_pos={with_ee_pos}, with_object_pose={with_object_pose}, "
+      f"tags={list(tags)}, name_prefix={name_prefix!r}, "
+      f"episodes={'all' if episode_filter is None else sorted(episode_filter)}, "
+    )
+    count = 0
+    try:
+      for ep_idx, out_path in tqdm(
+        import_dataset(
+          parsed_repo_id, output,
+          format=fmt, video_key=video_key,
+          tags=tuple(tags),
+          with_ee_pos=with_ee_pos,
+          with_object_pose=with_object_pose,
+          name_prefix=name_prefix,
+          source=spec,
+          arm_calibration=None,
+        ),
+        desc="Episodes",
+        total=len(episode_filter),
+      ):
+        count += 1
+        logger.info("episode %d → %s", ep_idx, out_path)
+    except FileNotFoundError as e:
+      raise click.ClickException(str(e))
+    click.echo(f"Done. Wrote {count} episodes.")
