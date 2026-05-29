@@ -1,0 +1,24 @@
+Architectures: all
+Codename: stable
+Components: main
+Date: Fri, 29 May 2026 09:16:48 +0000
+Description: Fessel Pi monitoring packages
+Label: Fessel
+Origin: Fessel
+Suite: stable
+MD5Sum:
+ 3c39103d782c6f6b4f819424d3bbffff              177 Release
+ c8c4d3e5377cb3d946403e99462d9701             1256 main/binary-all/Packages
+ 51c00b9fb54097b9f70a898ab8cb2519              778 main/binary-all/Packages.gz
+SHA1:
+ c3bca78adf70f94b286407fd87fc2b8d0191b158              177 Release
+ d2d8f101ddf4e0cfa2dd29378b2dde88b42f41ed             1256 main/binary-all/Packages
+ 9c76e60a18ea6fb09c743b4ff64e223fe843439f              778 main/binary-all/Packages.gz
+SHA256:
+ 0b2bcfa4c8f06652906ebda90d589d8d5226e68d175b0d0d4b76acde6a5fc433              177 Release
+ e5d7913001ea3fdf85087cbe0edd979bddebd930a77eb446124230dc6e631b11             1256 main/binary-all/Packages
+ 817dcb08b9efc7b5976315951c118ca9aa9bb9fa077fab8f0b0f89a067730aae              778 main/binary-all/Packages.gz
+SHA512:
+ 3786f7e9c67c711de3be87e53a127decf67dfb5dbac8e72d7a5e0c50a8473c647644ab53f722af646595c7fcae2ae10be73facaceb30c946c86333f096619d74              177 Release
+ ae9a36f423be60efb893de446b6d0cb75ef8b263dc4112dd8223e4b9d9de29f47baa7d5f0e0441c2aee36c08a62980e2fc9175875d59a7f0f60a6ae90268e3a9             1256 main/binary-all/Packages
+ 7f63292aafe237e07072ab76f51a4cefd95d894e64882e5787835e0b7904c894fddd4e034600d09c1c11b5bee1de2512875c3c3ae0808684ecd515bbee04ea0c              778 main/binary-all/Packages.gz

@@ -1,0 +1,20 @@
+Package: fessel-monitor
+Architecture: all
+Version: 0.2.0
+Priority: optional
+Section: misc
+Maintainer: Fessel <noreply@example.com>
+Depends: python3 (>= 3.11), python3-pydantic, python3-paho-mqtt, python3-yaml, python3-fastapi, python3-uvicorn, python3-uvloop, python3-httptools, python3-websockets, python3-watchfiles, python3-gi, gir1.2-gst-plugins-bad-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-tools, mosquitto, v4l-utils
+Filename: pool/main/f/fessel-monitor/fessel-monitor_0.2.0_all.deb
+Size: 16108
+MD5sum: 0cd22b2742709fee63cda0f4494ace1f
+SHA1: c332aa3bcb766e57538f867c4ae4a2f8887514a9
+SHA256: fa2a73aa6633bc3ef08c629213a088f6e44e6529e1c491027ac84ea2dc561725
+SHA512: bd73ac92deb8da59e61d362a909bf39c4ff5c2c0f1f174a0e630e908fab58fc8a3c9088f6ba19b0af9b31f5cfea3054bb3f8607f218a4a4e41dad5c931086589
+Description: Fessel robot-arm monitoring (Pi side)
+ supervisor (safety/control plane + MQTT relay) and video (GStreamer
+ pipeline + live state machine), shipped as system-integrated Python modules
+ under /opt/fessel/lib relying on Debian python3-* packages (no venv), with
+ launcher wrappers in /usr/bin and their systemd units. Configuration lives
+ in /etc/fessel and is preserved across upgrades.
+
