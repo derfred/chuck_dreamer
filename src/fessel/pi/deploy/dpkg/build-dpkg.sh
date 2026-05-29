@@ -8,13 +8,29 @@
 # wrappers in /usr/bin, registers the systemd units, and seeds /etc/fessel
 # config as dpkg conffiles (so operator edits survive upgrades).
 #
+# The package version is the SINGLE SOURCE OF TRUTH in
+# schemas/pyproject.toml — the same value the webui image tag and the
+# release workflow derive from. Pass an explicit version only to override
+# for a one-off local build; normally omit it and let the pyproject win.
+#
 # Usage (in a debian:trixie container with the repo at /src):
-#   pi/deploy/dpkg/build-dpkg.sh <version>
+#   pi/deploy/dpkg/build-dpkg.sh            # version from schemas/pyproject.toml
+#   pi/deploy/dpkg/build-dpkg.sh <version>  # explicit override
 set -euo pipefail
 
-VERSION="${1:-0.1.0}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FESSEL_ROOT="$(cd "$HERE/../../.." && pwd)"   # src/fessel
+
+# Read the canonical version from schemas/pyproject.toml (first `version = "…"`
+# under [project]). No toml parser needed in the build container — a tight grep.
+pyproject_version() {
+  sed -n 's/^version = "\([^"]*\)".*/\1/p' "$FESSEL_ROOT/schemas/pyproject.toml" | head -n1
+}
+VERSION="${1:-$(pyproject_version)}"
+if [ -z "$VERSION" ]; then
+  echo "could not determine version from schemas/pyproject.toml" >&2
+  exit 1
+fi
 STAGE="$(mktemp -d)"
 OUT_DIR="$FESSEL_ROOT/dist"
 mkdir -p "$OUT_DIR"

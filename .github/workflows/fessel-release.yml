@@ -4,23 +4,21 @@
 #     gh-pages branch (https://derfred.github.io/chuck_dreamer); the Pi
 #     installs/upgrades via apt. See src/fessel/pi/deploy/apt/README.md.
 #
-# Triggered by a git tag (vX.Y.Z) or manually with an explicit version.
+# Triggered by a git tag (vX.Y.Z) or manually.
 #
-# The dpkg version and the webui image tag are ALWAYS the same string, so the
-# Pi package and the cluster image of a release move together. A git tag
-# `vX.Y.Z` sets both to `X.Y.Z`; a manual run sets both to the single `version`
-# input. There is deliberately no separate image-tag knob — decoupling them is
-# how the two halves of a release drift out of sync.
+# The SINGLE SOURCE OF TRUTH for the release version is
+# src/fessel/schemas/pyproject.toml. The dpkg version, the webui image tag,
+# and the runtime /healthz stamp all derive from it, so the Pi package and
+# the cluster image of a release always share one version. To cut a release,
+# bump that pyproject version (and tag `v<version>` to match). There is no
+# separate version input or image-tag knob — decoupling them is how the two
+# halves of a release drift out of sync.
 name: fessel release
 
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Release version (drives BOTH the dpkg version and the webui image tag), e.g. 0.2.0"
-        default: "0.1.0"
+  workflow_dispatch: {}
 
 permissions:
   contents: write   # push to gh-pages
@@ -36,16 +34,25 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       image_tag: ${{ steps.v.outputs.image_tag }}
     steps:
+      - uses: actions/checkout@v4
       - id: v
         run: |
-          # One version string for the whole release. A git tag `vX.Y.Z`
-          # contributes `X.Y.Z`; a manual run uses the `version` input. The
-          # dpkg version and the webui image tag are both set from it, so the
-          # Pi package and the cluster image always share a version.
+          # The version comes from schemas/pyproject.toml (the source of
+          # truth); the dpkg, image tag, and /healthz stamp all derive from it.
+          V="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' \
+            src/fessel/schemas/pyproject.toml | head -n1)"
+          if [ -z "$V" ]; then
+            echo "could not read version from schemas/pyproject.toml" >&2
+            exit 1
+          fi
+          # On a tag push, the tag must match the pyproject version — catches a
+          # tag/source mismatch before publishing artifacts under the wrong tag.
           if [ "${{ github.ref_type }}" = "tag" ]; then
-            V="${GITHUB_REF_NAME#v}"
-          else
-            V="${{ inputs.version }}"
+            TAG_V="${GITHUB_REF_NAME#v}"
+            if [ "$TAG_V" != "$V" ]; then
+              echo "tag $GITHUB_REF_NAME (=$TAG_V) != pyproject version $V" >&2
+              exit 1
+            fi
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "image_tag=$V" >> "$GITHUB_OUTPUT"
