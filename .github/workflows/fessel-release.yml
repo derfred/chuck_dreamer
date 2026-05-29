@@ -5,6 +5,12 @@
 #     installs/upgrades via apt. See src/fessel/pi/deploy/apt/README.md.
 #
 # Triggered by a git tag (vX.Y.Z) or manually with an explicit version.
+#
+# The dpkg version and the webui image tag are ALWAYS the same string, so the
+# Pi package and the cluster image of a release move together. A git tag
+# `vX.Y.Z` sets both to `X.Y.Z`; a manual run sets both to the single `version`
+# input. There is deliberately no separate image-tag knob — decoupling them is
+# how the two halves of a release drift out of sync.
 name: fessel release
 
 on:
@@ -13,11 +19,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Package version (dpkg), e.g. 0.2.0"
+        description: "Release version (drives BOTH the dpkg version and the webui image tag), e.g. 0.2.0"
         default: "0.1.0"
-      tag:
-        description: "webui image tag"
-        default: prod
 
 permissions:
   contents: write   # push to gh-pages
@@ -35,14 +38,17 @@ jobs:
     steps:
       - id: v
         run: |
+          # One version string for the whole release. A git tag `vX.Y.Z`
+          # contributes `X.Y.Z`; a manual run uses the `version` input. The
+          # dpkg version and the webui image tag are both set from it, so the
+          # Pi package and the cluster image always share a version.
           if [ "${{ github.ref_type }}" = "tag" ]; then
             V="${GITHUB_REF_NAME#v}"
-            echo "version=$V" >> "$GITHUB_OUTPUT"
-            echo "image_tag=$V" >> "$GITHUB_OUTPUT"
           else
-            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-            echo "image_tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            V="${{ inputs.version }}"
           fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$V" >> "$GITHUB_OUTPUT"
 
   webui-image:
     needs: setup
@@ -63,6 +69,10 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ env.REGISTRY }}/fessel-webui:${{ needs.setup.outputs.image_tag }}
+          # Stamp the release version into the image (surfaced on /healthz);
+          # same string as the tag and the Pi dpkg version.
+          build-args: |
+            FESSEL_VERSION=${{ needs.setup.outputs.version }}
 
   pi-dpkg:
     needs: setup

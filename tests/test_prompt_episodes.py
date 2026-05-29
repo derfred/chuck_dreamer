@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from chuck_dreamer.real.object_localization.cli.prompt_episodes import (
+from chuck_dreamer.lerobot.object_localization.cli.prompt_episodes import (
   _AugmentRange, _kf_for_len, _parse_keyframes, _resolve_keyframe_offset,
 )
 

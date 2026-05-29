@@ -36,7 +36,7 @@ import os
 from urllib.parse import quote, urlencode
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fessel_schemas import mode_from_canonical
+from fessel_schemas import fessel_version, mode_from_canonical
 
 from .auth import AuthHeaders, Identity
 from .token import WHEP_KID, mint_whep_token
@@ -82,7 +82,10 @@ def create_app() -> FastAPI:
 
   @app.get("/healthz")
   def healthz() -> dict:
-    return {"status": "ok"}
+    # `version` is the release stamp (image tag == dpkg version). A deployed
+    # cluster webui and Pi supervisor should report the same string; a
+    # mismatch means the two halves of a release drifted.
+    return {"status": "ok", "version": fessel_version()}
 
   @app.get("/jwks", dependencies=[Depends(forbid_identity_headers)])
   def jwks() -> dict:

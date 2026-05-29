@@ -24,5 +24,12 @@ RUN pip install --no-cache-dir /app/schemas /app/backend
 COPY --from=frontend /build/webui/frontend/dist /app/static
 ENV FESSEL_STATIC_DIR=/app/static
 
+# Release version stamp. The release workflow passes --build-arg
+# FESSEL_VERSION=<version> (the same string used for the image tag and the Pi
+# dpkg), and the backend surfaces it on /healthz so the running cluster can be
+# checked for drift against the Pi. Defaults to "unknown" for local builds.
+ARG FESSEL_VERSION=unknown
+ENV FESSEL_VERSION=${FESSEL_VERSION}
+
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

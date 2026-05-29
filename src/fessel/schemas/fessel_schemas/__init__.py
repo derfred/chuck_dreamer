@@ -27,6 +27,7 @@ from .models import (
     mode_from_canonical,
     mode_to_canonical,
 )
+from .version import fessel_version
 
 __all__ = [
     "Capabilities",
@@ -35,6 +36,7 @@ __all__ = [
     "LiveState",
     "LiveStateValue",
     "ModeTriplet",
+    "fessel_version",
     "mode_from_canonical",
     "mode_to_canonical",
 ]

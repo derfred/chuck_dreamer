@@ -36,6 +36,14 @@ cp -a "$FESSEL_ROOT/pi/video/video"              "$STAGE/opt/fessel/lib/"
 find "$STAGE/opt/fessel/lib" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$STAGE/opt/fessel/lib" -type f -name '*.pyc' -delete
 
+# --- release version stamp ---
+# fessel_version() reads this at runtime; supervisor/video surface it on
+# /healthz. It is the SAME string as the package version and the webui image
+# tag (one release == one version), so a deployed Pi and cluster can be
+# compared for drift. Not a conffile: it's owned by the package, replaced on
+# every upgrade.
+printf '%s\n' "$VERSION" > "$STAGE/opt/fessel/VERSION"
+
 # --- launcher wrappers in /usr/bin ---
 install -d "$STAGE/usr/bin"
 install -m 755 "$HERE/bin/fessel-supervisor" "$STAGE/usr/bin/fessel-supervisor"

@@ -3,7 +3,7 @@
 
 Pools checkerboard views from any mix of frame sources and fits a single
 ``cv2.calibrateCamera`` model, writing one intrinsics JSON. Unlike the pooled
-LeRobot command in ``chuck_dreamer.real.object_localization.calibration``
+LeRobot command in ``chuck_dreamer.lerobot.object_localization.calibration``
 (worktree ``issue-2-2``), this script is source-agnostic: it does not write
 into per-dataset calibration_cache dirs, and it uses *every* detected view
 (no dedup, no coverage/min-frame gating).
@@ -37,12 +37,12 @@ import numpy as np
 
 from chuck_dreamer.config import load_config
 from chuck_dreamer.common.episode_spec import EpisodeSpec
-from chuck_dreamer.real.object_localization.dataset import episode_bounds, get_frame
-from chuck_dreamer.real.object_localization.runtime import (
+from chuck_dreamer.lerobot.object_localization.dataset import episode_bounds, get_frame
+from chuck_dreamer.lerobot.object_localization.runtime import (
   ObjectLocalizationConfig,
   init_from_config,
 )
-from chuck_dreamer.real.object_localization.types import Intrinsics
+from chuck_dreamer.lerobot.object_localization.types import Intrinsics
 
 
 # ---------------------------------------------------------------------------

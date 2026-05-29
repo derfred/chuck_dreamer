@@ -1,26 +1,31 @@
-"""Stage registry, dependency resolution, and flag → stage-set mapping."""
+"""Stage registry and dependency resolution.
+
+Stages are bound to a :class:`RunContext` at construction, so building the
+registry needs the context. The flag → stage-set mapping lives on
+:class:`Pipeline`.
+"""
 from __future__ import annotations
 
-from .base import Stage
+from .base import RunContext, Stage
 from .ee_pos import EePosStage
 from .object_pose import ObjectPoseStage
 from .segmentation import SegmentationStage
 
 
-def build_registry() -> dict[str, Stage]:
+def build_registry(ctx: RunContext) -> dict[str, Stage]:
   stages: list[Stage] = [
-    EePosStage(),
-    SegmentationStage("object"),
-    ObjectPoseStage(),
+    EePosStage(ctx),
+    SegmentationStage(ctx, "object"),
+    ObjectPoseStage(ctx),
   ]
   return {s.name: s for s in stages}
 
 
-def resolve_stages(enabled: set[str],
+def resolve_stages(enabled: set[str], ctx: RunContext,
                    registry: dict[str, Stage] | None = None) -> list[Stage]:
   """Return ``enabled`` stages plus their transitive ``requires``,
   dependency-ordered. Raises on unknown names or dependency cycles."""
-  registry = registry if registry is not None else build_registry()
+  registry = registry if registry is not None else build_registry(ctx)
   unknown = enabled - registry.keys()
   if unknown:
     raise ValueError(
@@ -50,17 +55,3 @@ def resolve_stages(enabled: set[str],
   for name in enabled:
     visit(name)
   return ordered
-
-
-def enabled_from_flags(*, with_ee_pos: bool, with_object_pose: bool) -> set[str]:
-  """Map the importer's boolean flags onto the enabled stage-name set.
-
-  ``object_pose`` pulls ``segment:object`` transitively via
-  :func:`resolve_stages`, so it need not be listed explicitly here.
-  """
-  enabled: set[str] = set()
-  if with_ee_pos:
-    enabled.add("ee_pos")
-  if with_object_pose:
-    enabled.add("object_pose")
-  return enabled

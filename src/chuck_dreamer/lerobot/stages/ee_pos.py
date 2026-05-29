@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 
 from ...common import FK_MODEL_PATH
-from .base import Requirement, StageContext
+from .base import Requirement, RunContext
 
 # MuJoCo [w, x, y, z] for a 180° rotation about x — gripper z points down.
 _EE_QUAT_DOWN: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 0.0)
@@ -19,12 +19,15 @@ class EePosStage:
   produces: tuple[str, ...] = ("joint_qpos", "ee_pos", "ee_quat", "ee_action")
   requires: tuple[str, ...] = ()
 
-  def requirements(self, ctx: StageContext) -> list[Requirement]:
+  def __init__(self, ctx: RunContext) -> None:
+    self.ctx = ctx
+
+  def requirements(self) -> list[Requirement]:
     return [Requirement(
       "FK MuJoCo model", FK_MODEL_PATH,
       "restore assets/mujoco/so101_arm.xml from git")]
 
-  def apply(self, episode, metadata, ctx) -> None:
+  def apply(self, episode, metadata) -> None:
     qpos = episode.get("joint_qpos")
     if qpos is None or qpos.size == 0:
       return
@@ -34,7 +37,7 @@ class EePosStage:
     rescaled[:, :n] = np.deg2rad(rescaled[:, :n])
     episode["joint_qpos"] = rescaled
 
-    fk = ctx.fk()
+    fk = self.ctx.fk()
     T = rescaled.shape[0]
     ee_pos = np.empty((T, 3), dtype=np.float32)
     for t in range(T):

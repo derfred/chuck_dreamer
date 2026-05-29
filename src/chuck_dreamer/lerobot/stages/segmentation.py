@@ -2,7 +2,7 @@
 
 One :class:`SegmentationStage` instance segments one target (``"object"``
 today; ``"arm"`` etc. in future). Masks are cached on the
-:class:`StageContext` so downstream stages (e.g. object pose) can consume
+:class:`RunContext` so downstream stages (e.g. object pose) can consume
 them; the per-target seg/uv arrays are written onto the episode.
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 
-from .base import Requirement, StageContext, as_uint8_hwc
+from .base import Requirement, RunContext, as_uint8_hwc
 
 # Key names each target writes onto the episode. The object target keeps
 # its historical names so the writers + training code are untouched;
@@ -67,7 +67,7 @@ def _store_masks_and_uv(episode: dict[str, Any],
   episode[uv_key]  = uv_arr
 
 
-def _dump_debug_masks(out_root: Path, source_repo: str, episode_index: int,
+def _dump_debug_masks(out_root: Path, dataset_slug: str, episode_index: int,
                       imgs: list[np.ndarray],
                       masks: list[np.ndarray | None] | None) -> None:
   """Dump per-frame mask overlays for visual inspection.
@@ -87,9 +87,7 @@ def _dump_debug_masks(out_root: Path, source_repo: str, episode_index: int,
     print("[debug-masks] PIL not available; skipping dump")
     return
 
-  from chuck_dreamer.real.object_localization.types import dataset_slug
-
-  ep_dir = out_root / dataset_slug(source_repo) / f"ep{episode_index:03d}"
+  ep_dir = out_root / dataset_slug / f"ep{episode_index:03d}"
   ep_dir.mkdir(parents=True, exist_ok=True)
   n_with_mask = 0
   for t, (img, mask) in enumerate(zip(imgs, masks)):
@@ -119,32 +117,38 @@ class SegmentationStage:
   stages (e.g. pose fitting) and filling the per-target seg/uv arrays."""
   requires: tuple[str, ...] = ()
 
-  def __init__(self, target_name: str = "object") -> None:
+  def __init__(self, ctx: RunContext, target_name: str = "object") -> None:
+    self.ctx = ctx
     self.target_name = target_name
     self.name = f"segment:{target_name}"
     self.produces: tuple[str, ...] = seg_keys(target_name)
 
-  def requirements(self, ctx: StageContext) -> list[Requirement]:
-    from chuck_dreamer.real.object_localization.types import dataset_cache_dir
-    ol_cfg = ctx.ol_cfg()
-    ds_dir = dataset_cache_dir(Path(ol_cfg.calibration_cache), ctx.source_repo)
+  def requirements(self) -> list[Requirement]:
+    ol_cfg = self.ctx.ol_cfg()
+    ds_dir = self.ctx.dataset_cache_dir()
+    ep = self.ctx.episode_index
+
+    def frame0_prompt_present() -> bool:
+      return 0 in self.ctx.keyframe_prompts(ep)
+
     return [
       Requirement(
         "camera intrinsics", ds_dir / "intrinsics.json",
-        f"uv run python main.py calibrate-intrinsics {ctx.source_repo}"),
+        f"uv run python main.py calibrate-intrinsics {self.ctx.source_repo}"),
       Requirement(
         "camera extrinsics", ds_dir / "extrinsics.json",
-        f"uv run python main.py annotate-mat {ctx.source_repo}"),
+        f"uv run python main.py annotate-mat {self.ctx.source_repo}"),
       Requirement(
-        "frame-0 object prompts", ds_dir / "object_prompts.json",
-        f"uv run python main.py prompt-episodes --dataset {ctx.source_repo}"),
+        f"frame-0 object prompt (episode {ep})", ds_dir / "object_prompts.json",
+        f"uv run python main.py prompt-episodes --dataset {self.ctx.source_repo}",
+        check=frame0_prompt_present),
       Requirement(
         "object mesh", Path(ol_cfg.mesh_path),
         "set object_localization.mesh_path in configs/default.yaml "
         "to a valid .obj/.ply"),
     ]
 
-  def apply(self, episode, metadata, ctx) -> None:
+  def apply(self, episode, metadata) -> None:
     images = episode.get("image")
     if images is None or len(images) == 0:
       return
@@ -156,15 +160,10 @@ class SegmentationStage:
       raise RuntimeError("segment: metadata['config']['source_repo'] missing")
 
     imgs = as_uint8_hwc(images)
-    estimator = ctx.estimator()
-    ol_cfg = ctx.ol_cfg()
-    cache_dir = Path(ol_cfg.calibration_cache)
+    estimator = self.ctx.estimator()
     episode_index = int(cfg.get("episode_index", 0))
 
-    from chuck_dreamer.real.object_localization.prompts import (
-      load_keyframe_prompts,
-    )
-    keyframes = load_keyframe_prompts(cache_dir, source_repo, episode_index)
+    keyframes = self.ctx.keyframe_prompts(episode_index)
     if 0 not in keyframes:
       raise FileNotFoundError(
         f"no cached frame-0 prompt for {source_repo} episode {episode_index}. "
@@ -181,7 +180,7 @@ class SegmentationStage:
       keyframe_prompts=keyframes,
       target_name=self.target_name,
     )
-    ctx.masks[self.target_name] = masks
+    self.ctx.masks[self.target_name] = masks
 
     if masks is not None:
       seg_key, uv_key = seg_keys(self.target_name)
@@ -191,4 +190,4 @@ class SegmentationStage:
     debug_dir = os.environ.get("IMPORT_LEROBOT_DEBUG_MASKS")
     if debug_dir:
       _dump_debug_masks(
-        Path(debug_dir), source_repo, episode_index, list(imgs), masks)
+        Path(debug_dir), self.ctx.dataset_slug(), episode_index, list(imgs), masks)

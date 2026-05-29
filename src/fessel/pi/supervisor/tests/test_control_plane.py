@@ -41,7 +41,10 @@ def make_client(monkeypatch):
 def test_healthz(monkeypatch):
   client, _ = make_client(monkeypatch)
   with client:
-    assert client.get("/healthz").json() == {"status": "ok"}
+    body = client.get("/healthz").json()
+    assert body["status"] == "ok"
+    # Release-version stamp (env/file or "unknown" in a source checkout).
+    assert "version" in body
 
 
 def test_activate_relays_to_mqtt(monkeypatch):

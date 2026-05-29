@@ -24,7 +24,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
-from fessel_schemas import LiveActivate, LiveDeactivate, mode_from_canonical
+from fessel_schemas import LiveActivate, LiveDeactivate, fessel_version, mode_from_canonical
 from fessel_shared import MqttClient, load_yaml_config
 from fessel_shared import topics
 from pydantic import BaseModel
@@ -156,7 +156,10 @@ def create_app(config: dict | None = None) -> FastAPI:
 
   @app.get("/healthz")
   def healthz() -> dict:
-    return {"status": "ok"}
+    # `version` is the release stamp (dpkg version == webui image tag),
+    # read from /opt/fessel/VERSION on the Pi. Compare against the cluster
+    # webui's /healthz version to detect a drifted release.
+    return {"status": "ok", "version": fessel_version()}
 
   @app.get("/state/live")
   def state_live() -> dict:

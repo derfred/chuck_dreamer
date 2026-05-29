@@ -12,33 +12,33 @@ import click
 logger = logging.getLogger(__name__)
 
 
-def _doctor_import_lerobot(ctx, dataset_id: str, *,
-                           with_ee_pos: bool, with_object_pose: bool,
-                           episode_config_path: Path | None) -> bool:
+def _doctor_import_lerobot(run, *, episode_config_path: Path | None) -> bool:
   """Check calibration / model files required by import-lerobot.
 
-  Generic over the enabled stages: it resolves the same stage list the
-  importer would run and prints each stage's :meth:`Stage.requirements`,
-  so adding a stage surfaces its prerequisites here automatically. The
-  ``--episode-config`` / ``T_world_arm`` check is importer-level (not a
-  stage) and is handled separately at the end.
+  Drives the same :class:`Run` the importer uses: it iterates each
+  selected episode's :class:`Pipeline` and prints every stage's
+  :meth:`Stage.requirements`, so adding a stage surfaces its prerequisites
+  here automatically. Requirements may be episode-specific (e.g. the
+  frame-0 segmentation prompt), so this iterates *every* selected episode
+  rather than the dataset alone. The ``--episode-config`` / ``T_world_arm``
+  check is importer-level (not a stage) and is handled separately at the end.
   """
   from ..common import FK_MODEL_PATH
-  from .stages import (
-    Requirement, StageContext, enabled_from_flags, resolve_stages,
-  )
+  from .stages import Requirement
 
+  dataset_id = run.spec.dataset_id
   click.echo(f"Doctor check for import-lerobot {dataset_id}")
-  click.echo(f"  with_ee_pos={with_ee_pos}  with_object_pose={with_object_pose}  "
+  click.echo(f"  with_ee_pos={run.with_ee_pos}  with_object_pose={run.with_object_pose}  "
              f"episode_config={'yes' if episode_config_path else 'no'}")
 
   missing: list[str] = []
-  seen: set[Path] = set()
+  seen: set[tuple[str, Path]] = set()
 
   def check(req: Requirement) -> None:
-    if req.path in seen:
+    key = (req.label, req.path)
+    if key in seen:
       return
-    seen.add(req.path)
+    seen.add(key)
     if req.satisfied():
       click.echo(click.style("  OK    ", fg="green") + f"{req.label}: {req.path}")
     else:
@@ -46,12 +46,18 @@ def _doctor_import_lerobot(ctx, dataset_id: str, *,
       click.echo(f"        run: {req.remediation}")
       missing.append(req.label)
 
-  sctx = StageContext(source_repo=dataset_id)
-  enabled = enabled_from_flags(
-    with_ee_pos=with_ee_pos, with_object_pose=with_object_pose)
-  for stage in resolve_stages(enabled):
-    for req in stage.requirements(sctx):
-      check(req)
+  try:
+    slices, _ = run.read_slices()
+  except Exception as e:  # noqa: BLE001 - surface metadata-read failures as doctor output
+    click.echo(click.style(f"  ERROR  could not read episodes: {e}", fg="red"))
+    return False
+  episode_indices = [sl.episode_index for sl in slices]
+  click.echo(f"  episodes: {episode_indices or 'none'}")
+
+  for ep_idx in episode_indices:
+    for stage in run.pipeline(ep_idx):
+      for req in stage.requirements():
+        check(req)
 
   if episode_config_path is not None:
     check(Requirement(
@@ -116,8 +122,8 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
                        episode_config_path, doctor):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
 
-  Pulls the parquet + MP4 from Hugging Face, slices per episode using
-  ``meta/episodes/*.parquet``, decodes the matching video range, and
+  Loads the dataset through ``LeRobotDataset`` (which decodes video frames
+  and exposes every feature per frame), groups frames by episode, and
   writes one episode file per LeRobot episode under --output.
 
   Pipeline stages applied to each imported episode:
@@ -138,27 +144,22 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
 
   from chuck_dreamer.common.episode_spec import EpisodeSpec
   from chuck_dreamer.lerobot.importer import import_dataset
+  from chuck_dreamer.lerobot.stages import Run
 
-  spec = EpisodeSpec.parse(
-    repo_id, allow_frames=False, command="import-lerobot")
-  parsed_repo_id = spec.dataset_id
-  episode_filter = spec.episode_filter  # for display/progress only
+  spec = EpisodeSpec.parse(repo_id, allow_frames=False, command="import-lerobot")
 
   if not doctor and not output:
     raise click.UsageError("--output is required (unless --doctor is passed).")
 
+  run = Run(spec, with_ee_pos=with_ee_pos, with_object_pose=with_object_pose)
+
   if doctor:
-    ok = _doctor_import_lerobot(
-      ctx, parsed_repo_id,
-      with_ee_pos=with_ee_pos,
-      with_object_pose=with_object_pose,
-      episode_config_path=episode_config_path,
-    )
+    ok = _doctor_import_lerobot(run, episode_config_path=episode_config_path)
     ctx.exit(0 if ok else 1)
   else:
-
+    episode_filter = spec.episode_filter
     click.echo(
-      f"Importing {parsed_repo_id} → {output}  (format={fmt}, "
+      f"Importing {spec.dataset_id} → {output}  (format={fmt}, "
       f"with_ee_pos={with_ee_pos}, with_object_pose={with_object_pose}, "
       f"tags={list(tags)}, name_prefix={name_prefix!r}, "
       f"episodes={'all' if episode_filter is None else sorted(episode_filter)}, "
@@ -167,14 +168,10 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
     try:
       for ep_idx, out_path in tqdm(
         import_dataset(
-          parsed_repo_id, output,
+          run, output,
           format=fmt, video_key=video_key,
           tags=tuple(tags),
-          with_ee_pos=with_ee_pos,
-          with_object_pose=with_object_pose,
           name_prefix=name_prefix,
-          source=spec,
-          arm_calibration=None,
         ),
         desc="Episodes",
         total=len(episode_filter),

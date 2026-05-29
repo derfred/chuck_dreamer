@@ -24,7 +24,7 @@ from chuck_dreamer.sim.cli import generate_scenes_cmd, show_scene_cmd
 from chuck_dreamer.lerobot.cli import import_lerobot_cmd
 from chuck_dreamer.training.cli import train_cmd
 from chuck_dreamer.eval.cli import eval_cmd
-from chuck_dreamer.real.object_localization.cli import (
+from chuck_dreamer.lerobot.object_localization.cli import (
   annotate_mat_cmd,
   prompt_episodes_cmd,
 )
