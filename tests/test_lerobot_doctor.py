@@ -12,8 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from chuck_dreamer.lerobot import cli as lcli
 from chuck_dreamer.lerobot.stages import Requirement
 
