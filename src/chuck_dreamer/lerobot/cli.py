@@ -77,6 +77,7 @@ def _doctor_import_lerobot(run: Run, episode_config_path: Path | None) -> bool:
   click.echo(click.style("\nDoctor: all required artifacts present.", fg="green"))
   return True
 
+
 def _import_dataset(
   run: Run,
   output_dir: str,
@@ -104,6 +105,7 @@ def _import_dataset(
   except FileNotFoundError as e:
     raise click.ClickException(str(e))
   return count
+
 
 @click.command("import-lerobot")
 @click.argument("repo_id", type=str, metavar="REPO_ID[#EPISODES]")
