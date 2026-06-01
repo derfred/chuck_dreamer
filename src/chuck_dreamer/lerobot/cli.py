@@ -6,17 +6,19 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-
 import click
+
+from chuck_dreamer.common.episode_spec import EpisodeSpec
+from .pipeline import Run
 
 logger = logging.getLogger(__name__)
 
 
-def _doctor_import_lerobot(run, *, episode_config_path: Path | None) -> bool:
+def _doctor_import_lerobot(run: Run, episode_config_path: Path | None) -> bool:
   """Check calibration / model files required by import-lerobot.
 
   Drives the same :class:`Run` the importer uses: it iterates each
-  selected episode's :class:`Pipeline` and prints every stage's
+  selected episode's stage list and prints every stage's
   :meth:`Stage.requirements`, so adding a stage surfaces its prerequisites
   here automatically. Requirements may be episode-specific (e.g. the
   frame-0 segmentation prompt), so this iterates *every* selected episode
@@ -74,6 +76,34 @@ def _doctor_import_lerobot(run, *, episode_config_path: Path | None) -> bool:
     return False
   click.echo(click.style("\nDoctor: all required artifacts present.", fg="green"))
   return True
+
+def _import_dataset(
+  run: Run,
+  output_dir: str,
+  *,
+  format: str = "hdf5",
+  tags: tuple[str, ...] = (),
+  name_prefix: str | None = None,
+) -> int:
+  """Run the importer over ``run`` with a tqdm progress bar; return the count
+  of episodes written. Surfaces missing-artifact errors as ``ClickException``."""
+  from tqdm import tqdm
+
+  from .importer import import_dataset
+
+  episode_filter = run.spec.episode_filter
+  count = 0
+  try:
+    for ep_idx, out_path in tqdm(
+      import_dataset(run, output_dir, format=format, tags=tags, name_prefix=name_prefix),
+      desc="Episodes",
+      total=len(episode_filter) if episode_filter is not None else None,
+    ):
+      count += 1
+      logger.info("episode %d → %s", ep_idx, out_path)
+  except FileNotFoundError as e:
+    raise click.ClickException(str(e))
+  return count
 
 
 @click.command("import-lerobot")
@@ -140,18 +170,14 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
   syntax is rejected here (frame-range filtering doesn't make sense
   for the importer).
   """
-  from tqdm import tqdm
-
-  from chuck_dreamer.common.episode_spec import EpisodeSpec
-  from chuck_dreamer.lerobot.importer import import_dataset
-  from chuck_dreamer.lerobot.stages import Run
 
   spec = EpisodeSpec.parse(repo_id, allow_frames=False, command="import-lerobot")
 
   if not doctor and not output:
     raise click.UsageError("--output is required (unless --doctor is passed).")
 
-  run = Run(spec, with_ee_pos=with_ee_pos, with_object_pose=with_object_pose)
+  run = Run(spec, with_ee_pos=with_ee_pos, with_object_pose=with_object_pose,
+            video_key=video_key)
 
   if doctor:
     ok = _doctor_import_lerobot(run, episode_config_path=episode_config_path)
@@ -162,22 +188,7 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
       f"Importing {spec.dataset_id} → {output}  (format={fmt}, "
       f"with_ee_pos={with_ee_pos}, with_object_pose={with_object_pose}, "
       f"tags={list(tags)}, name_prefix={name_prefix!r}, "
-      f"episodes={'all' if episode_filter is None else sorted(episode_filter)}, "
+      f"episodes={'all' if episode_filter is None else sorted(episode_filter)})"
     )
-    count = 0
-    try:
-      for ep_idx, out_path in tqdm(
-        import_dataset(
-          run, output,
-          format=fmt, video_key=video_key,
-          tags=tuple(tags),
-          name_prefix=name_prefix,
-        ),
-        desc="Episodes",
-        total=len(episode_filter) if episode_filter is not None else None,
-      ):
-        count += 1
-        logger.info("episode %d → %s", ep_idx, out_path)
-    except FileNotFoundError as e:
-      raise click.ClickException(str(e))
+    count = _import_dataset(run, output, format=fmt, tags=tuple(tags), name_prefix=name_prefix)
     click.echo(f"Done. Wrote {count} episodes.")

@@ -170,7 +170,7 @@ def test_read_episodes_applies_spec_filter(monkeypatch):
 
 
 def _import(out, root, **kw):
-  from chuck_dreamer.lerobot.stages import Run
+  from chuck_dreamer.lerobot.pipeline import Run
   spec = es.EpisodeSpec.parse(str(root), **kw.pop("parse_kw", {}))
   run = Run(spec, with_ee_pos=False, with_object_pose=False)
   return list(li.import_dataset(
@@ -254,7 +254,7 @@ def test_import_dataset_respects_source_episode_filter(tmp_path, fake_repo):
   # sanity: no filter -> both
   assert [idx for idx, _ in results] == [0, 1]
 
-  from chuck_dreamer.lerobot.stages import Run
+  from chuck_dreamer.lerobot.pipeline import Run
   out2 = tmp_path / "out2"
   spec = es.EpisodeSpec.parse(f"{fake_repo}#1", allow_frames=False)
   run = Run(spec, with_ee_pos=False, with_object_pose=False)
@@ -266,14 +266,13 @@ def test_import_dataset_respects_source_episode_filter(tmp_path, fake_repo):
 
 
 def test_import_dataset_rejects_unknown_video_key(tmp_path, fake_repo):
-  from chuck_dreamer.lerobot.stages import Run
+  from chuck_dreamer.lerobot.pipeline import Run
   out = tmp_path / "out"
   spec = es.EpisodeSpec.parse(str(fake_repo))
-  run = Run(spec, with_ee_pos=False, with_object_pose=False)
+  run = Run(spec, with_ee_pos=False, with_object_pose=False,
+            video_key="observation.images.nope")
   with pytest.raises(ValueError, match="not among"):
-    list(li.import_dataset(
-      run, str(out), format="hdf5",
-      video_key="observation.images.nope"))
+    list(li.import_dataset(run, str(out), format="hdf5"))
 
 
 def test_import_dataset_stamps_tags_on_each_episode(tmp_path, fake_repo):

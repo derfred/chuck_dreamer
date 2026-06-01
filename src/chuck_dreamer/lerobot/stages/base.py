@@ -3,15 +3,16 @@
 A :class:`Stage` is bound to a :class:`RunContext` at construction and
 declares ``produces`` (episode/metadata keys it fills), ``requires``
 (names of stages that must run before it), its external
-:class:`Requirement` list, and an :meth:`Stage.apply` transform. A
-:class:`Pipeline` resolves the enabled stages per episode; the importer
+:class:`Requirement` list, and an :meth:`Stage.apply` transform.
+:class:`Run` resolves the enabled stages per episode; the importer
 calls ``stage.apply(episode, metadata)`` over them and ``--doctor``
-iterates the same pipeline printing each stage's
+iterates the same stage list printing each stage's
 :meth:`Stage.requirements`.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -52,20 +53,39 @@ class RunContext:
 
   Stages are bound to a context at construction and read these caches via
   the accessor methods below. The per-episode ``masks`` cache is reset by
-  each :class:`Pipeline` on construction.
+  :class:`Run` each time it builds an episode's stage list.
   """
   source_repo: str
   config_paths: list[str] = field(default_factory=list)
-  # The episode the active pipeline runs on; set by Pipeline on construction
-  # so stages can surface episode-specific requirements.
-  episode_index: int = 0
 
+  _episode_index: int = 0
   _fk: Any | None = None
   _ol_cfg: Any | None = None
   _estimator: Any | None = None
   _smoother: Any | None = None
   # per-episode, keyed by segmentation target name -> [mask | None]
   masks: dict[str, list[Any]] = field(default_factory=dict)
+
+  @property
+  def episode_index(self) -> int:
+    """The episode the current pipeline runs on. Set by ``Run.pipeline`` /
+    :meth:`for_episode`; read by episode-specific stage requirements."""
+    return self._episode_index
+
+  @episode_index.setter
+  def episode_index(self, value: int) -> None:
+    self._episode_index = value
+
+  @contextmanager
+  def for_episode(self, episode_index: int) -> Iterator[None]:
+    """Context manager for one episode's pipeline: sets the episode index and
+    clears the per-episode mask cache."""
+    self._episode_index = episode_index
+    self.masks.clear()
+    try:
+      yield
+    finally:
+      self._episode_index = 0
 
   def fk(self) -> Any:
     if self._fk is None:

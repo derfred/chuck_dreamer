@@ -1,7 +1,7 @@
 """Tests for the composable importer stage system.
 
 Covers the pure-logic surface — dependency resolution / ordering, the
-:class:`Pipeline` flag→stage mapping, and each stage's declared
+:class:`Run` flag→stage mapping, and each stage's declared
 ``produces`` / ``requires`` / ``requirements()`` contract. The stages'
 ``apply()`` bodies need SAM2 / MuJoCo and are not exercised here;
 ``requirements()`` is driven with a :class:`RunContext` whose ``_ol_cfg``
@@ -14,12 +14,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from chuck_dreamer.lerobot.pipeline import Run
 from chuck_dreamer.lerobot.stages import (
   EePosStage,
   ObjectPoseStage,
-  Pipeline,
   Requirement,
-  Run,
   RunContext,
   SegmentationStage,
   build_registry,
@@ -80,9 +79,9 @@ def test_run_pipeline_reuses_context_and_registry_across_episodes():
   run = Run(_FakeSpec(), with_ee_pos=True, with_object_pose=False)
   p0 = run.pipeline(0)
   p1 = run.pipeline(1)
-  assert p0.ctx is p1.ctx is run.ctx
   # Same stage instances (shared registry) are reused, not rebuilt per episode.
-  assert list(p0)[0] is list(p1)[0]
+  assert p0[0] is p1[0]
+  assert p0[0].ctx is run.ctx
 
 
 def test_run_pipeline_sets_episode_index():
@@ -92,41 +91,41 @@ def test_run_pipeline_sets_episode_index():
 
 
 # ---------------------------------------------------------------------------
-# Pipeline — flag→stage mapping + per-episode behaviour
+# Run.pipeline — flag→stage mapping + per-episode behaviour
 # ---------------------------------------------------------------------------
 
 
 def test_pipeline_both_flags():
-  names = [s.name for s in Pipeline(_ctx(), with_ee_pos=True, with_object_pose=True)]
+  names = [s.name for s in Run(_FakeSpec(), with_ee_pos=True, with_object_pose=True).pipeline(0)]
   assert set(names) == {"ee_pos", "segment:object", "object_pose"}
 
 
 def test_pipeline_ee_only():
-  names = [s.name for s in Pipeline(_ctx(), with_ee_pos=True, with_object_pose=False)]
+  names = [s.name for s in Run(_FakeSpec(), with_ee_pos=True, with_object_pose=False).pipeline(0)]
   assert names == ["ee_pos"]
 
 
 def test_pipeline_object_pulls_in_segmentation():
-  names = [s.name for s in Pipeline(_ctx(), with_ee_pos=False, with_object_pose=True)]
+  names = [s.name for s in Run(_FakeSpec(), with_ee_pos=False, with_object_pose=True).pipeline(0)]
   assert "segment:object" in names
   assert names.index("segment:object") < names.index("object_pose")
 
 
 def test_pipeline_no_flags_is_empty():
-  assert list(Pipeline(_ctx(), with_ee_pos=False, with_object_pose=False)) == []
+  assert Run(_FakeSpec(), with_ee_pos=False, with_object_pose=False).pipeline(0) == []
 
 
 def test_pipeline_sets_episode_index_on_context():
-  ctx = _ctx()
-  Pipeline(ctx, 7, with_ee_pos=True, with_object_pose=False)
-  assert ctx.episode_index == 7
+  run = Run(_FakeSpec(), with_ee_pos=True, with_object_pose=False)
+  run.pipeline(7)
+  assert run.ctx.episode_index == 7
 
 
 def test_pipeline_clears_masks_on_construction():
-  ctx = _ctx()
-  ctx.masks["object"] = ["stale"]
-  Pipeline(ctx, 1, with_ee_pos=True, with_object_pose=False)
-  assert ctx.masks == {}
+  run = Run(_FakeSpec(), with_ee_pos=True, with_object_pose=False)
+  run.ctx.masks["object"] = ["stale"]
+  run.pipeline(1)
+  assert run.ctx.masks == {}
 
 
 # ---------------------------------------------------------------------------

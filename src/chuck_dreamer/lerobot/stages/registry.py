@@ -2,7 +2,7 @@
 
 Stages are bound to a :class:`RunContext` at construction, so building the
 registry needs the context. The flag → stage-set mapping lives on
-:class:`Pipeline`.
+:class:`Run`.
 """
 from __future__ import annotations
 
@@ -24,7 +24,10 @@ def build_registry(ctx: RunContext) -> dict[str, Stage]:
 def resolve_stages(enabled: set[str], ctx: RunContext,
                    registry: dict[str, Stage] | None = None) -> list[Stage]:
   """Return ``enabled`` stages plus their transitive ``requires``,
-  dependency-ordered. Raises on unknown names or dependency cycles."""
+  dependency-ordered. Raises on unknown names or dependency cycles.
+
+  ``enabled`` is a set of stage names; the flag→stage-set mapping lives on
+  :class:`Run`. ``registry`` defaults to a fresh :func:`build_registry`."""
   registry = registry if registry is not None else build_registry(ctx)
   unknown = enabled - registry.keys()
   if unknown:
