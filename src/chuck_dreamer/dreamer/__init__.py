@@ -40,10 +40,13 @@ def build_model(config, obs_shape, action_dim: int):
   Backend modules are imported lazily so a CUDA-only machine never needs
   mlx installed (and vice versa).
   """
-  device = config.hardware.device
-  if device == "mlx":
+  if config.hardware.device == "mlx":
     from .mlx_model import DreamerMLXModel
     return DreamerMLXModel(config, obs_shape=obs_shape, action_dim=action_dim)
+  # Resolve "auto" → a concrete torch device (and reject "mlx", already
+  # handled above) through the one shared resolver before dispatching.
+  from ..config import lookup_device
+  device = lookup_device(config, "hardware.device", pytorch_only=True)
   if device in _TORCH_DEVICES or device.startswith("cuda:"):
     from .torch_model import DreamerTorchModel
     return DreamerTorchModel(config, obs_shape=obs_shape, action_dim=action_dim)

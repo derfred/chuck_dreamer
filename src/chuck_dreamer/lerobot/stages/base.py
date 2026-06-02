@@ -47,24 +47,26 @@ class RunContext:
 
   Replaces the module-level ``_ensure_*`` caches that used to live in
   ``pipeline.py``: the FK evaluator, the object-localization runtime
-  config, the per-source-repo estimator + smoother, and the per-episode
-  mask cache (so a pose stage can read the masks a segmentation stage
-  produced) all hang off one object with a lifetime of one import run.
+  config, and the per-episode mask cache (so the object-pose stage can
+  read the masks the segmentation stage produced) all hang off one object
+  with a lifetime of one import run.
 
   Stages are bound to a context at construction and read these caches via
   the accessor methods below. The per-episode ``masks`` cache is reset by
   :class:`Run` each time it builds an episode's stage list.
   """
   source_repo: str
-  config_paths: list[str] = field(default_factory=list)
+  config: Any = None
 
   _episode_index: int = 0
   _fk: Any | None = None
   _ol_cfg: Any | None = None
-  _estimator: Any | None = None
-  _smoother: Any | None = None
   # per-episode, keyed by segmentation target name -> [mask | None]
   masks: dict[str, list[Any]] = field(default_factory=dict)
+  # this run's selected episode slices, keyed by episode_index; populated
+  # by ``Run`` so stages can read an episode's video window / MP4 path
+  # without re-opening ``LeRobotDatasetMetadata``.
+  slices_by_index: dict[int, Any] = field(default_factory=dict)
 
   @property
   def episode_index(self) -> int:
@@ -97,47 +99,20 @@ class RunContext:
       self._fk = FK(FK_MODEL_PATH)
     return self._fk
 
+  @property
   def ol_cfg(self) -> Any:
+    """Parsed ``object_localization`` view of this run's config, cached.
+
+    Validates ``self.config`` once via ``init_from_config`` — no disk
+    reload, the config is handed in at construction."""
     if self._ol_cfg is None:
-      from chuck_dreamer.config import load_config
-      from chuck_dreamer.lerobot.object_localization import (
-        active, init_from_config,
-      )
-      init_from_config(load_config(self.config_paths))
-      self._ol_cfg = active()
+      from chuck_dreamer.lerobot.object_localization import init_from_config
+      self._ol_cfg = init_from_config(self.config)
     return self._ol_cfg
-
-  def estimator(self) -> Any:
-    if self._estimator is None:
-      ol_cfg = self.ol_cfg()
-      cache_dir = Path(ol_cfg.calibration_cache)
-      mesh_path = Path(ol_cfg.mesh_path)
-      from chuck_dreamer.lerobot.object_localization import (
-        ObjectPoseEstimator, load_calibration,
-      )
-      cal = load_calibration(cache_dir, self.source_repo)
-      if not mesh_path.exists():
-        raise FileNotFoundError(
-          f"mesh file not found at {mesh_path}; check "
-          "object_localization.mesh_path in configs/default.yaml.")
-      self._estimator = ObjectPoseEstimator(
-        cal, mesh_path, device=ol_cfg.device,
-        use_sam2=ol_cfg.use_sam2, scene_bg=None,
-      )
-    return self._estimator
-
-  def smoother(self) -> Any:
-    if self._smoother is None:
-      ol_cfg = self.ol_cfg()
-      from chuck_dreamer.lerobot.object_localization.smoother import (
-        SmoothedTrajectoryEstimator,
-      )
-      self._smoother = SmoothedTrajectoryEstimator(ol_cfg.raw.get("smoother") or {})
-    return self._smoother
 
   def cache_dir(self) -> Path:
     """Root calibration-cache directory (``object_localization.calibration_cache``)."""
-    return Path(self.ol_cfg().calibration_cache)
+    return Path(self.ol_cfg.calibration_cache)
 
   def dataset_cache_dir(self) -> Path:
     """This source repo's per-dataset subdirectory under the cache root."""
@@ -157,6 +132,14 @@ class RunContext:
       load_keyframe_prompts,
     )
     return load_keyframe_prompts(self.cache_dir(), self.source_repo, episode_index)
+
+  def slice_for(self, episode_index: int) -> Any:
+    """This run's :class:`EpisodeSlice` for one episode (its video window,
+    MP4 path and chunk/file coordinates), populated by :class:`Run`.
+
+    Raises ``KeyError`` if the episode isn't among the run's selected
+    slices — a stage should only ever ask for the episode it's running on."""
+    return self.slices_by_index[episode_index]
 
 
 @runtime_checkable

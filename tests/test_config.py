@@ -1,13 +1,16 @@
 """Tests for :mod:`chuck_dreamer.config` — primarily ``warmup_source``
-normalization, alias merging, and override precedence."""
+normalization, alias merging, override precedence, and ``lookup_device``."""
 
 from __future__ import annotations
 
+import builtins
+import os
 from pathlib import Path
 
+import pytest
 from omegaconf import OmegaConf
 
-from chuck_dreamer.config import load_config
+from chuck_dreamer.config import load_config, lookup_device
 
 
 def _write_cfg(tmp_path: Path, overrides: dict) -> Path:
@@ -145,3 +148,140 @@ def test_seed_randomized_when_unset(tmp_path):
   cfg = load_config(str(cfg_path))
   assert isinstance(int(cfg.seed), int)
   assert int(cfg.seed) >= 0
+
+
+# ---------------------------------------------------------------------------
+# lookup_device
+# ---------------------------------------------------------------------------
+
+
+def _mock_backends(monkeypatch, *, mlx: bool, cuda: bool, mps: bool) -> None:
+  """Pin every backend-availability probe so ``"auto"`` resolution is
+  deterministic regardless of the host the tests run on (this dev box has
+  mlx + mps; CI may have cuda or none)."""
+  import chuck_dreamer.config as config_mod
+  import torch
+
+  monkeypatch.setattr(config_mod, "_mlx_available", lambda: mlx)
+  monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+  # ``torch.backends.mps`` may be absent on some builds; the resolver
+  # guards with getattr, so only patch is_available when it exists.
+  if getattr(torch.backends, "mps", None) is not None:
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
+
+
+def _mock_backends_no_mlx_no_torch(monkeypatch) -> None:
+  """Simulate a host with no mlx and no importable torch: mlx probe is
+  False and ``import torch`` inside the resolver raises ImportError."""
+  import chuck_dreamer.config as config_mod
+
+  monkeypatch.setattr(config_mod, "_mlx_available", lambda: False)
+  real_import = builtins.__import__
+
+  def no_torch(name, *args, **kwargs):
+    if name == "torch":
+      raise ImportError("torch not installed")
+    return real_import(name, *args, **kwargs)
+
+  monkeypatch.setattr(builtins, "__import__", no_torch)
+
+
+@pytest.mark.parametrize("value", ["cuda", "cuda:1", "mps", "cpu"])
+def test_lookup_device_explicit_value_passes_through(value):
+  cfg = OmegaConf.create({"hardware": {"device": value}})
+  # An explicit device is returned verbatim — no discovery, even if the
+  # host has a "better" backend available.
+  assert lookup_device(cfg, "hardware.device") == value
+
+
+def test_lookup_device_lowercases():
+  cfg = OmegaConf.create({"hardware": {"device": "CUDA:1"}})
+  assert lookup_device(cfg, "hardware.device") == "cuda:1"
+
+
+def test_lookup_device_reads_the_named_dotted_path():
+  # Two device fields live in one config; the path picks which one.
+  cfg = OmegaConf.create({
+    "hardware": {"device": "cpu"},
+    "object_localization": {"device": "cuda:0"},
+  })
+  assert lookup_device(cfg, "hardware.device") == "cpu"
+  assert lookup_device(cfg, "object_localization.device") == "cuda:0"
+
+
+def test_lookup_device_auto_prefers_mlx_when_present(monkeypatch):
+  # mlx wins discovery whenever importable, even with cuda + mps available.
+  _mock_backends(monkeypatch, mlx=True, cuda=True, mps=True)
+  cfg = OmegaConf.create({"hardware": {"device": "auto"}})
+  assert lookup_device(cfg, "hardware.device") == "mlx"
+
+
+def test_lookup_device_auto_skips_mlx_under_pytorch_only(monkeypatch):
+  # A torch-only call site must never get "mlx" from discovery, even when
+  # mlx is importable — it falls through to the torch backends.
+  _mock_backends(monkeypatch, mlx=True, cuda=True, mps=True)
+  cfg = OmegaConf.create({"hardware": {"device": "auto"}})
+  assert lookup_device(cfg, "hardware.device", pytorch_only=True) == "cuda"
+
+
+def test_lookup_device_auto_prefers_cuda_when_no_mlx(monkeypatch):
+  _mock_backends(monkeypatch, mlx=False, cuda=True, mps=True)
+  cfg = OmegaConf.create({"hardware": {"device": "auto"}})
+  assert lookup_device(cfg, "hardware.device") == "cuda"
+
+
+def test_lookup_device_auto_picks_mps_and_sets_fallback_env(monkeypatch):
+  import torch
+  if getattr(torch.backends, "mps", None) is None:
+    pytest.skip("torch build has no mps backend to probe")
+  _mock_backends(monkeypatch, mlx=False, cuda=False, mps=True)
+  monkeypatch.delenv("PYTORCH_ENABLE_MPS_FALLBACK", raising=False)
+  cfg = OmegaConf.create({"hardware": {"device": "auto"}})
+  assert lookup_device(cfg, "hardware.device") == "mps"
+  # mps lacks some kernels; the resolver opts into CPU fallback so those
+  # ops don't hard-error mid-run.
+  assert os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] == "1"
+
+
+def test_lookup_device_auto_falls_back_to_cpu(monkeypatch):
+  _mock_backends(monkeypatch, mlx=False, cuda=False, mps=False)
+  cfg = OmegaConf.create({"hardware": {"device": "auto"}})
+  assert lookup_device(cfg, "hardware.device") == "cpu"
+
+
+def test_lookup_device_missing_key_resolves_like_auto(monkeypatch):
+  _mock_backends(monkeypatch, mlx=False, cuda=True, mps=False)
+  cfg = OmegaConf.create({"hardware": {}})
+  # No device key at all → discovery, same as "auto".
+  assert lookup_device(cfg, "hardware.device") == "cuda"
+
+
+def test_lookup_device_none_resolves_like_auto(monkeypatch):
+  _mock_backends(monkeypatch, mlx=False, cuda=True, mps=False)
+  cfg = OmegaConf.create({"hardware": {"device": None}})
+  assert lookup_device(cfg, "hardware.device") == "cuda"
+
+
+def test_lookup_device_auto_without_any_backend_is_cpu(monkeypatch):
+  # No mlx and torch unimportable → "auto" degrades to cpu rather than
+  # raising.
+  _mock_backends_no_mlx_no_torch(monkeypatch)
+  cfg = OmegaConf.create({"hardware": {"device": "auto"}})
+  assert lookup_device(cfg, "hardware.device") == "cpu"
+
+
+def test_lookup_device_mlx_passes_through_by_default():
+  cfg = OmegaConf.create({"hardware": {"device": "mlx"}})
+  assert lookup_device(cfg, "hardware.device") == "mlx"
+
+
+def test_lookup_device_pytorch_only_rejects_mlx():
+  cfg = OmegaConf.create({"hardware": {"device": "mlx"}})
+  with pytest.raises(ValueError, match="mlx"):
+    lookup_device(cfg, "hardware.device", pytorch_only=True)
+
+
+def test_lookup_device_pytorch_only_allows_non_mlx():
+  # pytorch_only only gates "mlx"; everything else behaves as normal.
+  cfg = OmegaConf.create({"hardware": {"device": "cuda:1"}})
+  assert lookup_device(cfg, "hardware.device", pytorch_only=True) == "cuda:1"

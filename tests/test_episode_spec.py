@@ -75,6 +75,62 @@ def test_parse_top_level_colon_is_episodes_frames_split_not_episode_stride():
 
 
 # ---------------------------------------------------------------------------
+# parse — open-ended episode ranges (N- and -M)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_open_upper_episode_range_defers_finite_list():
+  # ``8-`` can't be expanded without the dataset, so it lands in
+  # ``episode_open_from`` and leaves the finite list empty (but non-None).
+  spec = EpisodeSpec.parse("user/ds#8-")
+  assert spec.episodes == []
+  assert spec.episode_open_from == 8
+
+
+def test_parse_open_lower_episode_range_is_finite_from_zero():
+  # ``-3`` is just ``0-3`` and expands immediately; no open bound.
+  spec = EpisodeSpec.parse("user/ds#-3")
+  assert spec.episodes == [0, 1, 2, 3]
+  assert spec.episode_open_from is None
+
+
+def test_parse_mixes_finite_picks_with_open_upper():
+  spec = EpisodeSpec.parse("user/ds#0,2,9-")
+  assert spec.episodes == [0, 2]
+  assert spec.episode_open_from == 9
+
+
+def test_parse_open_upper_takes_smallest_n_across_tokens():
+  spec = EpisodeSpec.parse("user/ds#12-,5-")
+  assert spec.episode_open_from == 5
+
+
+def test_open_upper_episode_filter_is_none_unknown_until_resolved():
+  # The selected set can't be known without reading the dataset, so the
+  # filter reports None (callers use it only for a progress total).
+  assert EpisodeSpec.parse("user/ds#8-").episode_filter is None
+
+
+def test_select_open_upper_keeps_every_available_index_at_or_above_n():
+  spec = EpisodeSpec.parse("user/ds#8-")
+  kept = spec._select_episodes(_slices([5, 6, 7, 8, 9, 10]))
+  assert [s.episode_index for s in kept] == [8, 9, 10]
+
+
+def test_select_open_upper_unioned_with_finite_picks():
+  spec = EpisodeSpec.parse("user/ds#0,2,9-")
+  kept = spec._select_episodes(_slices([0, 1, 2, 3, 9, 10, 11]))
+  assert [s.episode_index for s in kept] == [0, 2, 9, 10, 11]
+
+
+def test_parse_open_upper_rejects_stride():
+  # A stride needs a closed upper bound to count toward. (Reachable only
+  # in the frames slot, since the first ':' splits episodes from frames.)
+  with pytest.raises(click.ClickException):
+    EpisodeSpec.parse("user/ds#1:5-:2")
+
+
+# ---------------------------------------------------------------------------
 # parse — frames portion
 # ---------------------------------------------------------------------------
 
@@ -89,6 +145,18 @@ def test_parse_frames_with_all_episodes():
   spec = EpisodeSpec.parse("user/ds#all:0-2")
   assert spec.episodes is None
   assert spec.frames == [0, 1, 2]
+
+
+def test_parse_open_lower_frames_is_finite_from_zero():
+  spec = EpisodeSpec.parse("user/ds#1:-2")
+  assert spec.frames == [0, 1, 2]
+  assert spec.frame_open_from is None
+
+
+def test_parse_open_upper_frames_records_open_from():
+  spec = EpisodeSpec.parse("user/ds#1:100-")
+  assert spec.frames == []
+  assert spec.frame_open_from == 100
 
 
 def test_parse_rejects_frames_when_not_allowed():
@@ -116,10 +184,11 @@ def test_parse_episode_only_is_fine_when_frames_disallowed():
 @pytest.mark.parametrize("raw", [
   "",                    # empty
   "#0",                  # empty dataset id before '#'
-  "user/ds#-1",          # negative episode
   "user/ds#5-2",         # reversed range
   "user/ds#abc",         # non-integer token
   "user/ds#0:1:2:3",     # stride on a singleton (1:2 then :3 invalid)
+  "user/ds#-",           # open range with neither bound
+  "user/ds#-x",          # open-lower with a non-integer bound
 ])
 def test_parse_malformed_raises_clickexception(raw):
   with pytest.raises(click.ClickException):

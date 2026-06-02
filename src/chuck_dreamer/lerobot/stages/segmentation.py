@@ -1,193 +1,216 @@
-"""SAM2 segmentation stage family, parameterised by target.
+"""SAM2 segmentation stage for the tracked object.
 
-One :class:`SegmentationStage` instance segments one target (``"object"``
-today; ``"arm"`` etc. in future). Masks are cached on the
-:class:`RunContext` so downstream stages (e.g. object pose) can consume
-them; the per-target seg/uv arrays are written onto the episode.
+:class:`SegmentationStage` segments the object across an episode's video.
+Masks are cached on the :class:`RunContext` so downstream stages (e.g.
+object pose) can consume them; the ``segmentation_target`` / ``object_uv``
+arrays are written onto the episode.
 """
 from __future__ import annotations
 
-import os
+from contextlib import contextmanager
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Any
 
+from chuck_dreamer.config import lookup_device
 import numpy as np
 
-from .base import Requirement, RunContext, as_uint8_hwc
+from .base import Requirement, RunContext
 
-# Key names each target writes onto the episode. The object target keeps
-# its historical names so the writers + training code are untouched;
-# future targets (e.g. "arm") get target-suffixed keys.
-_SEG_KEYS: dict[str, tuple[str, str]] = {
-  "object": ("segmentation_target", "object_uv"),
-}
+SAM2_MODEL = "facebook/sam2-hiera-large"
 
 
-def seg_keys(target_name: str) -> tuple[str, str]:
-  return _SEG_KEYS.get(
-    target_name, (f"segmentation_{target_name}", f"{target_name}_uv"))
+def _masks_to_seg_and_uv(
+    T: int, masks: list[np.ndarray | None],
+) -> tuple[np.ndarray, np.ndarray] | None:
+  """Build the ``(T, H, W)`` uint8 ``segmentation_target`` array and the
+  ``(T, 2)`` float32 ``object_uv`` centroid array from ``T`` per-frame SAM2
+  masks, or ``None`` if no frame had a mask.
 
-
-def _store_masks_and_uv(episode: dict[str, Any],
-                        imgs: list[np.ndarray],
-                        masks: list[np.ndarray | None],
-                        *,
-                        seg_key: str = "segmentation_target",
-                        uv_key: str = "object_uv") -> None:
-  """Fill a ``(T, H, W)`` uint8 seg array and ``(T, 2)`` float32 centroids
-  on the episode dict from per-frame SAM2 masks, under ``seg_key`` /
-  ``uv_key``.
-
-  Pixels carry label 1 inside the target mask, 0 elsewhere. For frames
-  where SAM2 returned no mask we emit a zero mask and ``NaN`` centroids
-  so downstream tooling can tell drop-outs apart from "mask centred at
-  origin".
+  Pixels carry label 1 inside the target mask, 0 elsewhere. Centroids are
+  the mean pixel coordinate of each frame's mask, ``NaN`` for frames with
+  no mask — so downstream tooling can tell drop-outs apart from "mask
+  centred at origin".
   """
-  T = len(imgs)
   if T == 0:
-    return
+    return None
   ref = next((np.asarray(m) for m in masks if m is not None), None)
   if ref is None:
-    return
+    return None
   H, W = ref.shape[:2]
-  seg_arr = np.zeros((T, H, W), dtype=np.uint8)
-  uv_arr  = np.full((T, 2), np.nan, dtype=np.float32)
+
+  # Densify the ragged ``list[mask | None]`` into one (T, H, W) bool stack;
+  # the per-frame work is just a slice assignment, no pixel loops.
+  seg = np.zeros((T, H, W), dtype=bool)
   for t, m in enumerate(masks):
     if m is None:
       continue
     m_arr = np.asarray(m, dtype=bool)
-    if m_arr.shape[:2] != (H, W):
-      continue
-    seg_arr[t][m_arr] = 1
-    ys, xs = np.where(m_arr)
-    if xs.size:
-      uv_arr[t, 0] = float(xs.mean())
-      uv_arr[t, 1] = float(ys.mean())
-  episode[seg_key] = seg_arr
-  episode[uv_key]  = uv_arr
+    if m_arr.shape[:2] == (H, W):
+      seg[t] = m_arr
+
+  # Centroids for all frames at once: ``Σ coord·mask / Σ mask`` per frame.
+  vs = np.arange(H, dtype=np.float32)
+  us = np.arange(W, dtype=np.float32)
+  counts = seg.sum(axis=(1, 2)).astype(np.float32)         # (T,)
+  sum_u = (seg.sum(axis=1) * us).sum(axis=1)                # (T,)
+  sum_v = (seg.sum(axis=2) * vs).sum(axis=1)                # (T,)
+  uv = np.full((T, 2), np.nan, dtype=np.float32)
+  nz = counts > 0
+  uv[nz, 0] = sum_u[nz] / counts[nz]
+  uv[nz, 1] = sum_v[nz] / counts[nz]
+
+  return seg.astype(np.uint8), uv
 
 
-def _dump_debug_masks(out_root: Path, dataset_slug: str, episode_index: int,
-                      imgs: list[np.ndarray],
-                      masks: list[np.ndarray | None] | None) -> None:
-  """Dump per-frame mask overlays for visual inspection.
+def _largest_cc(mask: np.ndarray) -> np.ndarray | None:
+  """Keep only the largest 8-connected component of a boolean mask.
+  SAM2 can leak a few stray pixels far from the object"""
+  import cv2
 
-  Triggered by setting ``IMPORT_LEROBOT_DEBUG_MASKS=<dir>``. Writes one
-  PNG per frame to ``<dir>/<dataset_slug>/ep<NNN>/frame_<NNNNN>.png``,
-  with the SAM2 mask shown as a red 50% overlay on the source image.
-  Frames where segmentation failed are still dumped (no overlay) so
-  drop-outs are visible by scrubbing the folder.
-  """
-  if masks is None:
-    print("[debug-masks] no masks available on estimator; skipping dump")
-    return
-  try:
-    from PIL import Image
-  except ImportError:
-    print("[debug-masks] PIL not available; skipping dump")
-    return
-
-  ep_dir = out_root / dataset_slug / f"ep{episode_index:03d}"
-  ep_dir.mkdir(parents=True, exist_ok=True)
-  n_with_mask = 0
-  for t, (img, mask) in enumerate(zip(imgs, masks)):
-    if img.dtype != np.uint8:
-      img_u8 = (np.clip(img.astype(np.float32), 0.0, 1.0) * 255.0).astype(np.uint8)
-    else:
-      img_u8 = img
-    if img_u8.ndim == 3 and img_u8.shape[-1] == 1:
-      img_u8 = np.repeat(img_u8, 3, axis=-1)
-    if img_u8.ndim == 2:
-      img_u8 = np.stack([img_u8] * 3, axis=-1)
-    out = img_u8.copy()
-    if mask is not None:
-      n_with_mask += 1
-      m = np.asarray(mask, dtype=bool)
-      if m.shape[:2] == out.shape[:2]:
-        red = np.array([255, 0, 0], dtype=np.uint8)
-        out[m] = (out[m].astype(np.uint16) * 1 // 2
-                  + red.astype(np.uint16) * 1 // 2).astype(np.uint8)
-    Image.fromarray(out).save(ep_dir / f"frame_{t:05d}.png")
-  print(f"[debug-masks] wrote {len(imgs)} frames "
-        f"({n_with_mask} with mask) to {ep_dir}")
+  m = mask.astype(np.uint8)
+  if m.sum() == 0:
+    return None
+  _, labels, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+  if labels.max() == 0:
+    return None
+  best = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+  return np.asarray(labels == best)
 
 
 class SegmentationStage:
-  """Run SAM2 for one target, caching masks on ``ctx`` for downstream
-  stages (e.g. pose fitting) and filling the per-target seg/uv arrays."""
+  """Run SAM2 on the object, caching masks on ``ctx`` for downstream stages
+  (e.g. pose fitting) and filling the ``segmentation_target`` / ``object_uv``
+  arrays."""
+  name = "segment:object"
+  produces: tuple[str, ...] = ("segmentation_target", "object_uv")
   requires: tuple[str, ...] = ()
 
-  def __init__(self, ctx: RunContext, target_name: str = "object") -> None:
+  def __init__(self, ctx: RunContext) -> None:
     self.ctx = ctx
-    self.target_name = target_name
-    self.name = f"segment:{target_name}"
-    self.produces: tuple[str, ...] = seg_keys(target_name)
+
+  @contextmanager
+  def _video_as_jpgs(self, metadata: dict[str, Any]):
+    """Decode this episode's ``[from_ts, to_ts)`` video window to a temp
+    directory of zero-padded ``%05d.jpg`` frames and yield its path.
+
+    The MP4 path and decode window come straight off the episode's
+    :class:`EpisodeSlice` (resolved once by :class:`Run` from the offline
+    ``meta/`` sidecars), so the stage never re-opens the dataset metadata.
+    SAM2's ``init_state`` consumes such a directory natively. The temp
+    directory is removed on exit (success or error)."""
+    import av
+    import cv2
+
+    episode_idx = int(metadata["config"]["episode_index"])
+    sl          = self.ctx.slice_for(episode_idx)
+    video_path  = sl.video_path
+    from_ts     = float(sl.video_from_ts)
+    to_ts       = float(sl.video_to_ts)
+
+    jpg_dir = Path(tempfile.mkdtemp(prefix=f"seg_ep{episode_idx}_"))
+    try:
+      n = 0
+      with av.open(str(video_path)) as container:
+        stream = container.streams.video[0]
+        # av seeks in microseconds; land just before from_ts, then drop
+        # frames until the window starts and stop once it ends.
+        container.seek(int(from_ts * 1_000_000), stream=stream)
+        for frame in container.decode(stream):
+          if frame.pts is None or stream.time_base is None:
+            continue
+          pts_s = float(frame.pts * stream.time_base)
+          if pts_s < from_ts:
+            continue
+          if pts_s >= to_ts:
+            break
+          rgb = frame.to_ndarray(format="rgb24")
+          cv2.imwrite(str(jpg_dir / f"{n:05d}.jpg"),
+                      cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+          n += 1
+      yield jpg_dir
+    finally:
+      shutil.rmtree(jpg_dir, ignore_errors=True)
+
+  def _segment_jpgs(self, jpg_dir: Path,
+                    keyframes: dict[int, tuple[int, int]]) -> list[np.ndarray | None]:
+    """Run SAM2's video predictor over a ``%05d.jpg`` directory, prompting
+    at each ``{frame_idx: (u, v)}`` keyframe, and return one
+    ``HxW bool`` mask (or ``None``) per frame.
+
+    SAM2 ``init_state`` consumes the JPEG directory natively; per-frame
+    logits are thresholded and reduced to their largest connected
+    component."""
+    from sam2.sam2_video_predictor import SAM2VideoPredictor
+
+    device    = lookup_device(self.ctx.config, "object_localization.device", pytorch_only=True)
+    predictor = SAM2VideoPredictor.from_pretrained(SAM2_MODEL, device=device)
+    state     = predictor.init_state(str(jpg_dir), offload_video_to_cpu=True)
+
+    for frame_idx, (u, v) in sorted(keyframes.items()):
+      predictor.add_new_points_or_box(
+        inference_state=state,
+        frame_idx=frame_idx,
+        obj_id=0,
+        points=np.array([[float(u), float(v)]], dtype=np.float32),
+        labels=np.ones(1, dtype=np.int32),
+      )
+
+    per_frame: dict[int, np.ndarray | None] = {}
+    for frame_idx, _obj_ids, mask_logits in predictor.propagate_in_video(state):
+      mask = (mask_logits[0] > 0).cpu().numpy()
+      if mask.ndim == 3:
+        mask = mask[0]
+      per_frame[int(frame_idx)] = _largest_cc(mask.astype(bool))
+
+    if not per_frame:
+      return []
+    n_frames = max(per_frame) + 1
+    return [per_frame.get(i) for i in range(n_frames)]
 
   def requirements(self) -> list[Requirement]:
-    ol_cfg = self.ctx.ol_cfg()
+    # SAM2 only needs the video and a frame-0 prompt. Camera calibration and
+    # the mesh are the object-pose stage's concern (it declares them in its
+    # own requirements), so they're intentionally not listed here.
     ds_dir = self.ctx.dataset_cache_dir()
-    ep = self.ctx.episode_index
+    ep     = self.ctx.episode_index
 
     def frame0_prompt_present() -> bool:
       return 0 in self.ctx.keyframe_prompts(ep)
 
     return [
       Requirement(
-        "camera intrinsics", ds_dir / "intrinsics.json",
-        f"uv run python main.py calibrate-intrinsics {self.ctx.source_repo}"),
-      Requirement(
-        "camera extrinsics", ds_dir / "extrinsics.json",
-        f"uv run python main.py annotate-mat {self.ctx.source_repo}"),
-      Requirement(
         f"frame-0 object prompt (episode {ep})", ds_dir / "object_prompts.json",
         f"uv run python main.py prompt-episodes --dataset {self.ctx.source_repo}",
         check=frame0_prompt_present),
-      Requirement(
-        "object mesh", Path(ol_cfg.mesh_path),
-        "set object_localization.mesh_path in configs/default.yaml "
-        "to a valid .obj/.ply"),
     ]
 
-  def apply(self, episode, metadata) -> None:
-    images = episode.get("image")
-    if images is None or len(images) == 0:
+  def apply(self, episode: dict[str, Any], metadata: dict[str, Any]) -> None:
+    T = metadata.get("number_of_frames")
+    if T is None or T == 0:
       return
-    cfg = metadata.get("config")
-    if not isinstance(cfg, dict):
-      raise RuntimeError("segment: metadata['config'] missing or invalid")
-    source_repo = cfg.get("source_repo")
-    if not isinstance(source_repo, str) or not source_repo:
-      raise RuntimeError("segment: metadata['config']['source_repo'] missing")
 
-    imgs = as_uint8_hwc(images)
-    estimator = self.ctx.estimator()
-    episode_index = int(cfg.get("episode_index", 0))
+    cfg           = metadata["config"]
+    source_repo   = cfg["source_repo"]
+    episode_index = int(cfg["episode_index"])
 
     keyframes = self.ctx.keyframe_prompts(episode_index)
+    keyframes = {fi: pr for fi, pr in keyframes.items() if 0 <= fi < T}
     if 0 not in keyframes:
       raise FileNotFoundError(
         f"no cached frame-0 prompt for {source_repo} episode {episode_index}. "
         f"Run: `python main.py prompt-episodes --dataset {source_repo}`")
-    T = len(imgs)
-    keyframes = {fi: pr for fi, pr in keyframes.items() if 0 <= fi < T}
-    print(f"[segment:{self.target_name}] {source_repo} ep{episode_index}: "
+    print(f"[{self.name}] {source_repo} ep{episode_index}: "
           f"using {len(keyframes)} keyframe prompt(s) at frames "
           f"{sorted(keyframes.keys())}")
 
-    masks = estimator.segment_episode(
-      list(imgs),
-      first_frame_prompt=keyframes[0],
-      keyframe_prompts=keyframes,
-      target_name=self.target_name,
-    )
-    self.ctx.masks[self.target_name] = masks
+    with self._video_as_jpgs(metadata) as jpg_dir:
+      masks = self._segment_jpgs(jpg_dir, keyframes)
 
-    if masks is not None:
-      seg_key, uv_key = seg_keys(self.target_name)
-      _store_masks_and_uv(episode, list(imgs), masks,
-                          seg_key=seg_key, uv_key=uv_key)
+    self.ctx.masks["object"] = masks
 
-    debug_dir = os.environ.get("IMPORT_LEROBOT_DEBUG_MASKS")
-    if debug_dir:
-      _dump_debug_masks(
-        Path(debug_dir), self.ctx.dataset_slug(), episode_index, list(imgs), masks)
+    seg_and_uv = _masks_to_seg_and_uv(T, masks) if masks is not None else None
+    if seg_and_uv is not None:
+      episode["segmentation_target"] = seg_and_uv[0]
+      episode["object_uv"]           = seg_and_uv[1]

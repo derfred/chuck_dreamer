@@ -15,6 +15,7 @@ but the entry-point + metadata handling are shared.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 from dataclasses import asdict
@@ -142,6 +143,26 @@ def _diff_to_uint8(diff: np.ndarray) -> np.ndarray:
     arr = np.clip(diff, -1.0, 1.0)
     arr = (arr * 0.5 + 0.5) * 255.0
     return arr.astype(np.uint8)
+
+
+def _video_fps(metadata: dict[str, Any] | None, images: np.ndarray, T: int) -> float:
+    """Frame rate for the re-encode fallback.
+
+    Only the spacing of timeline timestamps matters for playback; pixels are
+    indexed by step regardless. Prefer an ``fps`` carried in
+    ``metadata['source_video']``, else estimate from the episode timestamps,
+    else default to 30. The chosen value is just a denominator for the
+    fallback clip's PTS, which the reader matches back exactly.
+    """
+    src = (metadata or {}).get("source_video")
+    if isinstance(src, dict) and src.get("fps"):
+        try:
+            fps = float(src["fps"])
+            if fps > 0:
+                return fps
+        except (TypeError, ValueError):
+            pass
+    return 30.0
 
 
 def _rerun_metadata_props(metadata: dict[str, Any] | None, extra_keys: tuple[str, ...] = ()) -> dict[str, str]:
@@ -445,6 +466,73 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         for key, value in props.items():
             rec.log(f"metadata/{key}", rr.TextDocument(value), static=True)
 
+    @staticmethod
+    def _build_camera_video(
+        images: np.ndarray, metadata: dict[str, Any] | None, T: int,
+    ) -> tuple[bytes, str, list[float]]:
+        """Encode this episode's RGB frames as a single video blob.
+
+        Prefers a lossless *stream copy* of the source LeRobot MP4 window
+        when ``metadata['source_video']`` names one (set by the importer):
+        ``{"path", "from_ts", "to_ts"}``. That reuses the original encoded
+        packets, so it adds no second generation of lossy compression and is
+        the smallest option. Falls back to a bit-exact re-encode of
+        ``images`` when there's no source video (sim episodes) or the copied
+        window doesn't line up with the episode's ``T`` frames.
+
+        Returns ``(video_bytes, media_type, frame_pts)`` — the per-step
+        clip-relative presentation timestamps the caller logs as
+        ``VideoFrameReference`` cells.
+        """
+        from .rerun_video import reencode_mp4, stream_copy_window
+
+        src = (metadata or {}).get("source_video")
+        if isinstance(src, dict) and src.get("path"):
+            try:
+                vbytes, media, pts = stream_copy_window(
+                    src["path"], float(src["from_ts"]), float(src["to_ts"]))
+                if len(pts) == T:
+                    return vbytes, media, pts
+                logger.warning(
+                    "source video window yielded %d frames, episode has %d; "
+                    "re-encoding instead", len(pts), T)
+            except Exception as exc:  # noqa: BLE001 — any decode/remux failure → re-encode
+                logger.warning("stream copy of %s failed (%s); re-encoding",
+                               src.get("path"), exc)
+
+        fps = _video_fps(metadata, images, T)
+        return reencode_mp4(images[:T], fps=fps)
+
+    # Distinct translucent colour per overlay layer, so several masks layered
+    # over the video stay visually separable. RGBA, alpha ~43%.
+    _SEG_RGBA = {
+        "target":     (0, 200, 255, 110),
+        "goal":       (255, 0, 200, 110),
+        "arm":        (255, 160, 0, 110),
+        "background": (120, 120, 120, 90),
+        "mesh":       (0, 255, 0, 110),
+    }
+
+    @staticmethod
+    def _png_bytes(image: np.ndarray) -> bytes:
+        """PNG-encode one ``(H, W)`` grayscale or ``(H, W, 4)`` RGBA image
+        (lossless) for an ``rr.EncodedImage``."""
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.fromarray(np.asarray(image, dtype=np.uint8)).save(buf, format="PNG")
+        return buf.getvalue()
+
+    @classmethod
+    def _mask_rgba(cls, mask: np.ndarray, name: str) -> np.ndarray:
+        """Colour a binary ``(H, W)`` mask into a transparent ``(H, W, 4)``
+        RGBA frame: the target's colour where the mask is set, fully
+        transparent elsewhere — so it composites over the video as a tinted
+        overlay rather than rendering as an all-black ``{0,1}`` image."""
+        m = np.asarray(mask) > 0
+        rgba = np.zeros((*m.shape[:2], 4), dtype=np.uint8)
+        rgba[m] = cls._SEG_RGBA.get(name, (0, 200, 255, 110))
+        return rgba
+
     def write_episode(
         self,
         episode: dict[str, np.ndarray],
@@ -500,16 +588,33 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
           if object_gap_raw is not None else None
         )
 
-        seg_target     = episode.get("segmentation_target")
-        seg_goal       = episode.get("segmentation_goal")
-        seg_arm        = episode.get("segmentation_arm")
-        seg_background = episode.get("segmentation_background")
+        seg_masks = {
+            name: episode[f"segmentation_{name}"]
+            for name in ("target", "goal", "arm", "background")
+            if episode.get(f"segmentation_{name}") is not None
+        }
+
+        # Optional fitted-mesh overlay: a per-frame binary silhouette the
+        # object-pose stage fills. Tinted + logged as transparent PNGs under
+        # the camera/ space so the viewer composites it over camera/video.
+        mesh_overlay = episode.get("object_mesh_overlay")
+        if mesh_overlay is not None:
+            mesh_overlay = np.asarray(mesh_overlay)
+
+        # RGB rides as one encoded video blob (logged once, static) plus a
+        # per-step VideoFrameReference, instead of a raw rr.Image per frame —
+        # this is the bulk of the old multi-GB .rrd size.
+        video_bytes, media_type, frame_pts = self._build_camera_video(
+            images, metadata, T)
+        rec.log("camera/video",
+                rr.AssetVideo(contents=video_bytes, media_type=media_type),
+                static=True)
 
         for i in range(T):
             rec.set_time("step", sequence=i)
             rec.set_time("time", duration=float(timestamps[i]))
 
-            rec.log("camera/image", rr.Image(images[i]))
+            rec.log("camera/video", rr.VideoFrameReference(seconds=frame_pts[i]))
             for kind, arr in actions.items():
                 rec.log(kind, rr.Scalars(arr[i].tolist()))
             rec.log("reward",       rr.Scalars(float(rewards[i])))
@@ -522,19 +627,27 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             if object_gap is not None:
                 rec.log("object_gap_too_long", rr.Scalars(int(object_gap[i])))
 
-            if seg_target is not None:
-                rec.log("camera/seg/target",
-                        rr.SegmentationImage(np.asarray(seg_target[i], dtype=np.uint8)))
-            if seg_goal is not None:
-                rec.log("camera/seg/goal",
-                        rr.SegmentationImage(np.asarray(seg_goal[i], dtype=np.uint8)))
-            if seg_arm is not None:
-                rec.log("camera/seg/arm",
-                        rr.SegmentationImage(np.asarray(seg_arm[i], dtype=np.uint8)))
-            if seg_background is not None:
-                rec.log("camera/seg/background",
-                        rr.SegmentationImage(np.asarray(seg_background[i], dtype=np.uint8)))
+            # Masks ride as transparent RGBA PNGs (tinted where set) so they
+            # composite over the video, rather than raw SegmentationImage.
+            for name, mask in seg_masks.items():
+                rec.log(f"camera/seg/{name}",
+                        rr.EncodedImage(
+                            contents=self._png_bytes(self._mask_rgba(mask[i], name)),
+                            media_type="image/png"))
 
+            # Fitted-mesh silhouette tinted into a transparent PNG over video.
+            if mesh_overlay is not None:
+                rec.log("camera/mesh_overlay",
+                        rr.EncodedImage(
+                            contents=self._png_bytes(
+                                self._mask_rgba(mesh_overlay[i], "mesh")),
+                            media_type="image/png"))
+
+        # Force all chunks to disk before returning. The file sink flushes on
+        # a background thread; without this an immediately-following read (or
+        # the next episode's heavy video re-encode starving the flush) can
+        # see a half-written, entity-less recording.
+        rec.flush(timeout_sec=30.0)
         return ep_path
 
     def write_eval_episode(

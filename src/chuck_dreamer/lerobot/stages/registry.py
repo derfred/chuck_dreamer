@@ -15,7 +15,7 @@ from .segmentation import SegmentationStage
 def build_registry(ctx: RunContext) -> dict[str, Stage]:
   stages: list[Stage] = [
     EePosStage(ctx),
-    SegmentationStage(ctx, "object"),
+    SegmentationStage(ctx),
     ObjectPoseStage(ctx),
   ]
   return {s.name: s for s in stages}

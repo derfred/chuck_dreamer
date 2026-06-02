@@ -87,6 +87,62 @@ def load_config(
   return cfg
 
 
+def lookup_device(
+  cfg: DictConfig,
+  path: str,
+  pytorch_only: bool = False,
+) -> str:
+  """Resolve the device string at ``path`` in ``cfg`` to a concrete device.
+
+  ``path`` is a dotted key (e.g. ``"hardware.device"`` or
+  ``"object_localization.device"``) — the config carries several device
+  fields, so callers name the one they mean. A missing key, ``None``, or
+  ``"auto"`` triggers discovery: mlx → cuda → mps → cpu, picking the first
+  available backend (cpu if nothing importable). mlx wins whenever it's
+  importable; it's only skipped under ``pytorch_only`` (below). On mps we
+  set ``PYTORCH_ENABLE_MPS_FALLBACK`` so ops without an MPS kernel fall
+  back to cpu rather than erroring. Any other value passes through
+  unchanged (e.g. ``"cuda:1"``, ``"mlx"``).
+
+  With ``pytorch_only=True`` an ``"mlx"`` device raises and mlx is dropped
+  from discovery — use it at call sites that hand the result to a
+  torch-only API (SAM2, ``torch.device``) where the MLX backend makes no
+  sense.
+  """
+  raw       = OmegaConf.select(cfg, path)
+  requested = str(raw).lower() if raw is not None else "auto"
+
+  if pytorch_only and requested == "mlx":
+    raise ValueError(
+      f"{path}=mlx is not valid here; this call site requires a torch device.")
+
+  if requested != "auto":
+    return requested
+
+  if not pytorch_only and _mlx_available():
+    return "mlx"
+  try:
+    import torch
+    if torch.cuda.is_available():
+      return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+      import os
+      os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+      return "mps"
+  except ImportError:
+    pass
+  return "cpu"
+
+
+def _mlx_available() -> bool:
+  """Whether the MLX backend can be imported (Apple-silicon only)."""
+  try:
+    import mlx.core  # noqa: F401
+    return True
+  except ImportError:
+    return False
+
+
 def _normalize_episode_source(
   raw: Any,
   default_fmt: Any,

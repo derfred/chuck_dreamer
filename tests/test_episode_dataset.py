@@ -294,6 +294,113 @@ def test_episode_from_file_rerun_round_trip(tmp_path):
   assert float(ep.data["image"][3].mean()) == 3.0
 
 
+def test_rerun_round_trip_recovers_png_masks(tmp_path):
+  # Masks are written as lossless PNG EncodedImage blobs; the reader must
+  # decode them back to the exact (T, H, W) bool arrays.
+  T, H, W = 8, 16, 16
+  raw = _make_raw_episode(T, img_hw=(H, W))
+  seg = np.zeros((T, H, W), dtype=np.uint8)
+  seg[:, 4:12, 3:9] = 1
+  raw["segmentation_target"] = seg
+  EpisodeWriter(str(tmp_path), format="rerun").write_episode(
+    raw, metadata={"config": {}}, name_suffix="00000")
+
+  ep = Episode.from_file(tmp_path / "episode-00000.rrd")
+  got = ep.data["segmentation_target"]
+  assert got.shape == (T, H, W)
+  assert got.dtype == bool
+  np.testing.assert_array_equal(got.astype(np.uint8), seg)
+
+
+def test_rerun_writes_mesh_overlay_as_transparent_png(tmp_path):
+  # The object-pose stage hands a (T, H, W) binary silhouette on
+  # object_mesh_overlay; the writer tints it into a transparent RGBA PNG on
+  # camera/mesh_overlay so the viewer composites it over camera/video.
+  from PIL import Image
+  from rerun.experimental import RrdReader
+
+  T, H, W = 4, 16, 16
+  raw = _make_raw_episode(T, img_hw=(H, W))
+  silhouette = np.zeros((T, H, W), dtype=np.uint8)
+  silhouette[:, 4:12, 5:11] = 1
+  raw["object_mesh_overlay"] = silhouette
+  EpisodeWriter(str(tmp_path), format="rerun").write_episode(
+    raw, metadata={"config": {}}, name_suffix="00000")
+
+  by_step: dict[int, np.ndarray] = {}
+  for chunk in RrdReader(str(tmp_path / "episode-00000.rrd")).stream():
+    if str(chunk.entity_path) != "/camera/mesh_overlay":
+      continue
+    rb = chunk.to_record_batch()
+    steps = np.asarray(rb.column("step"))
+    blobs = rb.column("EncodedImage:blob")
+    for i in range(len(steps)):
+      png = np.asarray(blobs[i].values.values, dtype=np.uint8).tobytes()
+      import io as _io
+      by_step[int(steps[i])] = np.asarray(Image.open(_io.BytesIO(png)))
+
+  assert len(by_step) == T
+  frame0 = by_step[0]
+  assert frame0.shape == (H, W, 4)          # tinted to RGBA
+  assert int(frame0[8, 8, 3]) == 110        # opaque inside the silhouette
+  assert int(frame0[0, 0, 3]) == 0          # transparent outside
+
+
+def test_rerun_round_trip_stream_copies_source_video(tmp_path):
+  # When metadata names a source MP4, the writer stream-copies this
+  # episode's [from_ts, to_ts) window losslessly; the reader recovers
+  # exactly the frames in that window (keyframe lead-in trimmed off).
+  av = pytest.importorskip("av")
+  H, W, fps = 16, 24, 10
+
+  # A 20-frame source video with a 5-frame GOP; the episode is the window
+  # covering frames 7..13, which doesn't start on a keyframe.
+  src = tmp_path / "source.mp4"
+  with av.open(str(src), "w") as c:
+    s = c.add_stream("libx264", rate=fps, options={"g": "5", "crf": "18"})
+    s.width, s.height, s.pix_fmt = W, H, "yuv420p"
+    for g in range(20):
+      frame = av.VideoFrame.from_ndarray(
+        np.full((H, W, 3), g * 10 % 256, dtype=np.uint8), format="rgb24")
+      for pkt in s.encode(frame):
+        c.mux(pkt)
+    for pkt in s.encode():
+      c.mux(pkt)
+
+  from_ts, to_ts = 0.7, 1.35  # frames 7..13 inclusive -> 7 frames
+  expected = []
+  with av.open(str(src)) as c:
+    st = c.streams.video[0]
+    tb = st.time_base
+    for fr in c.decode(st):
+      if fr.pts is None:
+        continue
+      pts = float(fr.pts * tb)
+      if pts < from_ts:
+        continue
+      if pts >= to_ts:
+        break
+      expected.append(fr.to_ndarray(format="rgb24"))
+  expected = np.stack(expected)
+  T = len(expected)
+
+  raw = _make_raw_episode(T, img_hw=(H, W))
+  raw["image"] = expected  # the importer hands decoded frames here
+  EpisodeWriter(str(tmp_path), format="rerun").write_episode(
+    raw,
+    metadata={"config": {},
+              "source_video": {"path": str(src), "from_ts": from_ts,
+                               "to_ts": to_ts, "fps": float(fps)}},
+    name_suffix="00000")
+
+  ep = Episode.from_file(tmp_path / "episode-00000.rrd")
+  got = ep.data["image"]
+  assert got.shape == (T, H, W, 3)
+  # Stream copy reuses the source's encoded packets, so the decoded window
+  # is bit-identical to decoding the source directly.
+  np.testing.assert_array_equal(got, expected)
+
+
 def test_episode_from_file_infers_format_from_suffix(tmp_path):
   _write_sim_episode(tmp_path, "hdf5", T=10)
   ep = Episode.from_file(tmp_path / "episode-00000.hdf5")

@@ -16,22 +16,7 @@ from typing import Any, cast
 
 from omegaconf import DictConfig, OmegaConf
 
-
-def _resolve_device(value: Any) -> str:
-  requested = str(value).lower() if value is not None else "auto"
-  if requested != "auto":
-    return requested
-  try:
-    import torch
-    if torch.cuda.is_available():
-      return "cuda"
-    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-      import os
-      os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-      return "mps"
-  except ImportError:
-    pass
-  return "cpu"
+from chuck_dreamer.config import lookup_device
 
 
 @dataclass
@@ -187,7 +172,11 @@ def _parse(raw: dict[str, Any]) -> ObjectLocalizationConfig:
     edges_max_iter             = int(edges.get("max_iter", 50)),
 
     use_sam2 = bool(raw.get("use_sam2", True)),
-    device   = _resolve_device(raw.get("device", "auto")),
+    # The OL device feeds SAM2 / the pose estimator (torch-only), so resolve
+    # under pytorch_only — never let "auto" pick mlx here.
+    device   = lookup_device(
+      OmegaConf.create({"device": raw.get("device", "auto")}),
+      "device", pytorch_only=True),
 
     raw = raw,
   )

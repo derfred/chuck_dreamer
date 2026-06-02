@@ -1,9 +1,9 @@
 """The import-run object: stages, run context, and dataset access in one place.
 
 A :class:`Run` ties an :class:`EpisodeSpec` to one set of importer flags. It
-owns the shared, run-level :class:`RunContext` (so the FK evaluator,
-object-localization runtime, estimator and smoother stay cached across
-episodes), resolves the dataset's on-disk root + selected episode slices, and
+owns the shared, run-level :class:`RunContext` (so the FK evaluator and the
+object-localization runtime config stay cached across episodes), resolves the
+dataset's on-disk root + selected episode slices, and
 is the single factory for a per-episode, dependency-ordered stage list. Both
 the importer (which calls ``stage.apply``) and ``import-lerobot --doctor``
 (which calls ``stage.requirements``) drive a :class:`Run`, so the
@@ -55,11 +55,11 @@ class EpisodeFrames:
 
   @property
   def length(self) -> int:
-    return self.action.shape[0]
+    return int(self.action.shape[0])
 
   @property
   def n_joints(self) -> int:
-    return self.state.shape[1]
+    return int(self.state.shape[1])
 
 
 class Run:
@@ -71,14 +71,11 @@ class Run:
   wiring through it.
   """
 
-  def __init__(self, spec: EpisodeSpec, *,
-               with_ee_pos: bool = True, with_object_pose: bool = True,
-               video_key: str | None = None) -> None:
+  def __init__(self, config, spec: EpisodeSpec, params: dict[str, bool], video_key: str | None = None) -> None:
     self.spec             = spec
-    self.with_ee_pos      = with_ee_pos
-    self.with_object_pose = with_object_pose
+    self.params           = params
     self._video_key_pref  = video_key
-    self.ctx              = RunContext(source_repo=spec.dataset_id)
+    self.ctx              = RunContext(config=config, source_repo=spec.dataset_id)
     # A directory dataset_id is an on-disk LeRobot root; HF repo ids aren't.
     self.local_root: Path | None = (
       Path(spec.dataset_id) if Path(spec.dataset_id).is_dir() else None)
@@ -168,10 +165,14 @@ class Run:
     ``requires``)."""
     self.ctx.episode_index = episode_index
     self.ctx.masks.clear()
+    # Expose this run's slices (video window / MP4 path) to stages so a
+    # segmentation stage can decode the video without re-reading metadata.
+    if not self.ctx.slices_by_index:
+      self.ctx.slices_by_index = {sl.episode_index: sl for sl in self.slices}
 
     enabled: set[str] = set()
-    if self.with_ee_pos:
+    if self.params.get("with_ee_pos", False):
       enabled.add("ee_pos")
-    if self.with_object_pose:
+    if self.params.get("with_object_pose", False):
       enabled.add("object_pose")
     return resolve_stages(enabled, self.ctx, registry=self._registry)

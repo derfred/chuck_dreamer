@@ -54,10 +54,11 @@ def import_dataset(
       and runs the FK MLP to fill ``ee_pos``, ``ee_quat`` and
       ``ee_action``. Trainers select between ``joint_action`` and
       ``ee_action`` based on ``cfg.env.act_mode``.
-    * ``with_object_pose`` (default True) runs SAM2 + per-frame pose
-      fit + RTS smoothing to fill ``object_xy`` and
-      ``object_gap_too_long``. Requires per-dataset calibration and a
-      cached frame-0 prompt; missing either raises.
+    * ``with_object_pose`` (default True) runs SAM2 + a per-frame
+      analysis-by-synthesis pose fit to fill ``object_xy`` and
+      ``object_gap_too_long`` (and a ``camera/mesh_overlay`` track in the
+      Rerun output). Requires per-dataset calibration and a cached frame-0
+      prompt; missing either raises.
 
   ``tags`` are stamped onto each written episode's metadata. The
   importer is the canonical way to mark recordings as e.g. ``"real"``
@@ -107,7 +108,19 @@ def import_dataset(
       "seed":    sl.episode_index,
       "source":  f"lerobot:{run.dataset_id}",
       "outcome": "imported",
+      "number_of_frames": T,
     }
+    # Write-time hint (not persisted): lets the Rerun writer losslessly
+    # stream-copy this episode's window out of the source MP4 instead of
+    # re-encoding the decoded frames. Only present on the import path.
+    if sl.video_path is not None:
+      window = float(sl.video_to_ts) - float(sl.video_from_ts)
+      metadata["source_video"] = {
+        "path":    str(sl.video_path),
+        "from_ts": float(sl.video_from_ts),
+        "to_ts":   float(sl.video_to_ts),
+        "fps":     (sl.length / window) if window > 0 else None,
+      }
     if tags:
       metadata["tags"] = tuple(tags)
 

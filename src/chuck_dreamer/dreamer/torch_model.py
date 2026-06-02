@@ -82,6 +82,7 @@ from omegaconf import OmegaConf
 from safetensors.torch import load_file as _st_load_file
 from safetensors.torch import save_file as _st_save_file
 
+from ..config import lookup_device
 from ..training.observation import IMAGE, Observation, normalize_obs_mode
 from .world_model import Distribution, State
 
@@ -101,17 +102,14 @@ def resolve_device(name: str) -> torch.device:
 
   ``"auto"`` picks cuda → mps → cpu in that order. Anything else passes
   through. ``"mlx"`` is rejected here — that backend lives in
-  :mod:`.mlx_model`.
+  :mod:`.mlx_model`. Discovery is delegated to
+  :func:`chuck_dreamer.config.lookup_device` (the one shared resolver);
+  this wraps the bare device name so it can be looked up by path, and
+  ``pytorch_only`` is what turns ``"mlx"`` into the rejection above.
   """
-  if name == "mlx":
-    raise ValueError("resolve_device called with 'mlx'; use the MLX backend")
-  if name == "auto":
-    if torch.cuda.is_available():
-      return torch.device("cuda")
-    if torch.backends.mps.is_available():
-      return torch.device("mps")
-    return torch.device("cpu")
-  return torch.device(name)
+  resolved = lookup_device(
+    OmegaConf.create({"device": name}), "device", pytorch_only=True)
+  return torch.device(resolved)
 
 
 # ---------------------------------------------------------------------------

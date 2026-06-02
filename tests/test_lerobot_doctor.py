@@ -35,8 +35,8 @@ class _FakeRun:
   def __init__(self, stages, *, episodes=(0,), with_ee_pos=True,
                with_object_pose=True, dataset_id="user/ds"):
     self.spec = SimpleNamespace(dataset_id=dataset_id)
-    self.with_ee_pos = with_ee_pos
-    self.with_object_pose = with_object_pose
+    self.params = {"with_ee_pos": with_ee_pos,
+                   "with_object_pose": with_object_pose}
     self._stages = stages
     self._episodes = episodes
 

@@ -88,13 +88,17 @@ def fake_repo(tmp_path):
 class _FakeMeta:
   """Stand-in for ``LeRobotDatasetMetadata`` used by ``read_episodes``.
 
-  ``read_episodes`` only touches ``.video_keys`` and iterates
-  ``.episodes`` reading the v3 column keys off each row, so a list of
-  plain dicts is enough.
+  ``read_episodes`` touches ``.video_keys``, ``.root`` and ``.video_path``
+  (the formattable MP4 template) and iterates ``.episodes`` reading the v3
+  column keys off each row, so a list of plain dicts plus those attrs is
+  enough.
   """
 
   def __init__(self, repo_id, root=None, **kwargs):
     self.video_keys = [VIDEO_KEY]
+    self.root = root or f"/fake/{repo_id}"
+    self.video_path = (
+      "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4")
     self.episodes = [
       {
         "episode_index": 0, "tasks": ["pick"], "length": 6,
@@ -136,6 +140,16 @@ def test_read_episodes_picks_first_video_key_when_unspecified(monkeypatch):
   assert [s.episode_index for s in slices] == [0, 1]
 
 
+def test_read_episodes_resolves_absolute_video_path(monkeypatch):
+  # Each slice carries the absolute MP4 path (root + chunk/file template),
+  # so a downstream stage can decode the video without re-opening metadata.
+  monkeypatch.setattr(
+    "lerobot.datasets.lerobot_dataset.LeRobotDatasetMetadata", _FakeMeta)
+  slices, _ = es.EpisodeSpec("any/repo").read_episodes(root="/data/repo")
+  assert str(slices[0].video_path) == (
+    f"/data/repo/videos/{VIDEO_KEY}/chunk-000/file-000.mp4")
+
+
 def test_read_episodes_honors_preferred_video_key(monkeypatch):
   monkeypatch.setattr(
     "lerobot.datasets.lerobot_dataset.LeRobotDatasetMetadata", _FakeMeta)
@@ -172,9 +186,23 @@ def test_read_episodes_applies_spec_filter(monkeypatch):
 def _import(out, root, **kw):
   from chuck_dreamer.lerobot.pipeline import Run
   spec = es.EpisodeSpec.parse(str(root), **kw.pop("parse_kw", {}))
-  run = Run(spec, with_ee_pos=False, with_object_pose=False)
+  run = Run(None, spec, {"with_ee_pos": False, "with_object_pose": False})
   return list(li.import_dataset(
     run, str(out), format=kw.pop("format", "hdf5"), **kw))
+
+
+def test_run_pipeline_exposes_on_disk_slice_to_context(fake_repo):
+  # Run.pipeline populates ctx.slice_for(idx) with the episode's resolved,
+  # on-disk MP4 path so the segmentation stage decodes the video without
+  # re-opening LeRobotDatasetMetadata.
+  from chuck_dreamer.lerobot.pipeline import Run
+  run = Run(None, es.EpisodeSpec.parse(str(fake_repo)),
+            {"with_ee_pos": False, "with_object_pose": False})
+  run.pipeline(0)
+  sl = run.ctx.slice_for(0)
+  assert sl.episode_index == 0
+  assert sl.video_path is not None and Path(sl.video_path).exists()
+  assert sl.video_to_ts > sl.video_from_ts
 
 
 def test_import_dataset_writes_one_file_per_episode(tmp_path, fake_repo):
@@ -257,7 +285,7 @@ def test_import_dataset_respects_source_episode_filter(tmp_path, fake_repo):
   from chuck_dreamer.lerobot.pipeline import Run
   out2 = tmp_path / "out2"
   spec = es.EpisodeSpec.parse(f"{fake_repo}#1", allow_frames=False)
-  run = Run(spec, with_ee_pos=False, with_object_pose=False)
+  run = Run(None, spec, {"with_ee_pos": False, "with_object_pose": False})
   results2 = list(li.import_dataset(run, str(out2), format="hdf5"))
 
   assert [idx for idx, _ in results2] == [1]
@@ -269,7 +297,7 @@ def test_import_dataset_rejects_unknown_video_key(tmp_path, fake_repo):
   from chuck_dreamer.lerobot.pipeline import Run
   out = tmp_path / "out"
   spec = es.EpisodeSpec.parse(str(fake_repo))
-  run = Run(spec, with_ee_pos=False, with_object_pose=False,
+  run = Run(None, spec, {"with_ee_pos": False, "with_object_pose": False},
             video_key="observation.images.nope")
   with pytest.raises(ValueError, match="not among"):
     list(li.import_dataset(run, str(out), format="hdf5"))

@@ -135,11 +135,13 @@ def _collect_rerun_chunks(path: str | Path) -> tuple[dict[str, list[Any]], dict[
   from rerun.experimental import RrdReader
 
   reader = RrdReader(str(path))
-  store  = reader.store()
-
+  # ``reader.stream()`` (not ``reader.store()``) so footerless recordings
+  # still read: the streaming file sink writes the chunks but no footer, and
+  # ``store()`` rejects footerless RRDs. ``stream()`` scans the chunks
+  # directly with the same per-chunk interface.
   by_entity: dict[str, list[Any]] = {}
   static:    dict[str, dict]      = {}
-  for chunk in store.stream():
+  for chunk in reader.stream():
     entity = str(chunk.entity_path)
     if chunk.is_static:
       static[entity] = chunk.to_record_batch().to_pydict()
@@ -270,15 +272,72 @@ def _load_rerun_episode(path: str | Path) -> RawEpisode:
   if "/object_uv" in by_entity:
     raw["object_uv"] = _scalars("/object_uv").astype(np.float32, copy=False)
 
+  _load_rerun_camera(by_entity, static, raw, path)
+  _load_rerun_segmentation(by_entity, raw)
+  _load_rerun_metadata(static, raw)
+
+  return raw
+
+
+def _load_rerun_camera(
+  by_entity: dict[str, list[Any]], static: dict[str, dict],
+  raw: RawEpisode, path: str | Path,
+) -> None:
+  """Decode the camera RGB stack + per-step timestamps.
+
+  The writer stores RGB as one ``rr.AssetVideo`` blob on ``/camera/video``
+  (static) plus a per-step ``rr.VideoFrameReference``; decode the blob and
+  select the episode's frames by their reference timestamps. Older
+  recordings that pre-date the video switch logged a raw ``rr.Image`` per
+  frame on ``/camera/image`` — fall back to that path for them.
+  """
+  from chuck_dreamer.sim.rerun_video import decode_frames, video_frame_timestamps
+
+  if "/camera/video" in by_entity or "/camera/video" in static:
+    vchunks = by_entity.get("/camera/video", [])
+    frame_pts = video_frame_timestamps(vchunks)
+    raw["timestamp"] = _ordered_video_times(vchunks)
+    video_bytes = _asset_video_blob(static, "/camera/video", path)
+    raw["image"] = decode_frames(video_bytes, list(frame_pts))
+    return
+
   img_chunks = by_entity["/camera/image"]
   images, _steps = _ordered_image_stack(img_chunks)
   raw["image"] = images
   raw["timestamp"] = _ordered_image_times(img_chunks)
 
-  _load_rerun_segmentation(by_entity, raw)
-  _load_rerun_metadata(static, raw)
 
-  return raw
+def _asset_video_blob(static: dict[str, dict], entity: str, path: str | Path) -> bytes:
+  """Pull the raw video bytes out of an ``AssetVideo`` static chunk.
+
+  ``AssetVideo:buffer`` is logged as a single ``list<uint8>`` cell; the
+  experimental reader surfaces it as a one-element column whose first row
+  is the byte blob."""
+  chunk = static.get(entity)
+  cells = chunk.get("AssetVideo:blob") if chunk else None
+  if not cells:
+    raise KeyError(f"{path}: no AssetVideo:blob on {entity}")
+  return np.asarray(cells[0], dtype=np.uint8).tobytes()
+
+
+def _ordered_video_times(record_batches: list[Any]) -> np.ndarray:
+  """Per-step ``time`` (Timedelta) column off the ``/camera/video`` chunks,
+  sorted by step — the episode timestamps, same as the old image path."""
+  if not record_batches:
+    return np.empty((0,), dtype=np.float32)
+  step_parts: list[np.ndarray] = []
+  time_parts: list[np.ndarray] = []
+  for rb in record_batches:
+    if "time" not in rb.schema.names:
+      continue
+    step_parts.append(np.asarray(rb.column("step")))
+    time_parts.append(_durations_to_seconds(rb.column("time")))
+  if not step_parts:
+    return np.empty((0,), dtype=np.float32)
+  steps = np.concatenate(step_parts) if len(step_parts) > 1 else step_parts[0]
+  times = np.concatenate(time_parts) if len(time_parts) > 1 else time_parts[0]
+  order = np.argsort(steps, kind="stable")
+  return times[order]
 
 
 def _load_rerun_metadata(static: dict[str, dict], raw: RawEpisode) -> None:
@@ -314,12 +373,46 @@ _RERUN_SEG_SINGLE = ("target", "goal", "arm", "background")
 
 
 def _ordered_seg_masks(record_batches: list[Any]) -> np.ndarray:
-  """Flatten ``SegmentationImage`` chunks into ``(T, H, W)`` bool sorted by step.
+  """Flatten segmentation chunks into ``(T, H, W)`` bool sorted by step.
 
-  Same bulk-Arrow strategy as :func:`_ordered_image_stack` but the buffer
-  has shape ``list<list<uint8>>`` reshaping to ``(T, H, W)`` (single
-  channel), and the result is cast to ``bool`` for the buffer schema.
+  The writer stores masks as PNG ``rr.EncodedImage`` blobs; decode each and
+  cast to bool. Older recordings logged raw ``rr.SegmentationImage`` buffers
+  — fall back to bulk-flattening those when present.
   """
+  if "EncodedImage:blob" in record_batches[0].schema.names:
+    return _ordered_png_masks(record_batches)
+  return _ordered_raw_seg_masks(record_batches)
+
+
+def _ordered_png_masks(record_batches: list[Any]) -> np.ndarray:
+  """Decode PNG ``EncodedImage`` mask chunks into ``(T, H, W)`` bool by step."""
+  import io as _io
+
+  from PIL import Image
+
+  steps: list[int] = []
+  masks: list[np.ndarray] = []
+  for rb in record_batches:
+    step_col = np.asarray(rb.column("step"))
+    blob_col = rb.column("EncodedImage:blob")
+    for i in range(len(step_col)):
+      # Cell is list<list<uint8>>; flatten twice to the PNG byte stream.
+      png = np.asarray(blob_col[i].values.values, dtype=np.uint8).tobytes()
+      arr = np.asarray(Image.open(_io.BytesIO(png))).astype(bool)
+      # Masks are written as transparent RGBA (colour where set, all-zero
+      # elsewhere). Collapse any colour channels back to a 2D boolean — a
+      # pixel is foreground iff any channel is non-zero. Grayscale masks
+      # from older recordings are already 2D.
+      mask = np.asarray(arr.any(axis=-1)) if arr.ndim == 3 else arr
+      steps.append(int(step_col[i]))
+      masks.append(mask)
+  order = np.argsort(np.asarray(steps), kind="stable")
+  return np.stack([masks[i] for i in order], axis=0)
+
+
+def _ordered_raw_seg_masks(record_batches: list[Any]) -> np.ndarray:
+  """Legacy path: flatten raw ``SegmentationImage`` buffers into
+  ``(T, H, W)`` bool sorted by step (recordings predating the PNG switch)."""
   import pyarrow as pa
 
   step_parts: list[np.ndarray] = []

@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from chuck_dreamer.lerobot.pipeline import Run
@@ -50,33 +51,33 @@ class _FakeSpec:
 
 
 def test_run_builds_context_from_spec():
-  run = Run(_FakeSpec("user/ds"))
+  run = Run(None, _FakeSpec("user/ds"), {})
   assert run.ctx.source_repo == "user/ds"
 
 
 def test_run_local_root_none_for_repo_id():
-  assert Run(_FakeSpec("user/ds")).local_root is None
+  assert Run(None, _FakeSpec("user/ds"), {}).local_root is None
 
 
 def test_run_local_root_set_for_on_disk_dataset(tmp_path):
-  assert Run(_FakeSpec(str(tmp_path))).local_root == tmp_path
+  assert Run(None, _FakeSpec(str(tmp_path)), {}).local_root == tmp_path
 
 
 def test_run_read_slices_passes_root_and_video_key(tmp_path):
   spec = _FakeSpec(str(tmp_path))
-  run = Run(spec)
+  run = Run(None, spec, {})
   run.read_slices(video_key="observation.images.wrist")
   assert spec.read_calls == [
     {"video_key": "observation.images.wrist", "root": tmp_path}]
 
 
 def test_run_pipeline_threads_flags():
-  run = Run(_FakeSpec(), with_ee_pos=True, with_object_pose=False)
+  run = Run(None, _FakeSpec(), {"with_ee_pos": True, "with_object_pose": False})
   assert [s.name for s in run.pipeline(0)] == ["ee_pos"]
 
 
 def test_run_pipeline_reuses_context_and_registry_across_episodes():
-  run = Run(_FakeSpec(), with_ee_pos=True, with_object_pose=False)
+  run = Run(None, _FakeSpec(), {"with_ee_pos": True, "with_object_pose": False})
   p0 = run.pipeline(0)
   p1 = run.pipeline(1)
   # Same stage instances (shared registry) are reused, not rebuilt per episode.
@@ -85,7 +86,7 @@ def test_run_pipeline_reuses_context_and_registry_across_episodes():
 
 
 def test_run_pipeline_sets_episode_index():
-  run = Run(_FakeSpec(), with_ee_pos=True, with_object_pose=False)
+  run = Run(None, _FakeSpec(), {"with_ee_pos": True, "with_object_pose": False})
   run.pipeline(4)
   assert run.ctx.episode_index == 4
 
@@ -96,33 +97,33 @@ def test_run_pipeline_sets_episode_index():
 
 
 def test_pipeline_both_flags():
-  names = [s.name for s in Run(_FakeSpec(), with_ee_pos=True, with_object_pose=True).pipeline(0)]
+  names = [s.name for s in Run(None, _FakeSpec(), {"with_ee_pos": True, "with_object_pose": True}).pipeline(0)]
   assert set(names) == {"ee_pos", "segment:object", "object_pose"}
 
 
 def test_pipeline_ee_only():
-  names = [s.name for s in Run(_FakeSpec(), with_ee_pos=True, with_object_pose=False).pipeline(0)]
+  names = [s.name for s in Run(None, _FakeSpec(), {"with_ee_pos": True, "with_object_pose": False}).pipeline(0)]
   assert names == ["ee_pos"]
 
 
 def test_pipeline_object_pulls_in_segmentation():
-  names = [s.name for s in Run(_FakeSpec(), with_ee_pos=False, with_object_pose=True).pipeline(0)]
+  names = [s.name for s in Run(None, _FakeSpec(), {"with_ee_pos": False, "with_object_pose": True}).pipeline(0)]
   assert "segment:object" in names
   assert names.index("segment:object") < names.index("object_pose")
 
 
 def test_pipeline_no_flags_is_empty():
-  assert Run(_FakeSpec(), with_ee_pos=False, with_object_pose=False).pipeline(0) == []
+  assert Run(None, _FakeSpec(), {"with_ee_pos": False, "with_object_pose": False}).pipeline(0) == []
 
 
 def test_pipeline_sets_episode_index_on_context():
-  run = Run(_FakeSpec(), with_ee_pos=True, with_object_pose=False)
+  run = Run(None, _FakeSpec(), {"with_ee_pos": True, "with_object_pose": False})
   run.pipeline(7)
   assert run.ctx.episode_index == 7
 
 
 def test_pipeline_clears_masks_on_construction():
-  run = Run(_FakeSpec(), with_ee_pos=True, with_object_pose=False)
+  run = Run(None, _FakeSpec(), {"with_ee_pos": True, "with_object_pose": False})
   run.ctx.masks["object"] = ["stale"]
   run.pipeline(1)
   assert run.ctx.masks == {}
@@ -204,22 +205,15 @@ def test_object_pose_declares():
   s = ObjectPoseStage(_ctx())
   assert s.name == "object_pose"
   assert s.requires == ("segment:object",)
-  assert set(s.produces) == {"object_xy", "object_gap_too_long"}
+  assert set(s.produces) == {
+    "object_xy", "object_gap_too_long", "object_mesh_overlay"}
 
 
-def test_segmentation_object_target_uses_legacy_keys():
-  s = SegmentationStage(_ctx(), "object")
+def test_segmentation_declares():
+  s = SegmentationStage(_ctx())
   assert s.name == "segment:object"
   assert s.requires == ()
-  # The object target keeps the historical key names for writer/training
-  # compatibility.
   assert s.produces == ("segmentation_target", "object_uv")
-
-
-def test_segmentation_other_target_uses_suffixed_keys():
-  s = SegmentationStage(_ctx(), "arm")
-  assert s.name == "segment:arm"
-  assert s.produces == ("segmentation_arm", "arm_uv")
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +222,7 @@ def test_segmentation_other_target_uses_suffixed_keys():
 
 
 def _ctx_with_ol(tmp_path: Path, **kw) -> RunContext:
-  """A RunContext whose ol_cfg() is pre-seeded so requirements() that
+  """A RunContext whose ol_cfg is pre-seeded so requirements() that
   read calibration_cache / mesh_path don't load the real config."""
   ctx = _ctx(**kw)
   ctx._ol_cfg = SimpleNamespace(
@@ -276,17 +270,15 @@ def test_ee_pos_requirements_lists_fk_model():
   assert reqs[0].path.name == "so101_arm.xml"
 
 
-def test_segmentation_requirements_cover_calibration_and_mesh(tmp_path):
+def test_segmentation_requires_only_the_frame0_prompt(tmp_path):
+  # SAM2 needs only the video + a frame-0 prompt; calibration and the mesh
+  # are the object-pose stage's requirements, not segmentation's.
   ctx = _ctx_with_ol(tmp_path)
   ctx.episode_index = 3
-  reqs = SegmentationStage(ctx, "object").requirements()
-  labels = [r.label for r in reqs]
-  assert labels == [
-    "camera intrinsics", "camera extrinsics",
-    "frame-0 object prompt (episode 3)", "object mesh"]
-  # Each requirement names the dataset in its remediation command.
-  for r in reqs[:3]:
-    assert "user/ds" in r.remediation
+  reqs = SegmentationStage(ctx).requirements()
+  assert [r.label for r in reqs] == ["frame-0 object prompt (episode 3)"]
+  # The requirement names the dataset in its remediation command.
+  assert "user/ds" in reqs[0].remediation
 
 
 def test_segmentation_frame0_requirement_is_per_episode(tmp_path, monkeypatch):
@@ -302,16 +294,17 @@ def test_segmentation_frame0_requirement_is_per_episode(tmp_path, monkeypatch):
   def frame0_req(ep: int) -> Requirement:
     ctx = _ctx_with_ol(tmp_path)
     ctx.episode_index = ep
-    reqs = SegmentationStage(ctx, "object").requirements()
+    reqs = SegmentationStage(ctx).requirements()
     return next(r for r in reqs if r.label.startswith("frame-0"))
 
   assert frame0_req(2).satisfied() is True
   assert frame0_req(5).satisfied() is False
 
 
-def test_object_pose_requirements_list_mesh(tmp_path):
+def test_object_pose_requirements_list_calibration_and_mesh(tmp_path):
   reqs = ObjectPoseStage(_ctx_with_ol(tmp_path)).requirements()
-  assert [r.label for r in reqs] == ["object mesh"]
+  assert [r.label for r in reqs] == [
+    "camera intrinsics", "camera extrinsics", "object mesh"]
 
 
 # ---------------------------------------------------------------------------
@@ -335,3 +328,66 @@ def test_requirement_custom_check_overrides_path_existence(tmp_path):
   present = tmp_path / "f.json"
   present.write_text("{}")
   assert Requirement("x", present, "make x", check=lambda: False).satisfied() is False
+
+
+# ---------------------------------------------------------------------------
+# _masks_to_seg_and_uv — densify + vectorized centroids
+# ---------------------------------------------------------------------------
+
+
+def _mask(H, W, pts):
+  m = np.zeros((H, W), dtype=bool)
+  for v, u in pts:
+    m[v, u] = True
+  return m
+
+
+def test_masks_to_seg_and_uv_seg_array_and_centroids():
+  from chuck_dreamer.lerobot.stages.segmentation import _masks_to_seg_and_uv
+
+  H, W = 4, 5
+  # frame 0: two pixels; frame 1: dropout (None); frame 2: one pixel.
+  masks = [_mask(H, W, [(1, 1), (1, 3)]), None, _mask(H, W, [(2, 4)])]
+  seg, uv = _masks_to_seg_and_uv(3, masks)
+
+  assert seg.shape == (3, H, W) and seg.dtype == np.uint8
+  assert seg[0].sum() == 2 and seg[1].sum() == 0 and seg[2].sum() == 1
+  # centroid is the mean (u, v) pixel coordinate.
+  np.testing.assert_allclose(uv[0], [2.0, 1.0])   # u=(1+3)/2, v=1
+  np.testing.assert_allclose(uv[2], [4.0, 2.0])
+
+
+def test_masks_to_seg_and_uv_dropouts_are_nan():
+  from chuck_dreamer.lerobot.stages.segmentation import _masks_to_seg_and_uv
+
+  H, W = 3, 3
+  # A present-but-empty mask and a None both count as drop-outs.
+  _, uv = _masks_to_seg_and_uv(2, [np.zeros((H, W), bool), None])
+  assert np.isnan(uv).all()
+
+
+def test_masks_to_seg_and_uv_pads_short_list_to_T():
+  from chuck_dreamer.lerobot.stages.segmentation import _masks_to_seg_and_uv
+
+  # The segmenter may return fewer entries than T; trailing frames are zero.
+  seg, uv = _masks_to_seg_and_uv(4, [_mask(3, 3, [(0, 0)])])
+  assert seg.shape == (4, 3, 3)
+  assert seg[1:].sum() == 0
+  assert np.isnan(uv[1:]).all()
+
+
+def test_masks_to_seg_and_uv_skips_shape_mismatched_mask():
+  from chuck_dreamer.lerobot.stages.segmentation import _masks_to_seg_and_uv
+
+  ref = _mask(4, 5, [(0, 0)])
+  seg, uv = _masks_to_seg_and_uv(2, [ref, np.ones((6, 5), bool)])
+  # Reference shape wins; the mismatched second mask is dropped.
+  assert seg.shape == (2, 4, 5)
+  assert seg[1].sum() == 0 and np.isnan(uv[1]).all()
+
+
+def test_masks_to_seg_and_uv_returns_none_when_no_masks():
+  from chuck_dreamer.lerobot.stages.segmentation import _masks_to_seg_and_uv
+
+  assert _masks_to_seg_and_uv(3, [None, None, None]) is None
+  assert _masks_to_seg_and_uv(0, []) is None

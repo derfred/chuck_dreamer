@@ -15,7 +15,6 @@ from .prompts import (
   sidecar_path,
 )
 from .runtime import ObjectLocalizationConfig, active, init_from_config
-from .smoother import SmoothedFrame, SmoothedTrajectoryEstimator
 from .types import (
   CalibrationMissingError,
   CameraCalibration,
@@ -37,8 +36,6 @@ __all__ = [
   "ObjectPose",
   "ObjectPoseEstimator",
   "ObjectLocalizationConfig",
-  "SmoothedFrame",
-  "SmoothedTrajectoryEstimator",
   "active",
   "init_from_config",
   "CalibrationMissingError",

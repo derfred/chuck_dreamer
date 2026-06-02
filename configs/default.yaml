@@ -69,10 +69,7 @@ training:
     weight_broadcast_every_n_iters: 5
 
   data:
-    # Defaults applied to string-form warmup_source entries and to dict entries
-    # that omit format/num_episodes. Stripped from the config after load_config()
-    # normalizes warmup_source — post-load every entry already carries its own
-    # resolved values, so reading these would be stale.
+    # These defaults are applied to all warmup sources, but you can override per-source in the list form of warmup_source.
     warmup_format: "rerun"  # "hdf5" or "rerun"
     warmup_num_episodes: 100  # null = load all; otherwise sample this many at random
 
@@ -86,9 +83,6 @@ training:
     #   - path: "data/real/"
     #     num_episodes: null   # load all real recordings
 
-    # Tags come from the episode files themselves (metadata.tags). The buffer
-    # never evicts an episode whose tags intersect protected_tags, and
-    # multiplies sample weight by max(tag_weights[t] for t in tags) — default 1.
     protected_tags: []
     tag_weights: {}
 
@@ -127,6 +121,7 @@ logging:
     every_n_evals: 1        # int or null to disable, regularly dump the episodes processed during eval phase.
 
 eval:
+  # These defaults are applied to all sources, but you can override per-source in the list form of source.
   data_format: "rerun"  # "hdf5" or "rerun"
   num_episodes: null    # null = load all; otherwise sample this many at random
 

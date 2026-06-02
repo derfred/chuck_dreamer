@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 import click
 
+from chuck_dreamer.config import load_config
 from chuck_dreamer.common.episode_spec import EpisodeSpec
 from .pipeline import Run
 
@@ -30,7 +31,8 @@ def _doctor_import_lerobot(run: Run, episode_config_path: Path | None) -> bool:
 
   dataset_id = run.spec.dataset_id
   click.echo(f"Doctor check for import-lerobot {dataset_id}")
-  click.echo(f"  with_ee_pos={run.with_ee_pos}  with_object_pose={run.with_object_pose}  "
+  click.echo(f"  with_ee_pos={run.params.get('with_ee_pos', False)}  "
+             f"with_object_pose={run.params.get('with_object_pose', False)}  "
              f"episode_config={'yes' if episode_config_path else 'no'}")
 
   missing: list[str] = []
@@ -81,7 +83,6 @@ def _doctor_import_lerobot(run: Run, episode_config_path: Path | None) -> bool:
 def _import_dataset(
   run: Run,
   output_dir: str,
-  *,
   format: str = "hdf5",
   tags: tuple[str, ...] = (),
   name_prefix: str | None = None,
@@ -93,6 +94,14 @@ def _import_dataset(
   from .importer import import_dataset
 
   episode_filter = run.spec.episode_filter
+  click.echo(
+    f"Importing {run.spec.dataset_id} → {output_dir}  (format={format}, "
+    f"with_ee_pos={run.params.get('with_ee_pos', False)}, "
+    f"with_object_pose={run.params.get('with_object_pose', False)}, "
+    f"tags={list(tags)}, name_prefix={name_prefix!r}, "
+    f"episodes={'all' if episode_filter is None else sorted(episode_filter)})"
+  )
+
   count = 0
   try:
     for ep_idx, out_path in tqdm(
@@ -104,6 +113,7 @@ def _import_dataset(
       logger.info("episode %d → %s", ep_idx, out_path)
   except FileNotFoundError as e:
     raise click.ClickException(str(e))
+  click.echo(f"Done. Wrote {count} episodes.")
   return count
 
 
@@ -121,10 +131,11 @@ def _import_dataset(
                    "/ ee_quat / ee_action (default: on). Required for "
                    "EE-mode training; needs assets/mujoco/so101_arm.xml.")
 @click.option("--with-object-pose/--no-object-pose", default=True,
-              help="Run SAM2 segmentation + per-frame pose fit + RTS smoothing to "
-                   "fill object_xy / object_gap_too_long (default: on). Requires a "
-                   "per-dataset calibration cache entry (`main.py analyze-cameras`) "
-                   "and a cached frame-0 prompt (`main.py prompt-episodes`).")
+              help="Run SAM2 segmentation + per-frame analysis-by-synthesis pose "
+                   "fit to fill object_xy / object_gap_too_long (default: on). "
+                   "Requires a per-dataset calibration cache entry "
+                   "(`main.py analyze-cameras`) and a cached frame-0 prompt "
+                   "(`main.py prompt-episodes`).")
 @click.option("--tag", "tags", multiple=True, metavar="TAG",
               help="Tag to stamp onto each written episode's metadata. Repeatable. "
                    "The replay buffer reads these for protected_tags (no-evict) and "
@@ -163,7 +174,7 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
     2. ``--with-ee-pos`` (default on): joint rescaling + FK to ee_pos /
        ee_quat / ee_action.
     3. ``--with-object-pose`` (default on): SAM2 segmentation + per-frame
-       pose fit + RTS smoothing to object_xy / object_gap_too_long.
+       analysis-by-synthesis pose fit to object_xy / object_gap_too_long.
 
   ``REPO_ID`` accepts the same ``DATASET[#EPISODES]`` syntax used by
   ``calibrate-intrinsics`` and ``prompt-episodes`` — e.g.
@@ -177,19 +188,12 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
   if not doctor and not output:
     raise click.UsageError("--output is required (unless --doctor is passed).")
 
-  run = Run(spec, with_ee_pos=with_ee_pos, with_object_pose=with_object_pose,
-            video_key=video_key)
+  cfg    = load_config(ctx.obj["config_path"])
+  params = dict(with_ee_pos=with_ee_pos, with_object_pose=with_object_pose)
+  run    = Run(cfg, spec, params, video_key=video_key)
 
   if doctor:
     ok = _doctor_import_lerobot(run, episode_config_path=episode_config_path)
     ctx.exit(0 if ok else 1)
   else:
-    episode_filter = spec.episode_filter
-    click.echo(
-      f"Importing {spec.dataset_id} → {output}  (format={fmt}, "
-      f"with_ee_pos={with_ee_pos}, with_object_pose={with_object_pose}, "
-      f"tags={list(tags)}, name_prefix={name_prefix!r}, "
-      f"episodes={'all' if episode_filter is None else sorted(episode_filter)})"
-    )
-    count = _import_dataset(run, output, format=fmt, tags=tuple(tags), name_prefix=name_prefix)
-    click.echo(f"Done. Wrote {count} episodes.")
+    _import_dataset(run, output, format=fmt, tags=tuple(tags), name_prefix=name_prefix)
