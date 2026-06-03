@@ -203,10 +203,13 @@ class ObjectPoseStage:
     # a full-res episode doesn't hold an 8 GB RGBA stack in memory.
     overlay   = np.zeros((T, H, W), dtype=np.uint8)
 
+    from tqdm import tqdm
+
     n_ok = 0
     prev_xyz: np.ndarray | None = None
     prev_quat = init_quat
-    for t in range(T):
+    for t in tqdm(range(T), desc=f"[{self.name}] ep{episode_index} pose fit",
+                  unit="frame", leave=False):
       mask = masks[t] if t < len(masks) else None
       if mask is None:
         continue
