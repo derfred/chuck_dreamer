@@ -113,45 +113,40 @@ class Run:
       return self.slices, self.video_key
     return self.spec.read_episodes(video_key=video_key, root=self.local_root)
 
-  # ---- lazy LeRobot dataset access ----------------------------------------
-  @cached_property
-  def dataset(self) -> Any:
-    """The :class:`LeRobotDataset` for the selected episodes, built on first
-    use (decodes video). The ``lerobot`` import is deferred to here so merely
-    constructing a :class:`Run` (the doctor's case) never pulls in the stack."""
+  # ---- lazy, per-episode LeRobot dataset access ---------------------------
+  def episode_frames(self, episode_index: int) -> EpisodeFrames | None:
+    """Decoded, stacked arrays for **one** episode, or ``None`` if no frames
+    decoded. Hides the raw frame dicts and the video key behind the run.
+
+    Builds a fresh ``LeRobotDataset`` scoped to just this episode, so only
+    one episode's decoded frames are resident at a time — both the dataset
+    and the frame dicts are released when this returns. Decoding *all*
+    selected episodes up front (the previous approach) held tens to hundreds
+    of GB for a multi-episode import and was OOM-killed.
+
+    The ``lerobot`` import is deferred to here so merely constructing a
+    :class:`Run` (the doctor's case) never pulls in the stack."""
     from lerobot.datasets.lerobot_dataset import LeRobotDataset  # type: ignore
 
-    selected = [sl.episode_index for sl in self.slices]
-    if not selected:
-      raise RuntimeError(f"{self.dataset_id}: no episodes to import")
-    return LeRobotDataset(
+    ds = LeRobotDataset(
       self.dataset_id, root=self.local_root,
-      episodes=selected, download_videos=True)
+      episodes=[episode_index], download_videos=True)
+    if len(ds) == 0:
+      return None
 
-  @cached_property
-  def _frames_by_episode(self) -> dict[int, list[dict]]:
-    """The decoded frames grouped by ``episode_index``. LeRobotDataset
-    flattens the selected episodes into one frame sequence; group consecutive
-    frames back by their episode index."""
-    ds = self.dataset
-    grouped: dict[int, list[dict]] = {sl.episode_index: [] for sl in self.slices}
+    vkey = self.video_key
+    images, action, state, timestamp = [], [], [], []
     for i in range(len(ds)):
       frame = ds[i]
-      grouped[int(frame["episode_index"])].append(frame)
-    return grouped
-
-  def episode_frames(self, episode_index: int) -> EpisodeFrames | None:
-    """Decoded, stacked arrays for one episode, or ``None`` if no frames
-    decoded. Hides the raw frame dicts and the video key behind the run."""
-    frames = self._frames_by_episode.get(episode_index, [])
-    if not frames:
-      return None
-    vkey = self.video_key
+      images.append(_frame_to_image(frame[vkey]))
+      action.append(np.asarray(frame["action"], dtype=np.float32))
+      state.append(np.asarray(frame["observation.state"], dtype=np.float32))
+      timestamp.append(float(frame["timestamp"]))
     return EpisodeFrames(
-      images=np.stack([_frame_to_image(f[vkey]) for f in frames], axis=0),
-      action=np.stack([np.asarray(f["action"], dtype=np.float32) for f in frames], axis=0),
-      state=np.stack([np.asarray(f["observation.state"], dtype=np.float32) for f in frames], axis=0),
-      timestamp=np.asarray([float(f["timestamp"]) for f in frames], dtype=np.float32),
+      images=np.stack(images, axis=0),
+      action=np.stack(action, axis=0),
+      state=np.stack(state, axis=0),
+      timestamp=np.asarray(timestamp, dtype=np.float32),
     )
 
   # ---- per-episode stage list ---------------------------------------------

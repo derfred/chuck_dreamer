@@ -86,6 +86,7 @@ def _import_dataset(
   format: str = "hdf5",
   tags: tuple[str, ...] = (),
   name_prefix: str | None = None,
+  debug_dir: str | None = None,
 ) -> int:
   """Run the importer over ``run`` with a tqdm progress bar; return the count
   of episodes written. Surfaces missing-artifact errors as ``ClickException``."""
@@ -105,7 +106,8 @@ def _import_dataset(
   count = 0
   try:
     for ep_idx, out_path in tqdm(
-      import_dataset(run, output_dir, format=format, tags=tags, name_prefix=name_prefix),
+      import_dataset(run, output_dir, format=format, tags=tags,
+                     name_prefix=name_prefix, debug_dir=debug_dir),
       desc="Episodes",
       total=len(episode_filter) if episode_filter is not None else None,
     ):
@@ -158,10 +160,16 @@ def _import_dataset(
                    "the requested pipeline stages are present, then exit "
                    "without importing. Prints the exact remediation command "
                    "for each missing artifact.")
+@click.option("--debug", "debug", is_flag=True, default=False,
+              help="Dump per-episode debug artifacts under "
+                   "<output>/debug/epNNN: the retained SAM2 JPEG frames and "
+                   "the LeRobot-decoded frames.images stack. Use with "
+                   "scripts/analyze_video_sync.py to diagnose video / mask "
+                   "frame alignment.")
 @click.pass_context
 def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
                        with_ee_pos, with_object_pose, tags, name_prefix,
-                       episode_config_path, doctor):
+                       episode_config_path, doctor, debug):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
 
   Loads the dataset through ``LeRobotDataset`` (which decodes video frames
@@ -196,4 +204,6 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
     ok = _doctor_import_lerobot(run, episode_config_path=episode_config_path)
     ctx.exit(0 if ok else 1)
   else:
-    _import_dataset(run, output, format=fmt, tags=tuple(tags), name_prefix=name_prefix)
+    debug_dir = str(Path(output) / "debug") if debug else None
+    _import_dataset(run, output, format=fmt, tags=tuple(tags),
+                    name_prefix=name_prefix, debug_dir=debug_dir)

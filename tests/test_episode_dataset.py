@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import numpy as np
@@ -344,6 +345,44 @@ def test_rerun_writes_mesh_overlay_as_transparent_png(tmp_path):
   assert frame0.shape == (H, W, 4)          # tinted to RGBA
   assert int(frame0[8, 8, 3]) == 110        # opaque inside the silhouette
   assert int(frame0[0, 0, 3]) == 0          # transparent outside
+
+
+def test_stream_copy_rebases_clip_to_zero(tmp_path):
+  # A stream-copied window must start at PTS ~0 (episode-relative), not the
+  # source's absolute PTS — otherwise the video sits offset from the masks on
+  # the time timeline in the viewer.
+  av = pytest.importorskip("av")
+  from chuck_dreamer.sim.rerun_video import decode_frames, stream_copy_window
+  H, W, fps = 16, 24, 10
+
+  src = tmp_path / "source.mp4"
+  with av.open(str(src), "w") as c:
+    s = c.add_stream("libx264", rate=fps, options={"g": "5", "crf": "18"})
+    s.width, s.height, s.pix_fmt = W, H, "yuv420p"
+    for g in range(40):
+      frame = av.VideoFrame.from_ndarray(
+        np.full((H, W, 3), g * 6 % 256, dtype=np.uint8), format="rgb24")
+      for pkt in s.encode(frame):
+        c.mux(pkt)
+    for pkt in s.encode():
+      c.mux(pkt)
+
+  # A window deep into the file (starts at 2.0 s), like a mid-video episode.
+  from_ts, to_ts = 2.0, 3.0
+  vbytes, _media, frame_pts = stream_copy_window(src, from_ts, to_ts)
+
+  # frame_pts are re-based to the episode clock: first frame ~0, not ~2.0.
+  assert frame_pts[0] < 0.05, f"clip not rebased: starts at {frame_pts[0]:.3f}s"
+  assert frame_pts[-1] < (to_ts - from_ts) + 0.05
+  # The decoded clip itself also starts at ~0 (so the viewer places it at the
+  # same timeline position the masks use).
+  with av.open(io.BytesIO(vbytes)) as c:
+    st = c.streams.video[0]
+    pts = [float(fr.pts * st.time_base) for fr in c.decode(st)
+           if fr.pts is not None]
+  assert min(pts) < 0.05
+  # And the frames are still recoverable by their (re-based) timestamps.
+  assert decode_frames(vbytes, list(frame_pts)).shape[0] == len(frame_pts)
 
 
 def test_rerun_round_trip_stream_copies_source_video(tmp_path):

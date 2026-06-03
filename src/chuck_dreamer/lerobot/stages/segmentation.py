@@ -114,13 +114,18 @@ class SegmentationStage:
       n = 0
       with av.open(str(video_path)) as container:
         stream = container.streams.video[0]
-        # av seeks in microseconds; land just before from_ts, then drop
-        # frames until the window starts and stop once it ends.
-        container.seek(int(from_ts * 1_000_000), stream=stream)
+        tb = stream.time_base
+        if tb is None:
+          raise ValueError(f"{video_path}: video stream has no time_base")
+        # av.seek with stream= takes an offset in the stream's time_base
+        # (NOT microseconds); seek backward to the keyframe at/just before
+        # from_ts, then drop frames until the window starts and stop at its
+        # end.
+        container.seek(int(from_ts / tb), stream=stream, any_frame=False, backward=True)
         for frame in container.decode(stream):
-          if frame.pts is None or stream.time_base is None:
+          if frame.pts is None:
             continue
-          pts_s = float(frame.pts * stream.time_base)
+          pts_s = float(frame.pts * tb)
           if pts_s < from_ts:
             continue
           if pts_s >= to_ts:
@@ -129,6 +134,15 @@ class SegmentationStage:
           cv2.imwrite(str(jpg_dir / f"{n:05d}.jpg"),
                       cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
           n += 1
+
+      debug_dir = metadata.get("debug_dir")
+      if debug_dir is not None:
+        dest = Path(debug_dir) / "jpgs"
+        shutil.rmtree(dest, ignore_errors=True)
+        shutil.copytree(jpg_dir, dest)
+        print(f"[{self.name}] ep{episode_idx}: retained {n} JPEG frame(s) "
+              f"at {dest}")
+
       yield jpg_dir
     finally:
       shutil.rmtree(jpg_dir, ignore_errors=True)
@@ -144,11 +158,25 @@ class SegmentationStage:
     component."""
     from sam2.sam2_video_predictor import SAM2VideoPredictor
 
+    # Clamp prompts to the frames that were actually decoded: SAM2 indexes
+    # its state by ``frame_idx``, so a keyframe past the decoded count (e.g.
+    # if the window decoded short) would IndexError inside the predictor.
+    n_jpgs = len(list(jpg_dir.glob("*.jpg")))
+    in_range = {fi: pr for fi, pr in keyframes.items() if 0 <= fi < n_jpgs}
+    if 0 not in in_range:
+      raise RuntimeError(
+        f"frame-0 prompt missing after clamping to {n_jpgs} decoded frame(s) "
+        f"(keyframes were {sorted(keyframes)})")
+    dropped = sorted(set(keyframes) - set(in_range))
+    if dropped:
+      print(f"[{self.name}] dropping out-of-range keyframe prompt(s) "
+            f"{dropped} (only {n_jpgs} frames decoded)")
+
     device    = lookup_device(self.ctx.config, "object_localization.device", pytorch_only=True)
     predictor = SAM2VideoPredictor.from_pretrained(SAM2_MODEL, device=device)
     state     = predictor.init_state(str(jpg_dir), offload_video_to_cpu=True)
 
-    for frame_idx, (u, v) in sorted(keyframes.items()):
+    for frame_idx, (u, v) in sorted(in_range.items()):
       predictor.add_new_points_or_box(
         inference_state=state,
         frame_idx=frame_idx,

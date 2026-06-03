@@ -37,6 +37,7 @@ def import_dataset(
   format: str = "hdf5",
   tags: tuple[str, ...] = (),
   name_prefix: str | None = None,
+  debug_dir: str | None = None,
 ) -> Iterator[tuple[int, Path]]:
   """Yield ``(episode_index, output_path)`` per converted episode.
 
@@ -110,9 +111,6 @@ def import_dataset(
       "outcome": "imported",
       "number_of_frames": T,
     }
-    # Write-time hint (not persisted): lets the Rerun writer losslessly
-    # stream-copy this episode's window out of the source MP4 instead of
-    # re-encoding the decoded frames. Only present on the import path.
     if sl.video_path is not None:
       window = float(sl.video_to_ts) - float(sl.video_from_ts)
       metadata["source_video"] = {
@@ -123,6 +121,18 @@ def import_dataset(
       }
     if tags:
       metadata["tags"] = tuple(tags)
+
+    # Debug mode: dump the LeRobot-decoded frames and tell the segmentation
+    # stage to retain its SAM2 JPEGs, both under <debug_dir>/epNNN, so
+    # scripts/analyze_video_sync.py can compare them against the .rrd video.
+    if debug_dir is not None:
+      ep_debug = Path(debug_dir) / f"ep{sl.episode_index:05d}"
+      ep_debug.mkdir(parents=True, exist_ok=True)
+      np.save(ep_debug / "frames_images.npy", frames.images)
+      logger.info("episode %d: saved frames.images %s → %s",
+                  sl.episode_index, frames.images.shape,
+                  ep_debug / "frames_images.npy")
+      metadata["debug_dir"] = str(ep_debug)
 
     for stage in run.pipeline(sl.episode_index):
       stage.apply(episode, metadata)

@@ -40,7 +40,6 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 
 if TYPE_CHECKING:
-    import av
     from av.container import InputContainer
     from av.video.stream import VideoStream
 
@@ -99,17 +98,26 @@ def stream_copy_window(
     """Stream-copy the ``[from_ts, to_ts)`` window of ``src_path`` into a
     fresh in-memory MP4, reusing the source's compressed packets.
 
+    The clip's timestamps are **re-based to start at 0** (the source frame at
+    ``from_ts`` becomes clip-PTS 0), so the clip's clock matches the
+    episode-relative ``time`` the writer logs everything else on. Without
+    this the clip kept the source's absolute PTS (e.g. starting 12 s into the
+    file), and the viewer placed the video that many seconds away from the
+    masks on the timeline.
+
     Returns ``(mp4_bytes, "video/mp4", frame_pts)`` where ``frame_pts`` are
-    the clip-relative presentation timestamps (seconds) of the frames that
-    fall inside the window — the episode's frames, in order. The clip itself
-    may contain extra lead-in frames before ``from_ts`` (the cut snaps back
-    to the preceding keyframe so the window stays decodable); those are not
-    listed in ``frame_pts`` and the reader drops them.
+    those re-based presentation timestamps (seconds, starting ~0) of the
+    frames inside the window — the episode's frames, in order. The clip may
+    carry extra lead-in frames before the window (the cut snaps back to the
+    preceding keyframe so it stays decodable, giving them negative PTS); they
+    are not listed in ``frame_pts`` and the reader drops them.
     """
     import av
 
     window_pts: list[float] = []
-    # Pass 1 (decode): the exact presentation timestamps inside the window.
+    # Pass 1 (decode): the in-window presentation timestamps, re-based so the
+    # frame at from_ts is 0 (matching the episode's timestamps, which also
+    # start at 0).
     with av.open(str(src_path)) as ic:
         ist = cast("VideoStream", ic.streams.video[0])
         tb = _time_base(ist)
@@ -122,9 +130,12 @@ def stream_copy_window(
                 continue
             if pts_s >= to_ts:
                 break
-            window_pts.append(pts_s)
+            window_pts.append(pts_s - from_ts)
 
-    # Pass 2 (remux): copy the packets covering the window without decoding.
+    # Pass 2 (remux): copy the packets covering the window without decoding,
+    # subtracting from_ts (in stream ticks) from every PTS/DTS so the muxed
+    # clip starts at 0. Lead-in frames before the window get negative PTS.
+    base_ticks = int(round(from_ts / tb))
     out = io.BytesIO()
     with av.open(str(src_path)) as ic:
         ist = cast("VideoStream", ic.streams.video[0])
@@ -137,6 +148,9 @@ def stream_copy_window(
                     continue
                 if pkt.pts is not None and float(pkt.pts * tb) >= to_ts:
                     break
+                if pkt.pts is not None:
+                    pkt.pts -= base_ticks
+                pkt.dts -= base_ticks
                 pkt.stream = ost
                 oc.mux(pkt)
     return out.getvalue(), "video/mp4", window_pts
