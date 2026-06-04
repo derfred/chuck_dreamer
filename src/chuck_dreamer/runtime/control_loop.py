@@ -41,7 +41,8 @@ class Watchdog:
     self._timeout                         = float(timeout_s)
     self._on_trip                         = on_trip
     self._poll                            = poll_interval_s if poll_interval_s is not None else timeout_s / 4.0
-    self._grace                           = float(grace_s) if grace_s is not None else max(self._timeout, 1.0) # required for safe startup of a slow-booting backend like the real Feetech bus or MuJoCo sim
+    # required for safe startup of a slow-booting backend like the real Feetech bus or MuJoCo sim
+    self._grace                           = float(grace_s) if grace_s is not None else max(self._timeout, 1.0)
     self._lock                            = threading.Lock()
     self._last_kick                       = time.monotonic()
     self._armed_at                        = time.monotonic()
