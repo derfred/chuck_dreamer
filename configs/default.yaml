@@ -310,7 +310,7 @@ runtime:
 
   # Scripted setpoint source (M1; replaced by the policy at M6).
   source:
-    kind: "sine_sweep"        # "go_to_pose" | "sine_sweep" | custom import path
+    kind: "sine_sweep"        # "go_to_pose" | "sine_sweep" | "manual" | custom import path
     go_to_pose:
       q_goal: "home"          # "home" or an explicit per-joint list
       duration_s: 3.0
@@ -318,6 +318,32 @@ runtime:
       amplitude: 0.3          # rad; scalar (all joints) or per-joint list
       freq_hz:   0.25         # Hz; scalar or per-joint
       phase:     0.0          # rad; scalar or per-joint
+
+  # Leader arm (M2, spec §3.8). The leader is a *sensor*, decoupled from the
+  # policy: when `enabled`, a background thread polls it and exposes its joints
+  # as the `leader_qpos` observation modality regardless of `source.kind`. Any
+  # policy may read that modality; `source.kind: manual` (ManualPolicy) passes
+  # it straight through as the joint-space action (the kernel's slew/clamp still
+  # bounds motion to the envelope). With no leader enabled, `leader_qpos` is
+  # absent and ManualPolicy simply holds.
+  #
+  # The reader is import-path-plus-params so it is swappable: the default target
+  # is the FakeLeaderReader (no hardware) so sim/headless/tests run as-is; the
+  # real arm is a target swap (or `--leader-port`, which also flips `enabled`).
+  # The follower jaw bounds the gripper percentage maps into are injected from
+  # the resolved safety envelope, not configured here.
+  leader:
+    enabled: false   # start the reader whenever a leader is configured
+    target: "chuck_dreamer.runtime.teleop:FakeLeaderReader"
+    params:
+      # Constant follower-ordered radians pose; null -> latest() is None and a
+      # consuming policy holds. Override for a non-trivial fake pose in tests.
+      pose: null
+    # Real device:
+    #   enabled: true
+    #   target: "chuck_dreamer.runtime.teleop:LerobotLeaderReader"
+    #   params: { port: "/dev/tty.usbmodemXXX", calibration_id: null,
+    #             use_degrees: true, poll_rate_hz: 100 }
 
   # External heartbeat watchdog (spec §10.5): a control loop that goes
   # silent past this latches the kernel into ESTOP. Tune to the fat (read) tick.

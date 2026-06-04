@@ -71,6 +71,39 @@ class GoToPose:
     return self.target_at(obs.t)
 
 
+class ManualPolicy:
+  """Pass-through teleop: command the leader joints carried on the observation.
+
+  The leader-reader (:mod:`chuck_dreamer.runtime.teleop`) feeds
+  ``obs.leader_qpos`` via the policy loop — :class:`ManualPolicy` does *not* own
+  the reader (M2 modality decision, spec §3.8). :meth:`act` returns that reading
+  as the joint-space action. When the leader reading is absent (no leader
+  configured, or before its first poll) it returns a safe no-op — the last pose
+  it commanded, falling back to the measured pose at boot — so the kernel simply
+  holds. The kernel's slew + clamp shapes and bounds the motion exactly as for a
+  scripted setpoint, so teleop respects the M1 envelope unchanged.
+  """
+
+  def __init__(self) -> None:
+    self._last_cmd: np.ndarray | None = None
+
+  def reset(self, scene_or_q0: Any) -> None:
+    # Anchor the no-op fallback at the start pose (shared with the scripted sources).
+    self._last_cmd = _start_qpos(scene_or_q0).copy()
+
+  def act(self, obs: RuntimeObservation) -> np.ndarray:
+    leader = obs.leader_qpos
+    if leader is not None:
+      cmd            = np.asarray(leader, dtype=np.float64)
+      self._last_cmd = cmd
+      return cmd
+    # No-op: hold the last commanded pose; fall back to the measured joints
+    # before the first leader reading. The kernel slews to it with zero delta.
+    if self._last_cmd is not None:
+      return self._last_cmd
+    return np.asarray(obs.q_meas, dtype=np.float64)
+
+
 class SineSweep:
   """Per-joint sinusoid ``center + amplitude * sin(2*pi*freq*t + phase)``.
 

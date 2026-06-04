@@ -24,7 +24,7 @@ import logging
 import signal
 import threading
 import time
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
@@ -36,8 +36,11 @@ from .kernel import ControlKernel, KernelLimits, Mode
 from .observation import RuntimeObservation
 from .registry import construct, import_symbol
 from .setpoint_channel import SetpointChannel
-from .sources import GoToPose, SineSweep
+from .sources import GoToPose, ManualPolicy, SineSweep
 from .telemetry import CsvSink, TelemetryQueue
+
+if TYPE_CHECKING:
+  from .teleop import LeaderReader
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,7 @@ class PolicyLoop:
     reset_arg: Any,
     *,
     rate_hz: float,
+    leader: "LeaderReader | None" = None,
   ) -> None:
     if rate_hz <= 0:
       raise ValueError("rate_hz must be positive")
@@ -68,8 +72,9 @@ class PolicyLoop:
     self._channel   = channel
     self._backend   = backend
     self._reset_arg = reset_arg
-    self._period = 1.0 / float(rate_hz)
-    self._stop = threading.Event()
+    self._leader    = leader
+    self._period    = 1.0 / float(rate_hz)
+    self._stop      = threading.Event()
     self._thread: threading.Thread | None = None
 
   def start(self) -> None:
@@ -88,9 +93,13 @@ class PolicyLoop:
     t0 = time.monotonic()
     next_deadline = t0
     while not self._stop.is_set():
+      # latest() is non-blocking by contract, so the policy loop never waits on
+      # serial; when no leader is configured the obs is identical to M1.
+      leader_qpos = self._leader.latest() if self._leader is not None else None
       obs = RuntimeObservation(
         t=time.monotonic() - t0,
         q_meas=self._backend.read_positions(),
+        leader_qpos=leader_qpos,
       )
       self._channel.publish(self._policy.act(obs))
       next_deadline += self._period
@@ -135,9 +144,10 @@ class Runtime:
       rate_hz=float(rt.control_rate_hz), watchdog=self.watchdog,
     )
     self.policy      = self._build_policy(rt, home)
+    self.leader      = self._build_leader(rt)  # None unless source.kind == "manual"
     self.policy_loop = PolicyLoop(
       self.policy, self.channel, self.backend, home,
-      rate_hz=float(rt.policy_rate_hz),
+      rate_hz=float(rt.policy_rate_hz), leader=self.leader,
     )
 
     self._duration_s = None if rt.duration_s is None else float(rt.duration_s)
@@ -150,14 +160,7 @@ class Runtime:
   def _build_backend(self, rt: DictConfig, n: int) -> RobotBackend:
     # `runtime.backend` is always a mapping {target: str, params: {...}}.
     target = str(rt.backend.target)
-    params_cfg = rt.backend.get("params")
-    raw_params = (
-      OmegaConf.to_container(params_cfg, resolve=True)
-      if OmegaConf.is_config(params_cfg) else (params_cfg or {})
-    )
-    params: dict[str, Any] = (
-      {str(k): v for k, v in raw_params.items()} if isinstance(raw_params, dict) else {}
-    )
+    params = _params_dict(rt.backend.get("params"))
     spec: dict[str, Any] = {"target": target, "params": params}
 
     if target == _FAKE_BACKEND_TARGET:
@@ -200,8 +203,50 @@ class Runtime:
         freq_hz=_scalar_or_array(s.freq_hz),
         phase=_scalar_or_array(s.phase),
       )
+    if kind == "manual":
+      # Pass-through teleop. Reads the leader modality off the obs when a leader
+      # is enabled (built independently in _build_leader); holds otherwise.
+      return ManualPolicy()
     # Anything else is a registry import path to a custom Policy.
     return cast(Policy, construct(kind))
+
+  def _build_leader(self, rt: DictConfig) -> "LeaderReader | None":
+    """Construct the leader-reader when a leader is enabled, else None.
+
+    The leader is a *sensor*, decoupled from the policy: it is read and exposed
+    as the ``leader_qpos`` modality whenever ``runtime.leader.enabled`` is true,
+    independent of ``source.kind`` (spec §3.8 — "the leader modality is also
+    available to any other policy that declares it"). ``ManualPolicy`` consumes
+    it but does not require it, and any other policy may read it too.
+
+    Reuses the construct/from_config convention from :meth:`_build_backend`. The
+    follower jaw bounds (the last joint) are injected from the resolved kernel
+    limits so the gripper percentage->radian mapping always agrees with the
+    authoritative clamp; they are not read from config.
+    """
+    leader_cfg = rt.get("leader")
+    if leader_cfg is None or not bool(leader_cfg.get("enabled")):
+      return None
+
+    if len(self._joint_names) != 6:
+      raise ValueError(
+        f"the SO-101 leader maps onto a 6-joint follower; got {len(self._joint_names)} "
+        "joints in runtime.safety.joint_names")
+
+    target               = str(leader_cfg.target)
+    params               = _params_dict(leader_cfg.get("params"))
+    jaw_lo               = float(self._limits.lower[-1])
+    jaw_hi               = float(self._limits.upper[-1])
+    spec: dict[str, Any] = {"target": target, "params": params}
+
+    # A config-aware reader (e.g. FakeLeaderReader, which ignores the injected
+    # jaw bounds) exposes a from_config classmethod; prefer it. Otherwise
+    # construct directly, injecting the jaw bounds the real reader needs.
+    factory     = import_symbol(target)
+    from_config = getattr(factory, "from_config", None)
+    if callable(from_config):
+      return cast("LeaderReader", from_config(self.cfg, **params))
+    return cast("LeaderReader", construct(spec, jaw_lower=jaw_lo, jaw_upper=jaw_hi))
 
   def _on_watchdog_trip(self) -> None:
     self.kernel.request_estop()
@@ -215,6 +260,8 @@ class Runtime:
     self.sink.start()
     self.control_loop.start()
     self.watchdog.start()
+    if self.leader is not None:
+      self.leader.start()
     self.policy_loop.start()
 
   def request_shutdown(self) -> None:
@@ -258,6 +305,8 @@ class Runtime:
   def shutdown(self) -> None:
     # Ordered (project plan): stop new setpoints, hold, flush, tear down.
     self.policy_loop.stop()
+    if self.leader is not None:
+      self.leader.stop()
     self.kernel.request_hold()
     self.channel.publish(self.kernel.q_cmd)  # settle in place
     time.sleep(3.0 / max(1.0, float(self.cfg.runtime.control_rate_hz)))  # a few hold ticks
@@ -270,6 +319,15 @@ class Runtime:
 
 
 # -- small config coercions ----------------------------------------------------
+
+
+def _params_dict(params_cfg) -> dict[str, Any]:
+  """Coerce a registry-spec ``params`` config node to a plain str-keyed dict."""
+  raw = (
+    OmegaConf.to_container(params_cfg, resolve=True)
+    if OmegaConf.is_config(params_cfg) else (params_cfg or {})
+  )
+  return {str(k): v for k, v in raw.items()} if isinstance(raw, dict) else {}
 
 
 def _to_array(value, n: int) -> np.ndarray:
