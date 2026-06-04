@@ -140,7 +140,7 @@ def _load_mesh_m(ctx: RunContext):
   """``(vertices_m, faces)`` for the tracked object, vertices in metres."""
   from chuck_dreamer.lerobot.object_localization.mesh import load_mesh
 
-  mesh = load_mesh(Path(ctx.ol_cfg.mesh_path))
+  mesh     = load_mesh(Path(ctx.ol_cfg.mesh_path))
   vertices = np.asarray(mesh.vertices_mm, dtype=np.float32) / 1000.0
   faces    = np.asarray(mesh.triangles, dtype=np.int32)
   return vertices, faces
