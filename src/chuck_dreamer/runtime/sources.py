@@ -23,7 +23,7 @@ and exercising it is the point.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -106,8 +106,8 @@ class SineSweep:
     """Joint target at ``t`` seconds since :meth:`reset` (pure)."""
     if self._center is None:
       raise RuntimeError("SineSweep.target_at called before reset")
-    return self._center + self._amp * np.sin(
-      2.0 * np.pi * self._freq * t + self._phase)
+    return cast(np.ndarray, self._center + self._amp * np.sin(
+      2.0 * np.pi * self._freq * t + self._phase))
 
   def act(self, obs: RuntimeObservation) -> np.ndarray:
     return self.target_at(obs.t)

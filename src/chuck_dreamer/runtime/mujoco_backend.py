@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
+from typing import cast
 
 import mujoco  # type: ignore[import-untyped]
 import numpy as np
@@ -92,7 +93,7 @@ class MujocoBackend:
 
   def read_positions(self) -> np.ndarray:
     with self._lock:
-      return self.data.qpos[self._qpos_adr].copy()
+      return cast(np.ndarray, self.data.qpos[self._qpos_adr].copy())
 
   def write_positions(self, q: np.ndarray) -> None:
     q = np.asarray(q, dtype=np.float64)
@@ -145,7 +146,7 @@ class MujocoBackend:
 
   def ee_pos(self) -> np.ndarray:
     with self._lock:
-      return self.data.site_xpos[self._ee_sid].copy()
+      return cast(np.ndarray, self.data.site_xpos[self._ee_sid].copy())
 
   def physics_lock(self):
     """The mutex serializing all access to ``self.data``.
@@ -204,4 +205,4 @@ class MujocoBackend:
       self._fk_data.qpos[:]              = self.data.qpos
       self._fk_data.qpos[self._qpos_adr] = np.asarray(q, dtype=np.float64)
       mujoco.mj_forward(self.model, self._fk_data)
-      return self._fk_data.site_xpos[self._ee_sid].copy()
+      return cast(np.ndarray, self._fk_data.site_xpos[self._ee_sid].copy())

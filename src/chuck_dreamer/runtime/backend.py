@@ -15,7 +15,7 @@ both every tick.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Any, ContextManager, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -53,6 +53,28 @@ class RobotBackend(Protocol):
   @property
   def n_joints(self) -> int:
     """Number of controlled joints."""
+    ...
+
+
+@runtime_checkable
+class ViewableBackend(Protocol):
+  """A backend that can drive an interactive viewer (e.g. ``MujocoBackend``).
+
+  Optional capability on top of :class:`RobotBackend`. The runtime narrows to
+  this protocol before running the viewer loop; backends without it (Fake,
+  Feetech) simply never enter that loop.
+  """
+
+  def open_viewer(self) -> ContextManager[Any]:
+    """Context-managed viewer handle (must be driven on the main thread)."""
+    ...
+
+  def draw_overlays(self, viewer: Any, *, q_cmd: np.ndarray | None = None) -> None:
+    """Draw per-frame overlays into ``viewer`` (markers, envelope, …)."""
+    ...
+
+  def physics_lock(self) -> Any:
+    """Mutex serializing viewer ``sync()`` against the physics step."""
     ...
 
 

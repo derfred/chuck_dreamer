@@ -24,13 +24,13 @@ import logging
 import signal
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
 from ..policy import Policy
-from .backend import RobotBackend
+from .backend import RobotBackend, ViewableBackend
 from .control_loop import ControlLoop, Watchdog
 from .kernel import ControlKernel, KernelLimits, Mode
 from .observation import RuntimeObservation
@@ -148,14 +148,23 @@ class Runtime:
   # -- construction helpers -------------------------------------------------
 
   def _build_backend(self, rt: DictConfig, n: int) -> RobotBackend:
-    spec   = OmegaConf.to_container(rt.backend, resolve=True)
-    target = spec.get("target") if isinstance(spec, dict) else spec
-    params = dict(spec.get("params") or {}) if isinstance(spec, dict) else {}
+    # `runtime.backend` is always a mapping {target: str, params: {...}}.
+    target = str(rt.backend.target)
+    params_cfg = rt.backend.get("params")
+    raw_params = (
+      OmegaConf.to_container(params_cfg, resolve=True)
+      if OmegaConf.is_config(params_cfg) else (params_cfg or {})
+    )
+    params: dict[str, Any] = (
+      {str(k): v for k, v in raw_params.items()} if isinstance(raw_params, dict) else {}
+    )
+    spec: dict[str, Any] = {"target": target, "params": params}
 
     if target == _FAKE_BACKEND_TARGET:
       lower, upper = self._resolve_limits(rt.safety, backend=None, n=n)
-      return construct(spec, n_joints=n, lower=lower, upper=upper,
-                       q_init=_to_array(rt.safety.home_qpos, n))
+      return cast(RobotBackend, construct(
+        spec, n_joints=n, lower=lower, upper=upper,
+        q_init=_to_array(rt.safety.home_qpos, n)))
 
     # A config-aware backend (e.g. MujocoBackend, which samples a scene from
     # cfg) exposes a `from_config` classmethod; prefer it and feed it `params`
@@ -163,8 +172,8 @@ class Runtime:
     factory     = import_symbol(target)
     from_config = getattr(factory, "from_config", None)
     if callable(from_config):
-      return from_config(self.cfg, **params)
-    return construct(spec)
+      return cast(RobotBackend, from_config(self.cfg, **params))
+    return cast(RobotBackend, construct(spec))
 
   def _resolve_limits(self, safety: DictConfig, backend, n: int | None = None):
     """Joint bounds from config if set, else from the backend."""
@@ -179,7 +188,7 @@ class Runtime:
     return backend.joint_limits()
 
   def _build_policy(self, rt: DictConfig, home: np.ndarray) -> Policy:
-    kind = rt.source.kind
+    kind = str(rt.source.kind)
     if kind == "go_to_pose":
       g    = rt.source.go_to_pose
       goal = home if g.q_goal == "home" else _to_array(g.q_goal, len(home))
@@ -192,7 +201,7 @@ class Runtime:
         phase=_scalar_or_array(s.phase),
       )
     # Anything else is a registry import path to a custom Policy.
-    return construct(kind)
+    return cast(Policy, construct(kind))
 
   def _on_watchdog_trip(self) -> None:
     self.kernel.request_estop()
@@ -227,24 +236,20 @@ class Runtime:
 
   def _run_viewer_loop(self) -> None:
     """Drive the backend's viewer on the main thread (macOS requirement)."""
-    open_viewer = getattr(self.backend, "open_viewer", None)
-    if open_viewer is None:
-      logger.warning("viewer enabled but backend has no open_viewer(); waiting headless")
+    backend = self.backend
+    if not isinstance(backend, ViewableBackend):
+      logger.warning("viewer enabled but backend is not viewable; waiting headless")
       self._shutdown.wait(self._duration_s)
       return
     # The viewer reads the backend's mjData on this (main) thread while the
     # physics thread writes it; serialize sync() against mj_step under the
     # backend's lock. draw_overlays acquires that lock internally (briefly),
     # so it must run OUTSIDE the `with` to avoid re-entrant deadlock.
-    physics_lock = getattr(self.backend, "physics_lock", None)
     deadline = None if self._duration_s is None else time.monotonic() + self._duration_s
-    with open_viewer() as viewer:
+    with backend.open_viewer() as viewer:
       while viewer.is_running() and not self._shutdown.is_set():
-        self.backend.draw_overlays(viewer, q_cmd=self.kernel.q_cmd)
-        if physics_lock is not None:
-          with physics_lock():
-            viewer.sync()
-        else:
+        backend.draw_overlays(viewer, q_cmd=self.kernel.q_cmd)
+        with backend.physics_lock():
           viewer.sync()
         if deadline is not None and time.monotonic() >= deadline:
           break

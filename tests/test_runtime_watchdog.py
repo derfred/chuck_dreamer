@@ -27,14 +27,16 @@ def _wait_until(predicate, timeout=2.0, interval=0.005):
 
 def test_kicks_keep_alive():
   tripped = threading.Event()
-  wd = Watchdog(timeout_s=0.05, on_trip=tripped.set, grace_s=0.0)
+  # Generous timeout vs kick interval (10x) so scheduling jitter under load
+  # doesn't trip a healthy watchdog.
+  wd = Watchdog(timeout_s=0.2, on_trip=tripped.set, grace_s=0.0)
   wd.start()
   try:
     # Kick well inside the timeout for a window longer than the timeout.
-    end = time.monotonic() + 0.25
+    end = time.monotonic() + 1.0
     while time.monotonic() < end:
       wd.kick()
-      time.sleep(0.01)
+      time.sleep(0.02)
     assert not tripped.is_set()
     assert not wd.tripped
   finally:
