@@ -9,7 +9,8 @@ PY_PROJECTS := schemas pi/shared pi/supervisor webui/backend
 # pi/video is handled separately: it needs a --system-site-packages venv
 # for PyGObject (gi). See dev-env docs and I0.4.
 
-.PHONY: test lint format types sync test-py test-video test-frontend \
+.PHONY: test lint lint-py lint-frontend format types sync \
+        test-py test-video test-frontend \
         package-dpkg package-docker package-tanka
 
 sync:
@@ -33,11 +34,17 @@ test-video:
 test-frontend:
 	cd "$(HERE)webui/frontend" && npm ci && npm run test
 
-lint:
+lint: lint-py lint-frontend
+
+lint-py:
 	@for p in $(PY_PROJECTS) pi/video; do \
 	  echo "== ruff $$p =="; \
 	  (cd "$(HERE)$$p" && uvx ruff check .) || exit 1; \
 	done
+
+# Mirrors the CI frontend job's lint step (eslint via npm run lint).
+lint-frontend:
+	cd "$(HERE)webui/frontend" && npm ci && npm run lint
 
 format:
 	@for p in $(PY_PROJECTS) pi/video; do \

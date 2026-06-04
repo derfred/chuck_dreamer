@@ -60,6 +60,8 @@ jobs:
           node-version: "20"
       - run: npm ci
         working-directory: src/fessel/webui/frontend
+      - run: npm run lint
+        working-directory: src/fessel/webui/frontend
       - run: npm run test
         working-directory: src/fessel/webui/frontend
 
