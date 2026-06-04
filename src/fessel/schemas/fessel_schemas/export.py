@@ -1,14 +1,35 @@
-"""Emit a JSON Schema document for the wire models.
+"""Emit JSON Schema for the wire models.
 
-Used by tools/generate-types.sh, which pipes the output into a
-TypeScript generator. Run: python -m fessel_schemas.export
+Used by tools/generate-types.sh, which converts the output into:
+  - TypeScript types     (json-schema-to-typescript, bundled-root form)
+  - runtime Zod schemas  (json-schema-to-zod, per-model form)
+
+Two emitters:
+  - `json_schema()`        — one bundled document; the TS generator walks its
+                             properties and emits one interface per model.
+  - `per_model_schemas()`  — one self-contained document per model (root = the
+                             model, dependencies kept in $defs). The Zod
+                             generator emits one named schema per document and
+                             resolves inter-model refs (e.g. StateResponse ->
+                             PlugState). Run: python -m fessel_schemas.export --per-model
 """
 
+import argparse
 import json
+import sys
 
 from pydantic import TypeAdapter
 
-from .models import Capabilities, LiveActivate, LiveDeactivate, LiveState, ModeTriplet
+from .models import (
+  CameraState,
+  Capabilities,
+  LiveActivate,
+  LiveDeactivate,
+  LiveState,
+  ModeTriplet,
+  PlugState,
+  StateResponse,
+)
 
 _MODELS = {
   "ModeTriplet": ModeTriplet,
@@ -16,6 +37,9 @@ _MODELS = {
   "LiveActivate": LiveActivate,
   "LiveDeactivate": LiveDeactivate,
   "LiveState": LiveState,
+  "PlugState": PlugState,
+  "CameraState": CameraState,
+  "StateResponse": StateResponse,
 }
 
 
@@ -41,8 +65,59 @@ def json_schema() -> dict:
   }
 
 
+def _inline_refs(node: object, defs: dict[str, dict]) -> object:
+  """Recursively replace every local `$ref: #/$defs/<Name>` with a copy of the
+  referenced definition, so the result has NO `$ref`s left.
+
+  json-schema-to-zod does not resolve local `$ref`s (it falls back to
+  z.any()), so we dereference them here, in Python, before handing it the
+  schema. Our models form a DAG (no recursive types), so a straight recursive
+  inline terminates.
+  """
+  if isinstance(node, dict):
+    ref = node.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/$defs/"):
+      target = defs[ref.split("/")[-1]]
+      inlined = _inline_refs(target, defs)
+      # Preserve sibling keywords (e.g. a `default` alongside the $ref).
+      extra = {k: v for k, v in node.items() if k != "$ref"}
+      if isinstance(inlined, dict) and extra:
+        return {**inlined, **extra}
+      return inlined
+    return {k: _inline_refs(v, defs) for k, v in node.items() if k != "$defs"}
+  if isinstance(node, list):
+    return [_inline_refs(v, defs) for v in node]
+  return node
+
+
+def per_model_schemas() -> dict[str, dict]:
+  """One self-contained, fully ref-inlined JSON Schema per model.
+
+  Each value is a standalone schema with the model as its root and every
+  cross-model `$ref` dereferenced in place (no `$defs`, no `$ref`), so the Zod
+  generator emits real validators for nested models (StateResponse embeds a
+  validated PlugState/CameraState/SafetyState) instead of z.any().
+  """
+  out: dict[str, dict] = {}
+  for name, model in _MODELS.items():
+    schema = TypeAdapter(model).json_schema(ref_template="#/$defs/{model}")
+    defs = schema.get("$defs", {})
+    out[name] = _inline_refs(schema, defs)
+  return out
+
+
 def main() -> None:
-  print(json.dumps(json_schema(), indent=2))
+  parser = argparse.ArgumentParser(description=__doc__)
+  parser.add_argument(
+    "--per-model",
+    action="store_true",
+    help="emit one self-contained schema per model (JSON object name->schema)",
+  )
+  args = parser.parse_args()
+  if args.per_model:
+    json.dump(per_model_schemas(), sys.stdout, indent=2)
+  else:
+    print(json.dumps(json_schema(), indent=2))
 
 
 if __name__ == "__main__":

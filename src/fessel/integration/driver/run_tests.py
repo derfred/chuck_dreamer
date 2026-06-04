@@ -158,6 +158,56 @@ def mint_whep_url() -> str:
   return body["url"]
 
 
+# ---------- Slice 3 control-plane helpers ----------
+# These reach WEBUI (not supervisor directly), so the cluster-side auth gate +
+# /api/control forwarder + /api/state forwarder are all in the loop. The Pi
+# side is real (control endpoints, send-and-verify, /state cache, real
+# JetsonClient); only the leaf actuators are mocked (jetson-mock pod + the
+# in-process fake WiZ bulb). See integration/README.md "Slice 3 control plane".
+
+AUTH = {AUTH_USER_HEADER: AUTH_USER}
+
+
+def api_state() -> dict:
+  return http_get_json(f"{WEBUI}/api/state", headers=AUTH)
+
+
+def control_post(action: str, headers: dict | None = None) -> tuple[int, dict]:
+  """POST /api/control/<action>. Returns (status, body). Identity header
+  defaults to the authenticated operator; pass headers={} to test the gate."""
+  import json
+
+  req = urllib.request.Request(  # noqa: S310
+    f"{WEBUI}/api/control/{action}",
+    method="POST",
+    headers=AUTH if headers is None else headers,
+  )
+  try:
+    with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310
+      return r.status, json.loads(r.read() or b"{}")
+  except urllib.error.HTTPError as e:
+    body = e.read()
+    try:
+      return e.code, json.loads(body)
+    except ValueError:
+      return e.code, {"detail": body.decode(errors="replace")}
+
+
+def wait_api_state(predicate, what: str, timeout: float = 15.0) -> dict:
+  """Poll /api/state until predicate(state) holds (the dashboard's view)."""
+  deadline = time.time() + timeout
+  last: dict = {}
+  while time.time() < deadline:
+    last = api_state()
+    try:
+      if predicate(last):
+        return last
+    except (KeyError, TypeError):
+      pass
+    time.sleep(0.5)
+  raise AssertionError(f"timed out waiting for {what}; last /api/state={last}")
+
+
 def whep_post(signed_url: str, offer_sdp: str) -> tuple[int, str]:
   """POST the WHEP offer from Python (the browser's about:blank origin
   can't fetch cross-origin). Returns (status, answer_sdp_or_error)."""
@@ -320,6 +370,57 @@ def main() -> int:
         time.sleep(1)
       assert current_state() == "off", f"did not settle to off after churn: {current_state()}"
 
+    # --- Slice 3 control plane (mocked Jetson + WiZ) ---
+    # Pure HTTP (no browser): exercises the full chain backend -> supervisor ->
+    # mock actuators. The Jetson is a mock HTTP server; the WiZ is the in-
+    # process fake bulb. Everything between webui and the leaf actuators is
+    # real. See integration/README.md "Slice 3 control plane".
+
+    def t_control_pause_resume():
+      # cluster auth gate + forwarder, Pi relay, REAL JetsonClient -> mock, /state cache.
+      st, _ = control_post("pause")
+      assert st == 200, f"pause -> {st}"
+      wait_api_state(lambda s: s["jetson"]["state"] == "paused", "jetson paused")
+      st, _ = control_post("resume")
+      assert st == 200, f"resume -> {st}"
+      wait_api_state(
+        lambda s: s["jetson"]["state"] in ("active", "running"), "jetson resumed"
+      )
+
+    def t_power_cycle_verified():
+      # send-and-verify -> cached verified state -> /api/state. No real power.
+      st, _ = control_post("shutdown/jetson")
+      assert st == 200, f"shutdown/jetson -> {st}"
+      wait_api_state(
+        lambda s: s["plugs"]["jetson"]["on"] is False and s["plugs"]["jetson"]["verified"],
+        "jetson plug verified off",
+      )
+      st, _ = control_post("poweron/jetson")
+      assert st == 200, f"poweron/jetson -> {st}"
+      wait_api_state(
+        lambda s: s["plugs"]["jetson"]["on"] is True and s["plugs"]["jetson"]["verified"],
+        "jetson plug verified on",
+      )
+
+    def t_verify_failure_surfaces():
+      # The `arm` plug is wired (test config) to always DROP commands, so
+      # send-and-verify exhausts retries -> 503 with the structured body, and
+      # /state shows verified=False — NOT a false success. (arm is a real
+      # /api/control name; the backend only forwards the seven known actions.)
+      st, body = control_post("shutdown/arm")
+      assert st == 503, f"expected 503 from a failing plug, got {st}: {body}"
+      detail = body.get("detail", body)
+      assert detail.get("error") == "plug_verify_failed", f"bad 503 body: {body}"
+      st2 = api_state()
+      assert st2["plugs"]["arm"]["verified"] is False, (
+        f"failed verify not visible in /state: {st2['plugs'].get('arm')}"
+      )
+
+    def t_control_requires_auth():
+      # No identity header -> backend 401 -> the Pi is never reached.
+      st, _ = control_post("pause", headers={})
+      assert st == 401, f"expected 401 without identity, got {st}"
+
     # NOTE: there is intentionally NO automated data-plane (video bytes in
     # the browser) assertion. Headless Chrome cannot complete WebRTC ICE
     # in-cluster, so such a test could never pass here. The streaming chain
@@ -332,6 +433,11 @@ def main() -> int:
     suite.run("mint_requires_auth", t_mint_requires_auth)
     suite.run("token_rejection_no_activation", t_token_rejection)
     suite.run("rapid_reconnect_no_leak", t_rapid_reconnect)
+    # Slice 3 control plane (mocked actuators).
+    suite.run("control_pause_resume", t_control_pause_resume)
+    suite.run("control_power_cycle_verified", t_power_cycle_verified)
+    suite.run("control_verify_failure_surfaces", t_verify_failure_surfaces)
+    suite.run("control_requires_auth", t_control_requires_auth)
 
     browser.close()
 

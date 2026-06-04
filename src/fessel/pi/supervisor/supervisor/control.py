@@ -1,0 +1,303 @@
+"""supervisor control plane: cached state + actuator dispatch (S3.3, S3.4).
+
+This is the *action surface* of the interventions the architecture assigns to
+supervisor (§2.4) — pause/stop/resume the Jetson, cut/restore power via the
+WiZ plugs — plus the read-only `/state` aggregation that drives the dashboard.
+
+The full safety **state machine** (transitions, anomaly fusion, tier timers)
+is Slice 6. Slice 3 ships a **placeholder** safety state that holds whatever
+the operator's last command implies: pause -> PAUSED, stop -> STOPPED,
+shutdown/arm -> SHUTDOWN_ARM, power-on -> IDLE, etc. It is enough to drive the
+dashboard and explicitly not a real safety machine.
+
+`/state` is read-only and idempotent: it returns supervisor's locally cached
+view, NOT a fresh re-query of the Jetson and plugs on every call (that would
+amplify load and add latency). The cache is updated on every action and on a
+slow background refresh (Jetson /state, plug getPilot), both configurable.
+
+Plug state in the cache is the last *verified* read from send-and-verify
+(S3.1), not "the last command we issued". A failed verify is visible.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from collections.abc import Callable
+from datetime import datetime, timezone
+
+from fessel_schemas import CameraState, PlugState, SafetyState, StateResponse
+from fessel_shared import topics
+
+from .jetson import JetsonClient, JetsonError
+from .wiz import PlugController, PlugError
+
+log = logging.getLogger(__name__)
+
+# Plug names. Stable strings used in URLs (/control/shutdown/<name>), the
+# cache keys, and the MQTT plug-state topic.
+PLUG_ARM = "arm"
+PLUG_JETSON = "jetson"
+
+# A publish callback: (topic, payload-dict, qos, retain) -> None. The control
+# plane uses it to publish verified plug state; injecting it keeps this module
+# free of an MQTT-client dependency and trivially testable.
+PublishFn = Callable[[str, dict, int, bool], None]
+
+
+def _now_iso() -> str:
+  return datetime.now(timezone.utc).isoformat()
+
+
+class ControlPlane:
+  """Owns the actuator clients and the cached control-plane state.
+
+  Thread-safe: actions and the background refresh both mutate the cache under
+  a lock. Action methods raise (PlugError / JetsonError) on failure so the
+  HTTP layer can map them to a 5xx; on success they update the placeholder
+  safety state and the cached plug/Jetson view.
+  """
+
+  def __init__(
+    self,
+    *,
+    plugs: dict[str, PlugController],
+    jetson: JetsonClient | None,
+    publish: PublishFn,
+    jetson_refresh_s: float = 5.0,
+    plug_refresh_s: float = 10.0,
+  ) -> None:
+    self._plugs = plugs
+    self._jetson = jetson
+    self._publish = publish
+    self._jetson_refresh_s = jetson_refresh_s
+    self._plug_refresh_s = plug_refresh_s
+
+    self._lock = threading.Lock()
+    self._safety = SafetyState.IDLE
+    self._plug_state: dict[str, PlugState] = {name: PlugState() for name in plugs}
+    self._jetson_state: dict | None = None
+    self._camera_up: bool | None = None
+
+    self._stop = threading.Event()
+    self._refresh_thread = threading.Thread(
+      target=self._refresh_loop, name="control-refresh", daemon=True
+    )
+
+  # --- lifecycle -------------------------------------------------------------
+
+  def start(self) -> None:
+    self._refresh_thread.start()
+
+  def close(self) -> None:
+    # Lifecycle teardown — deliberately NOT named `stop` to avoid colliding
+    # with the Jetson `stop` action method below.
+    self._stop.set()
+    if self._jetson is not None:
+      self._jetson.close()
+
+  # --- inputs from the MQTT relay -------------------------------------------
+
+  def set_camera_up(self, up: bool | None) -> None:
+    with self._lock:
+      self._camera_up = up
+
+  # --- read path -------------------------------------------------------------
+
+  def state(self) -> StateResponse:
+    with self._lock:
+      return StateResponse(
+        safety_state=self._safety,
+        jetson=self._jetson_state,
+        plugs={name: ps.model_copy() for name, ps in self._plug_state.items()},
+        camera=CameraState(up=self._camera_up),
+      )
+
+  # --- Jetson actions --------------------------------------------------------
+
+  def pause(self) -> dict:
+    return self._jetson_action("pause", SafetyState.PAUSED)
+
+  def stop(self) -> dict:
+    return self._jetson_action("stop", SafetyState.STOPPED)
+
+  def resume(self) -> dict:
+    return self._jetson_action("resume", SafetyState.RUNNING)
+
+  def _jetson_action(self, action: str, new_state: SafetyState) -> dict:
+    if self._jetson is None:
+      raise JetsonError(action, "jetson client not configured")
+    result = getattr(self._jetson, action)()
+    with self._lock:
+      self._safety = new_state
+      if isinstance(result, dict) and result:
+        self._jetson_state = result
+    return result
+
+  # --- plug actions ----------------------------------------------------------
+
+  def shutdown(self, name: str) -> PlugState:
+    return self._set_plug(name, on=False)
+
+  def poweron(self, name: str) -> PlugState:
+    return self._set_plug(name, on=True)
+
+  def _set_plug(self, name: str, *, on: bool) -> PlugState:
+    plug = self._plugs.get(name)
+    if plug is None:
+      raise KeyError(name)
+    try:
+      verified_on = plug.set_state(on)
+    except PlugError as e:
+      # Record the failed verify in the cache so /state reflects it, then
+      # re-raise so the HTTP layer returns a 5xx. `verified=False` is the
+      # signal that the cached `on` is NOT trustworthy.
+      ps = PlugState(on=e.observed, verified=False, verified_at=_now_iso())
+      with self._lock:
+        self._plug_state[name] = ps
+      raise
+    ps = PlugState(on=verified_on, verified=True, verified_at=_now_iso())
+    with self._lock:
+      self._plug_state[name] = ps
+      self._safety = self._safety_after_plug(name, verified_on)
+    self._publish_plug(name, ps)
+    return ps
+
+  @staticmethod
+  def _safety_after_plug(name: str, on: bool) -> SafetyState:
+    # Placeholder semantics: a verified power-off implies the matching
+    # shutdown state; a verified power-on returns to IDLE.
+    if not on:
+      return SafetyState.SHUTDOWN_ARM if name == PLUG_ARM else SafetyState.SHUTDOWN_JETSON
+    return SafetyState.IDLE
+
+  def _publish_plug(self, name: str, ps: PlugState) -> None:
+    self._publish(topics.plug_state(name), ps.model_dump(), topics.QOS_PLUG, topics.RETAIN_PLUG)
+
+  # --- background refresh ----------------------------------------------------
+
+  def _refresh_loop(self) -> None:
+    # Wait one interval before the first refresh: the cache already starts
+    # empty/known and an immediate startup refresh would (a) race operator
+    # actions issued right after boot and (b) make tests nondeterministic.
+    tick = min(self._jetson_refresh_s, self._plug_refresh_s)
+    next_jetson = self._jetson_refresh_s
+    next_plugs = self._plug_refresh_s
+    start = time.monotonic()
+    while not self._stop.is_set():
+      self._stop.wait(tick)
+      if self._stop.is_set():
+        return
+      elapsed = time.monotonic() - start
+      if elapsed >= next_jetson:
+        self._refresh_jetson()
+        next_jetson = elapsed + self._jetson_refresh_s
+      if elapsed >= next_plugs:
+        self._refresh_plugs()
+        next_plugs = elapsed + self._plug_refresh_s
+
+  def _refresh_jetson(self) -> None:
+    if self._jetson is None:
+      return
+    try:
+      st = self._jetson.state()
+    except JetsonError as e:
+      log.warning('{"event":"jetson_refresh","outcome":"error","detail":"%s"}', e.detail)
+      return
+    with self._lock:
+      self._jetson_state = st
+
+  def _refresh_plugs(self) -> None:
+    for name, plug in self._plugs.items():
+      try:
+        on = plug.read_state()
+      except Exception as e:  # noqa: BLE001 — refresh is best-effort
+        log.warning(
+          '{"event":"plug_refresh","plug":"%s","outcome":"error","detail":"%s"}',
+          name,
+          f"{type(e).__name__}: {e}",
+        )
+        with self._lock:
+          # Mark the cached state unverified so a refresh failure is visible,
+          # but keep the last-known `on` (more useful than nulling it).
+          prev = self._plug_state.get(name, PlugState())
+          self._plug_state[name] = PlugState(on=prev.on, verified=False, verified_at=_now_iso())
+        continue
+      ps = PlugState(on=on, verified=True, verified_at=_now_iso())
+      with self._lock:
+        self._plug_state[name] = ps
+      self._publish_plug(name, ps)
+
+
+def build_control_plane(config: dict, publish: PublishFn) -> ControlPlane:
+  """Construct a ControlPlane from supervisor.yaml `control` config.
+
+  Expected shape (all under `control:`):
+
+    control:
+      plugs:
+        arm:    {address: 192.168.1.50}
+        jetson: {address: 192.168.1.51}
+      wiz:
+        driver: pywizlight          # 'pywizlight' (prod) | 'fake' (integration)
+        retries: 3
+        retry_delay_s: 0.2
+      jetson:
+        base_url: http://192.168.1.40:8080
+        timeout_s: 3.0
+        auth_token: null            # optional pre-shared token
+      refresh:
+        jetson_s: 5.0
+        plug_s: 10.0
+
+  Plug controllers are built via the pywizlight driver (real device) by
+  default. The integration harness sets `wiz.driver: fake` for an in-memory
+  bulb, and a plug may carry `mode: drop` to make it always fail verify (the
+  safety-path assertion). When a plug has no address AND the driver is
+  pywizlight, it is omitted (the matching endpoints then 404 rather than
+  pretending an actuator exists); the fake driver needs no address.
+  """
+  from .wiz import PlugConfig, build_controller
+
+  cc = config.get("control", {})
+  wiz_cfg = cc.get("wiz", {})
+  driver = wiz_cfg.get("driver", "pywizlight")
+  retries = int(wiz_cfg.get("retries", 3))
+  retry_delay = float(wiz_cfg.get("retry_delay_s", 0.2))
+
+  plugs: dict[str, PlugController] = {}
+  for name, pcfg in (cc.get("plugs") or {}).items():
+    pcfg = pcfg or {}
+    address = pcfg.get("address")
+    mode = pcfg.get("mode", "ok")
+    # Real driver needs an address; the fake driver synthesises the bulb.
+    if driver != "fake" and not address:
+      continue
+    plugs[name] = build_controller(
+      PlugConfig(name=name, address=address or "fake", retries=retries, retry_delay_s=retry_delay),
+      driver=driver,
+      mode=mode,
+    )
+
+  jetson_client: JetsonClient | None = None
+  jcfg = cc.get("jetson") or {}
+  if jcfg.get("base_url"):
+    from .jetson import JetsonConfig
+
+    jetson_client = JetsonClient(
+      JetsonConfig(
+        base_url=jcfg["base_url"],
+        timeout_s=float(jcfg.get("timeout_s", 3.0)),
+        auth_token=jcfg.get("auth_token"),
+      )
+    )
+
+  refresh = cc.get("refresh", {})
+  return ControlPlane(
+    plugs=plugs,
+    jetson=jetson_client,
+    publish=publish,
+    jetson_refresh_s=float(refresh.get("jetson_s", 5.0)),
+    plug_refresh_s=float(refresh.get("plug_s", 10.0)),
+  )

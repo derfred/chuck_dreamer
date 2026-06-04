@@ -3,10 +3,14 @@
 Robot-arm monitoring system. This tree is self-contained under
 `src/fessel/` and builds independently of the host repository.
 
-- **supervisor** — Pi-side safety/control-plane process (Slice 1: live
-  activate/deactivate relay + heartbeat).
+- **supervisor** — Pi-side safety/control-plane process: live
+  activate/deactivate relay + heartbeat, plus the Slice 3 action surface
+  (Jetson pause/stop/resume, WiZ plug power control with send-and-verify, and
+  the `/state` aggregation).
 - **video** — Pi-side GStreamer pipeline + live state machine.
 - **webui** — cluster-side backend (FastAPI) + frontend (React) + mediamtx.
+  The backend forwards `/api/control/*` and `/api/state` to supervisor; the
+  frontend dashboard shows state and issues control commands.
 - **schemas** — canonical wire shapes (single source of truth).
 
 See `docs/fessel/` for the requirements, architecture, and slice plans.
@@ -33,9 +37,29 @@ Procfile            local dev (mosquitto + supervisor + video + backend + fronte
 ```
 make -C src/fessel sync          # uv sync each clean-venv project
 make -C src/fessel test          # pytest (clean-venv projects) + frontend tsc
-make -C src/fessel types         # regenerate webui/shared/schemas.ts
+make -C src/fessel types         # regenerate the TS types + Zod validators
+make -C src/fessel check-types   # fail if the generated output is stale (CI guard)
 make -C src/fessel test-video    # video tests (needs the gi venv, below)
 ```
+
+### Generated wire types & validators (single source of truth)
+
+The Python models in `schemas/fessel_schemas` are the one source of truth for
+every wire shape. `make types` derives two frontend artifacts from them:
+
+- `webui/shared/schemas.ts` — compile-time TypeScript types (dependency-free,
+  genuinely shared).
+- `webui/frontend/src/generated/validators.ts` — runtime **Zod** validators
+  (depends on `zod`, so it lives inside the frontend). The API client
+  validates `/api/state` and `/api/capabilities` bodies at the fetch boundary
+  (parse-don't-cast); an off-contract body logs `console.error` and throws.
+
+Both are generated, never hand-edited. `make check-types` (run in CI as the
+`types-in-sync` job) regenerates them and fails if the committed output drifted
+— editing a model without re-running `make types` breaks the build rather than
+silently weakening runtime validation. On the Pi side, the same discipline
+applies on the bus: `MqttClient.subscribe_model(topic, Model.model_validate, …)`
+validates an inbound payload before dispatch and drops a malformed message.
 
 ## PyGObject (gi) venv for `video` — IMPORTANT
 

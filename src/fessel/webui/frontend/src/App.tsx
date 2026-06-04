@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from "react";
 import { AuthError, fetchMe, redirectToLogin, type Identity } from "./api";
+import { Dashboard } from "./Dashboard";
 import { Live } from "./Live";
 
 function usePath(): string {
@@ -24,20 +25,6 @@ function usePath(): string {
 function navigate(to: string): void {
   window.history.pushState({}, "", to);
   window.dispatchEvent(new PopStateEvent("popstate"));
-}
-
-function Dashboard() {
-  return (
-    <div style={{ padding: 16 }}>
-      <h1>Fessel</h1>
-      <p>Dashboard — later slices fill this in.</p>
-      <p>
-        <a href="/live" onClick={(e) => (e.preventDefault(), navigate("/live"))}>
-          Go to live view →
-        </a>
-      </p>
-    </div>
-  );
 }
 
 export function App() {

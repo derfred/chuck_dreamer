@@ -19,11 +19,15 @@ so signer (backend) and verifier (mediamtx) never diverge.
 
 from .models import (
     Capabilities,
+    CameraState,
     LiveActivate,
     LiveDeactivate,
     LiveState,
     LiveStateValue,
     ModeTriplet,
+    PlugState,
+    SafetyState,
+    StateResponse,
     mode_from_canonical,
     mode_to_canonical,
 )
@@ -31,11 +35,15 @@ from .version import fessel_version
 
 __all__ = [
     "Capabilities",
+    "CameraState",
     "LiveActivate",
     "LiveDeactivate",
     "LiveState",
     "LiveStateValue",
     "ModeTriplet",
+    "PlugState",
+    "SafetyState",
+    "StateResponse",
     "fessel_version",
     "mode_from_canonical",
     "mode_to_canonical",

@@ -95,21 +95,12 @@ class VideoApp:
       retain=topics.RETAIN_STATE,
     )
 
-  def _on_activate(self, _topic: str, payload: dict) -> None:
-    try:
-      cmd = LiveActivate.model_validate(payload)
-    except Exception:  # noqa: BLE001
-      log.exception("bad activate payload: %s", payload)
-      return
+  def _on_activate(self, _topic: str, cmd: LiveActivate) -> None:
+    # Validated by subscribe_model; a malformed payload was already dropped.
     log.info("activate path=%s mode=%s", cmd.path, cmd.mode)
     self._sm.request_activate(cmd.mode, cmd.path)
 
-  def _on_deactivate(self, _topic: str, payload: dict) -> None:
-    try:
-      cmd = LiveDeactivate.model_validate(payload)
-    except Exception:  # noqa: BLE001
-      log.exception("bad deactivate payload: %s", payload)
-      return
+  def _on_deactivate(self, _topic: str, cmd: LiveDeactivate) -> None:
     log.info("deactivate path=%s", cmd.path)
     self._sm.request_deactivate(cmd.path)
 
@@ -126,8 +117,17 @@ class VideoApp:
 
   def run(self) -> None:
     self._mqtt.connect()
-    self._mqtt.subscribe(topics.CMD_LIVE_ACTIVATE, self._on_activate, qos=topics.QOS_CMD)
-    self._mqtt.subscribe(topics.CMD_LIVE_DEACTIVATE, self._on_deactivate, qos=topics.QOS_CMD)
+    # Commands are schema-validated at the transport: a malformed activate /
+    # deactivate is logged and dropped before it reaches the handler.
+    self._mqtt.subscribe_model(
+      topics.CMD_LIVE_ACTIVATE, LiveActivate.model_validate, self._on_activate, qos=topics.QOS_CMD
+    )
+    self._mqtt.subscribe_model(
+      topics.CMD_LIVE_DEACTIVATE,
+      LiveDeactivate.model_validate,
+      self._on_deactivate,
+      qos=topics.QOS_CMD,
+    )
     self._mqtt.loop_start()
     self._sm.start()
     self._publish_capabilities()
@@ -136,7 +136,9 @@ class VideoApp:
     signal.signal(signal.SIGINT, lambda *_: self._stop.set())
 
     while not self._stop.is_set():
-      self._mqtt.publish(topics.HEARTBEAT, {"from": "video", "ts": time.time()}, qos=topics.QOS_HEARTBEAT)
+      self._mqtt.publish(
+        topics.HEARTBEAT, {"from": "video", "ts": time.time()}, qos=topics.QOS_HEARTBEAT
+      )
       self._stop.wait(HEARTBEAT_INTERVAL_S)
 
     log.info("video shutting down")

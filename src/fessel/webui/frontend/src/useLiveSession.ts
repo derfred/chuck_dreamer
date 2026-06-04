@@ -245,7 +245,6 @@ export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): Liv
       const delay = config.reconnectBackoffMs[idx];
       timerRef.current = window.setTimeout(() => void connectOnce(nextGen), delay);
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [clearTimers, closePc, setLiveState, connectOnce],
   );
 

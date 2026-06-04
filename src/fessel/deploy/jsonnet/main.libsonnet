@@ -77,6 +77,11 @@ local tailscaleLib = import 'tailscale.libsonnet';
     + [web.deployment, web.service]
     + (if std.objectHas(web, 'ingress') then [web.ingress] else [])
     + (if cfg.includeTestPi then [pi.deployment, pi.service] else [])
+    + (
+      if cfg.includeControlMocks
+      then [pi.jetsonMockConfigMap, pi.jetsonMockDeployment, pi.jetsonMockService]
+      else []
+    )
     + (if cfg.includeTailscale then [ts.srtIngress, ts.supervisorEgress] else [])
     + (if withTestJob then [$.testJob(cfg)] else []),
 }

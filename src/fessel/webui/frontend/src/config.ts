@@ -34,4 +34,8 @@ export const config = {
   // oauth2-proxy login start path; the proxy bounces the browser to GitHub.
   // Exact path depends on the proxy config, hence a knob.
   oauthStartPath: str("VITE_OAUTH_START_PATH", "/oauth2/start"),
+  // Dashboard /api/state poll interval (F3.4). Short, because state can change
+  // from outside the UI (direct supervisor calls, or the Slice 6 safety state
+  // machine acting on its own) and the dashboard must reflect that.
+  statePollMs: num("VITE_STATE_POLL_MS", 2000),
 };

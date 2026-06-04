@@ -9,7 +9,7 @@ PY_PROJECTS := schemas pi/shared pi/supervisor webui/backend
 # pi/video is handled separately: it needs a --system-site-packages venv
 # for PyGObject (gi). See dev-env docs and I0.4.
 
-.PHONY: test lint lint-py lint-frontend format types sync \
+.PHONY: test lint lint-py lint-frontend format types check-types sync \
         test-py test-video test-frontend \
         package-dpkg package-docker package-tanka
 
@@ -52,7 +52,19 @@ format:
 	done
 
 types:
+	cd "$(HERE)webui/frontend" && npm ci
 	"$(HERE)tools/generate-types.sh"
+
+# Sync guard: regenerate the TS types + Zod validators and fail if the
+# committed output is stale (i.e. someone edited a model in schemas/ without
+# re-running `make types`). The generated artifacts are load-bearing — the
+# frontend's compile-time types AND its runtime validators come from them — so
+# drift must break the build, not surface as a silent mismatch at runtime.
+check-types: types
+	@git diff --exit-code -- \
+	  "$(HERE)webui/shared/schemas.ts" \
+	  "$(HERE)webui/frontend/src/generated/validators.ts" \
+	  || { echo "ERROR: generated types/validators are stale — run 'make types' and commit"; exit 1; }
 
 # --- packaging placeholders (arrive in a later slice) ---
 package-dpkg:

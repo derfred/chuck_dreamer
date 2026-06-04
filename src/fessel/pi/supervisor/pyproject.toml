@@ -1,13 +1,18 @@
 [project]
 name = "fessel-supervisor"
 version = "0.1.0"
-description = "Fessel supervisor: control plane + MQTT relay (Slice 1)"
+description = "Fessel supervisor: control plane + MQTT relay + interventions"
 requires-python = ">=3.12"
 dependencies = [
   "fessel-schemas",
   "fessel-shared",
   "fastapi>=0.110",
   "uvicorn[standard]>=0.29",
+  # Slice 3: Jetson HTTP control client (httpx) and WiZ plug control over UDP
+  # (pywizlight). pywizlight is only imported at runtime on the Pi; tests
+  # inject fakes and never import it.
+  "httpx>=0.27",
+  "pywizlight>=0.5",
 ]
 
 [project.scripts]

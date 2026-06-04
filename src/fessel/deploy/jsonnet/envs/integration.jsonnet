@@ -12,6 +12,7 @@ local cfg = fessel.config + {
   whepSecret: std.extVar('whep_secret'),
   webrtc+: { mode: 'podip' },
   includeTestPi: true,
+  includeControlMocks: true,  // jetson-mock pod; WiZ is the in-process fake bulb
   includeTailscale: false,
 };
 

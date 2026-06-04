@@ -11,6 +11,29 @@ export type Path = string;
 export type Path1 = string;
 export type LiveStateValue = "off" | "starting" | "running" | "stopping";
 export type Path2 = string | null;
+export type On = boolean | null;
+export type Verified = boolean;
+export type VerifiedAt = string | null;
+export type Up = boolean | null;
+/**
+ * Abbreviated supervisor safety state (architecture §2.4).
+ *
+ * Slice 3 only ever holds whatever the operator's last command implies; the
+ * real transitions land in Slice 6. The full set is declared here so the
+ * enum doesn't have to change later.
+ */
+export type SafetyState =
+  | "INIT"
+  | "IDLE"
+  | "RUNNING"
+  | "PAUSED"
+  | "STOPPED"
+  | "SHUTDOWN_ARM"
+  | "SHUTDOWN_JETSON"
+  | "DEGRADED";
+export type Jetson = {
+  [k: string]: unknown;
+} | null;
 
 export interface FesselSchemas {
   ModeTriplet?: ModeTriplet;
@@ -18,6 +41,9 @@ export interface FesselSchemas {
   LiveActivate?: LiveActivate;
   LiveDeactivate?: LiveDeactivate;
   LiveState?: LiveState;
+  PlugState?: PlugState;
+  CameraState?: CameraState;
+  StateResponse?: StateResponse;
   [k: string]: unknown;
 }
 /**
@@ -64,4 +90,42 @@ export interface LiveState {
   path?: Path2;
   mode?: ModeTriplet | null;
   [k: string]: unknown;
+}
+/**
+ * A WiZ plug's last *verified* state (S3.1/S3.3).
+ *
+ * `on` reflects the state read back via getPilot after the last action or
+ * background refresh — not the last command issued. `verified` is False when
+ * the most recent verify failed (the command may have been sent but could not
+ * be confirmed); `verified_at` is the ISO-8601 timestamp of that read.
+ */
+export interface PlugState {
+  on?: On;
+  verified?: Verified;
+  verified_at?: VerifiedAt;
+  [k: string]: unknown;
+}
+/**
+ * Camera up/down, derived from the retained arm/video/state/* topics.
+ */
+export interface CameraState {
+  up?: Up;
+  [k: string]: unknown;
+}
+/**
+ * Body of supervisor GET /state and backend GET /api/state (S3.3).
+ *
+ * `jetson` is whatever the Jetson's GET /state returned (opaque to the
+ * backend and dashboard — supervisor caches it and passes it through);
+ * `null` when the Jetson has not been reached yet.
+ */
+export interface StateResponse {
+  safety_state?: SafetyState;
+  jetson?: Jetson;
+  plugs?: Plugs;
+  camera?: CameraState;
+  [k: string]: unknown;
+}
+export interface Plugs {
+  [k: string]: PlugState;
 }

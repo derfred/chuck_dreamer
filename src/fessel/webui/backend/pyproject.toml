@@ -1,13 +1,14 @@
 [project]
 name = "fessel-webui-backend"
 version = "0.1.0"
-description = "Fessel webui backend: signed WHEP URL minting (Slice 1)"
+description = "Fessel webui backend: WHEP URL minting + control-plane forwarders"
 requires-python = ">=3.12"
 dependencies = [
   "fessel-schemas",
   "fastapi>=0.110",
   "uvicorn[standard]>=0.29",
   "pyjwt>=2.8",
+  "httpx>=0.27",
 ]
 
 [project.scripts]

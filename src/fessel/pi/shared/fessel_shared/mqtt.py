@@ -3,6 +3,21 @@
 Both video and supervisor use this. It is intentionally small: connect,
 publish JSON, subscribe with a typed callback, and a background loop. The
 broker is always localhost (MQTT is Pi-internal only).
+
+Two subscribe flavours:
+
+  - `subscribe`        — hands the raw decoded dict to the handler. Use for
+                         schemaless topics (heartbeat) or topics whose payload
+                         model does not exist yet.
+  - `subscribe_model`  — validates the decoded dict through a parser
+                         (`Model.model_validate`) before dispatch, so the
+                         handler receives a validated object, never a raw
+                         dict. A payload that fails validation is logged once
+                         and dropped — it never reaches the handler.
+
+`subscribe_model` takes a plain `parser: Callable[[dict], T]` rather than a
+pydantic type so this module keeps zero schema dependency (the dependency
+direction stays fessel_schemas -> consumers, never the reverse).
 """
 
 from __future__ import annotations
@@ -10,7 +25,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypeVar
 
 import paho.mqtt.client as mqtt
 
@@ -18,12 +33,16 @@ log = logging.getLogger(__name__)
 
 MessageHandler = Callable[[str, dict[str, Any]], None]
 
+T = TypeVar("T")
+# A validator: dict -> validated object. `pydantic.BaseModel.model_validate`
+# is exactly this shape, so callers pass `MyModel.model_validate`.
+Parser = Callable[[dict[str, Any]], T]
+ModelHandler = Callable[[str, T], None]
+
 
 class MqttClient:
   def __init__(self, client_id: str, host: str = "127.0.0.1", port: int = 1883) -> None:
-    self._client = mqtt.Client(
-      mqtt.CallbackAPIVersion.VERSION2, client_id=client_id
-    )
+    self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
     self._host = host
     self._port = port
     self._handlers: dict[str, tuple[MessageHandler, int]] = {}
@@ -75,5 +94,29 @@ class MqttClient:
     self._handlers[topic] = (handler, qos)
     self._client.subscribe(topic, qos=qos)
 
-  def publish(self, topic: str, payload: dict[str, Any], qos: int = 0, retain: bool = False) -> None:
+  def subscribe_model(
+    self, topic: str, parser: Parser[T], handler: ModelHandler[T], qos: int = 0
+  ) -> None:
+    """Subscribe with schema validation.
+
+    `parser` (typically `SomeModel.model_validate`) is applied to the decoded
+    dict; the handler receives the validated object. A payload that fails
+    validation is logged once and dropped — it never reaches the handler, so
+    a malformed message can't crash or mislead a subscriber. This is the
+    consumer-side mirror of constructing-then-dumping a model on publish.
+    """
+
+    def _validating(t: str, payload: dict[str, Any]) -> None:
+      try:
+        obj = parser(payload)
+      except Exception as e:  # noqa: BLE001 — model_validate raises ValidationError; stay parser-agnostic
+        log.warning("dropping invalid payload on %s: %s", t, e)
+        return
+      handler(t, obj)
+
+    self.subscribe(topic, _validating, qos=qos)
+
+  def publish(
+    self, topic: str, payload: dict[str, Any], qos: int = 0, retain: bool = False
+  ) -> None:
     self._client.publish(topic, json.dumps(payload), qos=qos, retain=retain)

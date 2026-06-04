@@ -43,4 +43,57 @@ function(cfg) {
       ports: [{ name: 'control', port: 8443, targetPort: 8443, protocol: 'TCP' }],
     },
   },
+
+  // --- Slice 3 control-plane mocks (only when cfg.includeControlMocks) ------
+  // The jetson-mock: a stdlib HTTP server (integration/mocks/jetson_mock.py)
+  // mounted from a ConfigMap into a bare python:3-slim — no new image. The
+  // test-Pi's supervisor.test.yaml points control.jetson.base_url at the
+  // `jetson-mock` Service. The WiZ side needs no pod (the fake bulb is
+  // in-process in supervisor via wiz.driver: fake).
+
+  jetsonMockConfigMap: {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: { name: 'jetson-mock-script', namespace: ns },
+    data: { 'jetson_mock.py': importstr '../../integration/mocks/jetson_mock.py' },
+  },
+
+  jetsonMockDeployment: {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: { name: 'jetson-mock', namespace: ns, labels: { app: 'jetson-mock' } },
+    spec: {
+      replicas: 1,  // stateful per run, like the real device
+      selector: { matchLabels: { app: 'jetson-mock' } },
+      template: {
+        metadata: { labels: { app: 'jetson-mock' } },
+        spec: {
+          containers: [{
+            name: 'jetson-mock',
+            image: 'python:3-slim',
+            command: ['python3', '/app/jetson_mock.py'],
+            ports: [{ name: 'http', containerPort: 8080, protocol: 'TCP' }],
+            readinessProbe: {
+              httpGet: { path: '/healthz', port: 8080 },
+              initialDelaySeconds: 2,
+              periodSeconds: 2,
+            },
+            volumeMounts: [{ name: 'script', mountPath: '/app' }],
+            resources: { requests: { cpu: '50m', memory: '64Mi' } },
+          }],
+          volumes: [{ name: 'script', configMap: { name: 'jetson-mock-script' } }],
+        },
+      },
+    },
+  },
+
+  jetsonMockService: {
+    apiVersion: 'v1',
+    kind: 'Service',
+    metadata: { name: 'jetson-mock', namespace: ns },
+    spec: {
+      selector: { app: 'jetson-mock' },
+      ports: [{ name: 'http', port: 8080, targetPort: 8080, protocol: 'TCP' }],
+    },
+  },
 }

@@ -65,6 +65,20 @@ jobs:
       - run: npm run test
         working-directory: src/fessel/webui/frontend
 
+  # Sync guard: the frontend's TS types AND runtime Zod validators are
+  # generated from the Python models (single source of truth). Regenerate and
+  # fail if the committed output drifted — a stale validator would silently
+  # weaken runtime validation, and stale types would mask a wire-shape change.
+  types-in-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: make check-types
+
   packaging:
     runs-on: ubuntu-latest
     steps:

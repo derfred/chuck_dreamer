@@ -53,6 +53,12 @@
   // expect a real Pi over Tailscale (production -> false).
   includeTestPi: false,
 
+  // Whether to render the Slice 3 control-plane MOCKS (jetson-mock pod). Only
+  // the integration env sets this true; it pairs with the test-Pi's
+  // supervisor.test.yaml control block (wiz.driver: fake, jetson base_url
+  // -> jetson-mock). Never set in production or live-preview.
+  includeControlMocks: false,
+
   // Whether to render the Tailscale ingress/egress Services (production).
   includeTailscale: false,
 }
