@@ -31,6 +31,7 @@ from chuck_dreamer.lerobot.object_localization.cli import (
 from chuck_dreamer.real.fk_calibration.cli import (
   calibrate_arm_from_episodes_cmd,
 )
+from chuck_dreamer.runtime.cli import run_cmd
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ for _cmd in (
   annotate_mat_cmd,
   prompt_episodes_cmd,
   calibrate_arm_from_episodes_cmd,
+  run_cmd,
 ):
   cli.add_command(_cmd)
 

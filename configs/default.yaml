@@ -271,6 +271,73 @@ env:
 
   reward: "goal_distance"
 
+# SO-101 pushing runtime (chuck_dreamer.runtime). Drives the arm through a
+# trusted control kernel (synchronized slew + joint velocity limit +
+# authoritative clamp + HOLD/NORMAL/ESTOP mode machine) behind a backend
+# protocol. Launched by `python main.py run`. M0/M1: no policy yet — the arm
+# is driven by a scripted setpoint source. This block is read only by the
+# runtime; the rest of the config is untouched by it.
+runtime:
+  # Loop rates (Hz). 50 Hz control (read-every-tick) is the recommended
+  # default; the scripted source publishes setpoints at the slower policy rate.
+  control_rate_hz: 50
+  policy_rate_hz:  10
+
+  # Run length. null -> run until SIGINT (Ctrl-C). A float bounds the run,
+  # used by demos and tests. CLI: `--duration 2` or `-o runtime.duration_s=2`.
+  duration_s: null
+
+  # Backend selection (import-path-plus-params, spec §3.2/§8). FakeBackend
+  # is a no-physics echo arm (the kernel's slew/clamp shapes all motion).
+  # Swap to MujocoBackend for sim physics + an optional 3D viewer:
+  #   target: "chuck_dreamer.runtime.mujoco_backend:MujocoBackend"
+  #   params: { realtime: true }
+  backend:
+    target: "chuck_dreamer.runtime.backend:FakeBackend"
+    params: {}
+
+  # Authoritative joint-space safety envelope (the kernel's clamp + slew).
+  safety:
+    joint_names: ["Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw"]
+    # Per-joint position bounds (rad). null -> read from backend.joint_limits()
+    # (MuJoCo model ranges). FakeBackend has no model, so set these when using it.
+    joint_lower: [-1.92, -3.32, -0.174, -1.66, -2.79, -0.174]
+    joint_upper: [ 1.92,  0.174,  3.14,  1.66,  2.79,  1.75]
+    # Joint-space velocity limit (rad/s). Scalar (broadcast) or per-joint list.
+    max_velocity: 1.5
+    # Boot pose; matches the so100 SceneConfig default home.
+    home_qpos: [0, -3.14, 3.14, 0, 0, 0]
+
+  # Scripted setpoint source (M1; replaced by the policy at M6).
+  source:
+    kind: "sine_sweep"        # "go_to_pose" | "sine_sweep" | custom import path
+    go_to_pose:
+      q_goal: "home"          # "home" or an explicit per-joint list
+      duration_s: 3.0
+    sine_sweep:
+      amplitude: 0.3          # rad; scalar (all joints) or per-joint list
+      freq_hz:   0.25         # Hz; scalar or per-joint
+      phase:     0.0          # rad; scalar or per-joint
+
+  # External heartbeat watchdog (spec §10.5): a control loop that goes
+  # silent past this latches the kernel into ESTOP. Tune to the fat (read) tick.
+  watchdog:
+    timeout_s: 0.1
+
+  # Telemetry -> CSV (spec §3.11, scaled to CSV for M0; Rerun at M3).
+  logging:
+    csv_path: "runtime_logs/telemetry.csv"
+    queue_maxsize: 10000
+    flush_every_n: 50
+
+  # Optional MuJoCo viewer (off by default -> headless / test-safe). When on
+  # it draws the commanded setpoint + current EE markers; the task-space
+  # safety box overlay is deferred to M5.
+  viewer:
+    enabled:       false
+    draw_setpoint: true
+    draw_ee:       true
+
 # Object-localization pipeline (chuck_dreamer.real.object_localization).
 # Used by `python main.py calibrate-intrinsics` + `python main.py annotate-mat`
 # to calibrate cameras from LeRobot recordings, and by the

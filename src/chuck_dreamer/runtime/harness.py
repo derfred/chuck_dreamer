@@ -1,0 +1,299 @@
+"""The runtime orchestrator: build from config, run both loops, shut down.
+
+:class:`Runtime` is the M0 "process that boots from a YAML session config":
+it constructs the backend, kernel, channel, policy, telemetry sink, and the
+two loops from ``cfg.runtime``, then owns their lifecycle. A SIGINT handler
+(installed on the main thread) sets a shutdown event; the main thread waits
+on it (or drives the viewer when enabled) and runs the ordered shutdown.
+
+The producer is a :class:`~chuck_dreamer.policy.Policy` (M0/M1 ships the
+scripted :class:`~chuck_dreamer.runtime.sources.GoToPose` /
+:class:`~chuck_dreamer.runtime.sources.SineSweep`; M6 swaps in Dreamer via
+config). :class:`PolicyLoop` calls ``policy.act(obs)`` each step with a
+:class:`RuntimeObservation` carrying elapsed time and the measured joints.
+
+Shutdown ordering (project plan): stop the policy loop first (no new
+setpoints), bring the kernel to HOLD, let the control loop flush a few hold
+ticks, then stop the control loop, watchdog, backend, and finally the CSV
+sink (which drains + flushes — the "flushed logs" guarantee).
+"""
+
+from __future__ import annotations
+
+import logging
+import signal
+import threading
+import time
+from typing import Any
+
+import numpy as np
+from omegaconf import DictConfig, OmegaConf
+
+from ..policy import Policy
+from .backend import RobotBackend
+from .control_loop import ControlLoop, Watchdog
+from .kernel import ControlKernel, KernelLimits, Mode
+from .observation import RuntimeObservation
+from .registry import construct, import_symbol
+from .setpoint_channel import SetpointChannel
+from .sources import GoToPose, SineSweep
+from .telemetry import CsvSink, TelemetryQueue
+
+logger = logging.getLogger(__name__)
+
+_FAKE_BACKEND_TARGET = "chuck_dreamer.runtime.backend:FakeBackend"
+
+
+class PolicyLoop:
+  """Threaded policy producer: ``policy.act(obs)`` -> setpoint channel.
+
+  Resets the policy once with ``reset_arg`` (a joint vector or a SceneConfig)
+  then, at the policy rate, builds a :class:`RuntimeObservation` from the
+  elapsed clock and the backend's measured joints and publishes the resulting
+  action. This is the exact producer path Dreamer will use at M6.
+  """
+
+  def __init__(
+    self,
+    policy: Policy,
+    channel: SetpointChannel,
+    backend: RobotBackend,
+    reset_arg: Any,
+    *,
+    rate_hz: float,
+  ) -> None:
+    if rate_hz <= 0:
+      raise ValueError("rate_hz must be positive")
+    self._policy    = policy
+    self._channel   = channel
+    self._backend   = backend
+    self._reset_arg = reset_arg
+    self._period = 1.0 / float(rate_hz)
+    self._stop = threading.Event()
+    self._thread: threading.Thread | None = None
+
+  def start(self) -> None:
+    self._policy.reset(self._reset_arg)
+    self._stop.clear()
+    self._thread = threading.Thread(target=self._run, name="runtime-policy", daemon=True)
+    self._thread.start()
+
+  def stop(self, join_timeout: float = 5.0) -> None:
+    self._stop.set()
+    if self._thread is not None:
+      self._thread.join(timeout=join_timeout)
+      self._thread = None
+
+  def _run(self) -> None:
+    t0 = time.monotonic()
+    next_deadline = t0
+    while not self._stop.is_set():
+      obs = RuntimeObservation(
+        t=time.monotonic() - t0,
+        q_meas=self._backend.read_positions(),
+      )
+      self._channel.publish(self._policy.act(obs))
+      next_deadline += self._period
+      sleep_for = next_deadline - time.monotonic()
+      self._stop.wait(sleep_for if sleep_for > 0 else 0)
+
+
+class Runtime:
+  """Boots the SO-101 runtime from ``cfg`` and owns its thread lifecycle."""
+
+  def __init__(self, cfg: DictConfig) -> None:
+    self.cfg = cfg
+    rt       = cfg.runtime
+
+    # 1. Backend. FakeBackend needs the safety envelope at construction; a
+    #    physics backend (MuJoCo) carries its own limits. We resolve the
+    #    envelope first so both backend and kernel agree.
+    self._joint_names          = list(rt.safety.joint_names)
+    n                          = len(self._joint_names)
+    self.backend: RobotBackend = self._build_backend(rt, n)
+
+    lower, upper = self._resolve_limits(rt.safety, self.backend)
+    self._limits = KernelLimits.build(lower, upper, _to_array(rt.safety.max_velocity, n))
+
+    # 2. Home pose -> kernel slew reference (clamped into the box).
+    home        = _to_array(rt.safety.home_qpos, n)
+    self.kernel = ControlKernel(self._limits, np.clip(home, lower, upper), mode=Mode.NORMAL)
+
+    # 3. Channel, telemetry sink, loops, watchdog.
+    self.channel   = SetpointChannel()
+    self.telemetry = TelemetryQueue(maxsize=int(rt.logging.queue_maxsize))
+    self.sink      = CsvSink(
+      rt.logging.csv_path, self.telemetry, n_joints=n,
+      flush_every_n=int(rt.logging.flush_every_n),
+    )
+    self.watchdog = Watchdog(
+      timeout_s=float(rt.watchdog.timeout_s),
+      on_trip=self._on_watchdog_trip,
+    )
+    self.control_loop = ControlLoop(
+      self.kernel, self.backend, self.channel, self.telemetry,
+      rate_hz=float(rt.control_rate_hz), watchdog=self.watchdog,
+    )
+    self.policy      = self._build_policy(rt, home)
+    self.policy_loop = PolicyLoop(
+      self.policy, self.channel, self.backend, home,
+      rate_hz=float(rt.policy_rate_hz),
+    )
+
+    self._duration_s = None if rt.duration_s is None else float(rt.duration_s)
+    self._viewer_enabled = bool(rt.viewer.enabled)
+    self._shutdown = threading.Event()
+    self._n = n
+
+  # -- construction helpers -------------------------------------------------
+
+  def _build_backend(self, rt: DictConfig, n: int) -> RobotBackend:
+    spec   = OmegaConf.to_container(rt.backend, resolve=True)
+    target = spec.get("target") if isinstance(spec, dict) else spec
+    params = dict(spec.get("params") or {}) if isinstance(spec, dict) else {}
+
+    if target == _FAKE_BACKEND_TARGET:
+      lower, upper = self._resolve_limits(rt.safety, backend=None, n=n)
+      return construct(spec, n_joints=n, lower=lower, upper=upper,
+                       q_init=_to_array(rt.safety.home_qpos, n))
+
+    # A config-aware backend (e.g. MujocoBackend, which samples a scene from
+    # cfg) exposes a `from_config` classmethod; prefer it and feed it `params`
+    # as kwargs. Otherwise construct the class directly from the spec.
+    factory     = import_symbol(target)
+    from_config = getattr(factory, "from_config", None)
+    if callable(from_config):
+      return from_config(self.cfg, **params)
+    return construct(spec)
+
+  def _resolve_limits(self, safety: DictConfig, backend, n: int | None = None):
+    """Joint bounds from config if set, else from the backend."""
+    lo_cfg, hi_cfg = safety.joint_lower, safety.joint_upper
+    if lo_cfg is not None and hi_cfg is not None:
+      count = n if n is not None else len(safety.joint_names)
+      return _to_array(lo_cfg, count), _to_array(hi_cfg, count)
+    if backend is None:
+      raise ValueError(
+        "runtime.safety.joint_lower/upper must be set for FakeBackend "
+        "(no backend to read limits from before construction)")
+    return backend.joint_limits()
+
+  def _build_policy(self, rt: DictConfig, home: np.ndarray) -> Policy:
+    kind = rt.source.kind
+    if kind == "go_to_pose":
+      g    = rt.source.go_to_pose
+      goal = home if g.q_goal == "home" else _to_array(g.q_goal, len(home))
+      return GoToPose(q_goal=goal, duration_s=float(g.duration_s))
+    if kind == "sine_sweep":
+      s = rt.source.sine_sweep
+      return SineSweep(
+        amplitude=_scalar_or_array(s.amplitude),
+        freq_hz=_scalar_or_array(s.freq_hz),
+        phase=_scalar_or_array(s.phase),
+      )
+    # Anything else is a registry import path to a custom Policy.
+    return construct(kind)
+
+  def _on_watchdog_trip(self) -> None:
+    self.kernel.request_estop()
+    self.telemetry.emit_event("watchdog_trip", detail="control loop stalled -> ESTOP")
+    logger.error("watchdog tripped: control loop stalled, latched ESTOP")
+
+  # -- lifecycle ------------------------------------------------------------
+
+  def start(self) -> None:
+    self.backend.start()
+    self.sink.start()
+    self.control_loop.start()
+    self.watchdog.start()
+    self.policy_loop.start()
+
+  def request_shutdown(self) -> None:
+    self._shutdown.set()
+
+  def run(self) -> None:
+    """Boot, run until SIGINT / duration / viewer close, then shut down."""
+    installed = _install_sigint(self.request_shutdown)
+    self.start()
+    try:
+      if self._viewer_enabled:
+        self._run_viewer_loop()
+      else:
+        self._shutdown.wait(self._duration_s)  # None blocks until SIGINT
+    finally:
+      if installed is not None:
+        signal.signal(signal.SIGINT, installed)
+      self.shutdown()
+
+  def _run_viewer_loop(self) -> None:
+    """Drive the backend's viewer on the main thread (macOS requirement)."""
+    open_viewer = getattr(self.backend, "open_viewer", None)
+    if open_viewer is None:
+      logger.warning("viewer enabled but backend has no open_viewer(); waiting headless")
+      self._shutdown.wait(self._duration_s)
+      return
+    # The viewer reads the backend's mjData on this (main) thread while the
+    # physics thread writes it; serialize sync() against mj_step under the
+    # backend's lock. draw_overlays acquires that lock internally (briefly),
+    # so it must run OUTSIDE the `with` to avoid re-entrant deadlock.
+    physics_lock = getattr(self.backend, "physics_lock", None)
+    deadline = None if self._duration_s is None else time.monotonic() + self._duration_s
+    with open_viewer() as viewer:
+      while viewer.is_running() and not self._shutdown.is_set():
+        self.backend.draw_overlays(viewer, q_cmd=self.kernel.q_cmd)
+        if physics_lock is not None:
+          with physics_lock():
+            viewer.sync()
+        else:
+          viewer.sync()
+        if deadline is not None and time.monotonic() >= deadline:
+          break
+        self._shutdown.wait(1.0 / 60.0)
+
+  def shutdown(self) -> None:
+    # Ordered (project plan): stop new setpoints, hold, flush, tear down.
+    self.policy_loop.stop()
+    self.kernel.request_hold()
+    self.channel.publish(self.kernel.q_cmd)  # settle in place
+    time.sleep(3.0 / max(1.0, float(self.cfg.runtime.control_rate_hz)))  # a few hold ticks
+    self.control_loop.stop()
+    self.watchdog.stop()
+    self.backend.stop()
+    self.sink.stop()
+    if self.telemetry.dropped:
+      logger.warning("dropped %d telemetry records (queue full)", self.telemetry.dropped)
+
+
+# -- small config coercions ----------------------------------------------------
+
+
+def _to_array(value, n: int) -> np.ndarray:
+  """Coerce a scalar or sequence config value to a length-``n`` float array."""
+  arr = np.asarray(OmegaConf.to_container(value, resolve=True)
+                   if OmegaConf.is_config(value) else value, dtype=np.float64)
+  if arr.ndim == 0:
+    arr = np.full(n, float(arr))
+  if arr.shape != (n,):
+    raise ValueError(f"expected length-{n} value, got shape {arr.shape}")
+  return arr
+
+
+def _scalar_or_array(value):
+  """Pass a scalar through; turn a config list into an array (source params)."""
+  if OmegaConf.is_config(value):
+    return np.asarray(OmegaConf.to_container(value, resolve=True), dtype=np.float64)
+  return value
+
+
+def _install_sigint(handler):
+  """Install a SIGINT handler that calls ``handler``; return the previous one.
+
+  Returns ``None`` (and installs nothing) when not on the main thread —
+  ``signal.signal`` only works there, so tests that build a Runtime off the
+  main thread silently skip it and drive shutdown directly.
+  """
+  if threading.current_thread() is not threading.main_thread():
+    return None
+  previous = signal.getsignal(signal.SIGINT)
+  signal.signal(signal.SIGINT, lambda *_: handler())
+  return previous
