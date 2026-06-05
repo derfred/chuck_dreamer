@@ -29,6 +29,7 @@ from chuck_dreamer.runtime.sources import ManualPolicy
 from chuck_dreamer.runtime.teleop import (
   FakeLeaderReader,
   LerobotLeaderReader,
+  follower_qpos_to_action,
   leader_action_to_follower_qpos,
 )
 
@@ -73,6 +74,44 @@ def test_mapping_raises_on_missing_motor():
   del bad["wrist_roll.pos"]
   with pytest.raises(ValueError, match="wrist_roll.pos"):
     leader_action_to_follower_qpos(bad, jaw_lower=0.0, jaw_upper=1.0)
+
+
+# -- follower_qpos_to_action (inverse, used by FeetechBackend) ----------------
+
+
+def test_inverse_mapping_radians_to_deg_and_percent():
+  lo, hi = -0.174, 1.75
+  q = np.array([np.deg2rad(90.0), np.deg2rad(-45.0), 0.0, 0.0, 0.0, lo + 0.5 * (hi - lo)])
+  action = follower_qpos_to_action(q, jaw_lower=lo, jaw_upper=hi)
+  assert action["shoulder_pan.pos"] == pytest.approx(90.0)
+  assert action["shoulder_lift.pos"] == pytest.approx(-45.0)
+  assert action["gripper.pos"] == pytest.approx(50.0)        # jaw midpoint -> 50%
+
+
+def test_inverse_mapping_round_trips_with_forward():
+  lo, hi = -0.174, 1.75
+  q = np.array([0.5, -1.0, 1.0, 0.3, -0.4, lo + 0.7 * (hi - lo)])
+  back = leader_action_to_follower_qpos(
+    follower_qpos_to_action(q, jaw_lower=lo, jaw_upper=hi), jaw_lower=lo, jaw_upper=hi)
+  np.testing.assert_allclose(back, q, atol=1e-9)
+
+
+def test_inverse_mapping_clamps_jaw_percentage():
+  lo, hi = -0.174, 1.75
+  below = follower_qpos_to_action(np.array([0, 0, 0, 0, 0, lo - 1.0]), jaw_lower=lo, jaw_upper=hi)
+  above = follower_qpos_to_action(np.array([0, 0, 0, 0, 0, hi + 1.0]), jaw_lower=lo, jaw_upper=hi)
+  assert below["gripper.pos"] == pytest.approx(0.0)
+  assert above["gripper.pos"] == pytest.approx(100.0)
+
+
+def test_inverse_mapping_rejects_wrong_shape():
+  with pytest.raises(ValueError, match=r"\(6,\)"):
+    follower_qpos_to_action(np.zeros(5), jaw_lower=0.0, jaw_upper=1.0)
+
+
+def test_inverse_mapping_rejects_zero_jaw_span():
+  with pytest.raises(ValueError, match="jaw_upper"):
+    follower_qpos_to_action(np.zeros(6), jaw_lower=0.5, jaw_upper=0.5)
 
 
 # -- FakeLeaderReader --------------------------------------------------------

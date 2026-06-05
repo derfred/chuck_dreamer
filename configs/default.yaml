@@ -292,6 +292,11 @@ runtime:
   # Swap to MujocoBackend for sim physics + an optional 3D viewer:
   #   target: "chuck_dreamer.runtime.mujoco_backend:MujocoBackend"
   #   params: { realtime: true }
+  # Or the real SO-101 follower over USB (M1 hardware swap-in). The joint
+  # envelope + jaw bounds come from `safety` below, not from params:
+  #   target: "chuck_dreamer.runtime.feetech_backend:FeetechBackend"
+  #   params: { port: "/dev/tty.usbmodemXXX", calibration_id: null,
+  #             use_degrees: true, read_decimation: 1 }
   backend:
     target: "chuck_dreamer.runtime.backend:FakeBackend"
     params: {}

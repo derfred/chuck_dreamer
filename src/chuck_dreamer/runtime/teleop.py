@@ -26,8 +26,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# lerobot get_action() motor order, verified against
-# lerobot.teleoperators.so_leader.so_leader (bus.motors insertion order).
+# lerobot motor order, verified against the SO-101 leader's
+# lerobot.teleoperators.so_leader.so_leader and the SO-101 follower's
+# lerobot.robots.so_follower.so_follower (both share this bus.motors insertion
+# order). Shared by the leader reader (M2) and the FeetechBackend (M1 hardware).
 _LEADER_MOTORS = (
   "shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper",
 )
@@ -37,10 +39,10 @@ _FOLLOWER_JOINTS = (
   "Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw",
 )
 # Motors 0..4 are angular: MotorNormMode.DEGREES when use_degrees=True, so a
-# degree->radian conversion applies. The gripper (index 5) is *always*
-# MotorNormMode.RANGE_0_100 on the SO-101 leader — a 0..100 percentage, NOT
-# degrees — so it is mapped separately into the follower jaw range. Blanket
-# np.deg2rad over all six would silently mishandle the jaw.
+# degree<->radian conversion applies. The gripper (index 5) is *always*
+# MotorNormMode.RANGE_0_100 on the SO-101 — a 0..100 percentage, NOT degrees —
+# so it is mapped separately to/from the follower jaw range. Blanket np.deg2rad
+# over all six would silently mishandle the jaw.
 _N_ANGULAR = 5
 
 
@@ -72,6 +74,47 @@ def leader_action_to_follower_qpos(
       frac = max(0.0, min(1.0, raw / 100.0))  # clamp the percentage into [0, 1]
       q[i] = jaw_lower + frac * (jaw_upper - jaw_lower)
   return q
+
+
+def follower_qpos_to_action(
+  q: np.ndarray,
+  *,
+  jaw_lower: float,
+  jaw_upper: float,
+) -> dict[str, float]:
+  """Inverse of :func:`leader_action_to_follower_qpos`: radians -> lerobot action dict.
+
+  Maps a follower-ordered radian vector, shape ``(6,)``, to the
+  ``{"<motor>.pos": value}`` dict the lerobot SO-101 follower's ``send_action``
+  consumes (motors in :data:`_LEADER_MOTORS` order):
+
+  - joints 0..4: radians -> degrees via :func:`numpy.rad2deg`.
+  - joint 5 (Jaw -> gripper): radians in ``[jaw_lower, jaw_upper]`` -> a 0..100
+    percentage (clamped), the inverse of the leader's gripper mapping.
+
+  Used by :class:`~chuck_dreamer.runtime.feetech_backend.FeetechBackend` to send
+  the kernel's commanded joint setpoint to the real arm in the same convention
+  the leader reader maps the other way, so the two never disagree.
+
+  Raises:
+    ValueError: if ``q`` is not shape ``(6,)`` or ``jaw_upper == jaw_lower``
+      (no jaw range to map the percentage into).
+  """
+  q = np.asarray(q, dtype=np.float64)
+  if q.shape != (len(_LEADER_MOTORS),):
+    raise ValueError(
+      f"follower_qpos_to_action expects shape ({len(_LEADER_MOTORS)},); got {q.shape}")
+  span = jaw_upper - jaw_lower
+  if span == 0.0:
+    raise ValueError("jaw_upper must differ from jaw_lower")
+  action: dict[str, float] = {}
+  for i, motor in enumerate(_LEADER_MOTORS):
+    if i < _N_ANGULAR:
+      action[f"{motor}.pos"] = float(np.rad2deg(q[i]))
+    else:
+      frac = max(0.0, min(1.0, (q[i] - jaw_lower) / span))  # clamp into [0, 1]
+      action[f"{motor}.pos"] = frac * 100.0
+  return action
 
 
 @runtime_checkable
