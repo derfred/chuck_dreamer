@@ -5,7 +5,7 @@
 SHELL := /bin/bash
 HERE := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-PY_PROJECTS := schemas pi/shared pi/supervisor webui/backend
+PY_PROJECTS := schemas pi/shared pi/supervisor pi/uploader webui/backend
 # pi/video is handled separately: it needs a --system-site-packages venv
 # for PyGObject (gi). See dev-env docs and I0.4.
 

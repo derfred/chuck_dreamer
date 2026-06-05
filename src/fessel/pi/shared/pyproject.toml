@@ -1,9 +1,12 @@
 [project]
 name = "fessel-shared"
 version = "0.1.0"
-description = "Shared Pi-side code: MQTT client, config, topic constants"
+description = "Shared Pi-side code: MQTT client, config, topic constants, SSD storage layout"
 requires-python = ">=3.12"
 dependencies = [
+  # fessel-schemas: storage.py produces/consumes RecordingMetadata (V4.4), the
+  # canonical wire shape. Shared owns the on-disk layout that uses it.
+  "fessel-schemas",
   "paho-mqtt>=2.1",
   "pyyaml>=6.0",
 ]
@@ -14,6 +17,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["fessel_shared"]
+
+[tool.uv.sources]
+fessel-schemas = { path = "../../schemas", editable = true }
 
 [dependency-groups]
 dev = [

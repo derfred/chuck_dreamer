@@ -48,6 +48,7 @@ cp -a "$FESSEL_ROOT/schemas/fessel_schemas"      "$STAGE/opt/fessel/lib/"
 cp -a "$FESSEL_ROOT/pi/shared/fessel_shared"     "$STAGE/opt/fessel/lib/"
 cp -a "$FESSEL_ROOT/pi/supervisor/supervisor"    "$STAGE/opt/fessel/lib/"
 cp -a "$FESSEL_ROOT/pi/video/video"              "$STAGE/opt/fessel/lib/"
+cp -a "$FESSEL_ROOT/pi/uploader/uploader"        "$STAGE/opt/fessel/lib/"
 # Don't ship build-host bytecode.
 find "$STAGE/opt/fessel/lib" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$STAGE/opt/fessel/lib" -type f -name '*.pyc' -delete
@@ -64,19 +65,22 @@ printf '%s\n' "$VERSION" > "$STAGE/opt/fessel/VERSION"
 install -d "$STAGE/usr/bin"
 install -m 755 "$HERE/bin/fessel-supervisor" "$STAGE/usr/bin/fessel-supervisor"
 install -m 755 "$HERE/bin/fessel-video"      "$STAGE/usr/bin/fessel-video"
+install -m 755 "$HERE/bin/fessel-uploader"   "$STAGE/usr/bin/fessel-uploader"
 
 # --- systemd units (source filenames match the installed fessel-* names;
 # mosquitto ships from the .example which the package treats as the real unit) ---
 install -d "$STAGE/lib/systemd/system"
 install -m 644 "$FESSEL_ROOT/pi/deploy/systemd/fessel-supervisor.service" "$STAGE/lib/systemd/system/fessel-supervisor.service"
 install -m 644 "$FESSEL_ROOT/pi/deploy/systemd/fessel-video.service" "$STAGE/lib/systemd/system/fessel-video.service"
+install -m 644 "$FESSEL_ROOT/pi/deploy/systemd/fessel-uploader.service" "$STAGE/lib/systemd/system/fessel-uploader.service"
 install -m 644 "$FESSEL_ROOT/pi/deploy/systemd/fessel-mosquitto.service.example" "$STAGE/lib/systemd/system/fessel-mosquitto.service"
 
 # --- config (conffiles: preserved on upgrade) ---
+# A single fessel.yaml for the whole Pi (Requirements §6): shared mqtt/storage
+# sections + per-process subtrees. All three processes read it via FESSEL_CONFIG.
 install -d "$STAGE/etc/fessel"
 install -m 644 "$FESSEL_ROOT/pi/deploy/mosquitto.conf" "$STAGE/etc/fessel/mosquitto.conf"
-install -m 644 "$FESSEL_ROOT/pi/deploy/supervisor.yaml.example" "$STAGE/etc/fessel/supervisor.yaml"
-install -m 644 "$FESSEL_ROOT/pi/deploy/video.yaml.example" "$STAGE/etc/fessel/video.yaml"
+install -m 644 "$FESSEL_ROOT/pi/deploy/fessel.yaml.example" "$STAGE/etc/fessel/fessel.yaml"
 
 # --- DEBIAN control metadata ---
 install -d "$STAGE/DEBIAN"

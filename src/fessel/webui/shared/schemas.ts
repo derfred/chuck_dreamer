@@ -16,6 +16,60 @@ export type Verified = boolean;
 export type VerifiedAt = string | null;
 export type Up = boolean | null;
 /**
+ * video's explicit-recording branch state machine (V4.3).
+ *
+ * Separate from the live branch's LiveStateValue: the two branches share the
+ * encoder hardware but are independent. `idle` is the at-rest state (no
+ * recording), mirroring the live branch's `off`.
+ */
+export type RecordingStateValue = "idle" | "starting" | "recording" | "stopping";
+export type ActiveRecordingId = string | null;
+export type StartedAt = string | null;
+export type Id = string;
+export type StartedAt1 = string;
+export type EndedAt = string | null;
+export type Operator = string | null;
+export type DurationSeconds = number | null;
+export type Segments = number | null;
+export type FlaggedForUpload = boolean;
+/**
+ * Where a recording is in the flag-for-upload pipeline (V4.6/V4.7).
+ *
+ * `none` — never flagged. `queued` — marker written, uploader not yet acting.
+ * `uploading` — transfer in progress. `uploaded` — in MinIO, marker deleted.
+ * `failed` — non-retryable failure; marker renamed `.failed`.
+ */
+export type UploadStateValue = "none" | "queued" | "uploading" | "uploaded" | "failed";
+export type UploadedAt = string | null;
+export type RecordingId = string;
+/**
+ * Where a recording is in the flag-for-upload pipeline (V4.6/V4.7).
+ *
+ * `none` — never flagged. `queued` — marker written, uploader not yet acting.
+ * `uploading` — transfer in progress. `uploaded` — in MinIO, marker deleted.
+ * `failed` — non-retryable failure; marker renamed `.failed`.
+ */
+export type UploadStateValue1 = "none" | "queued" | "uploading" | "uploaded" | "failed";
+export type Attempts = number;
+export type LastAttemptAt = string | null;
+export type LastError = string | null;
+export type Count = number;
+export type OldestPendingSeconds = number | null;
+export type RecordingId1 = string;
+export type StartedAt2 = string;
+export type EndedAt1 = string | null;
+export type DurationSeconds1 = number | null;
+export type Operator1 = string | null;
+export type FlaggedForUpload1 = boolean;
+/**
+ * Where a recording is in the flag-for-upload pipeline (V4.6/V4.7).
+ *
+ * `none` — never flagged. `queued` — marker written, uploader not yet acting.
+ * `uploading` — transfer in progress. `uploaded` — in MinIO, marker deleted.
+ * `failed` — non-retryable failure; marker renamed `.failed`.
+ */
+export type UploadStateValue2 = "none" | "queued" | "uploading" | "uploaded" | "failed";
+/**
  * Abbreviated supervisor safety state (architecture §2.4).
  *
  * Slice 3 only ever holds whatever the operator's last command implies; the
@@ -43,6 +97,11 @@ export interface FesselSchemas {
   LiveState?: LiveState;
   PlugState?: PlugState;
   CameraState?: CameraState;
+  RecordingState?: RecordingState;
+  RecordingMetadata?: RecordingMetadata;
+  UploadProgress?: UploadProgress;
+  UploadBacklog?: UploadBacklog;
+  RecordingListItem?: RecordingListItem;
   StateResponse?: StateResponse;
   [k: string]: unknown;
 }
@@ -113,17 +172,92 @@ export interface CameraState {
   [k: string]: unknown;
 }
 /**
+ * Retained payload on arm/video/state/recording (V4.5).
+ *
+ * The single source of truth for "is a recording active right now"; the
+ * dashboard derives its Start/Stop button from this (via supervisor /state).
+ */
+export interface RecordingState {
+  state?: RecordingStateValue;
+  active_recording_id?: ActiveRecordingId;
+  started_at?: StartedAt;
+  [k: string]: unknown;
+}
+/**
+ * The per-recording metadata.json written on finalisation (V4.4).
+ *
+ * `flagged_for_upload` and `upload_state` are mutable in place: flag-upload
+ * (V4.5) and the uploader (V4.7) rewrite this file. It is the recording's
+ * source of truth for the rest of the system (listing, playback routing).
+ */
+export interface RecordingMetadata {
+  id: Id;
+  started_at: StartedAt1;
+  ended_at?: EndedAt;
+  operator?: Operator;
+  mode?: ModeTriplet | null;
+  duration_seconds?: DurationSeconds;
+  segments?: Segments;
+  flagged_for_upload?: FlaggedForUpload;
+  upload_state?: UploadStateValue;
+  uploaded_at?: UploadedAt;
+  [k: string]: unknown;
+}
+/**
+ * Payload on arm/video/upload/<recording-id> (V4.7), surfaced read-only by
+ * the backend (B4.6) so the dashboard can show per-recording upload status.
+ */
+export interface UploadProgress {
+  recording_id: RecordingId;
+  state?: UploadStateValue1;
+  attempts?: Attempts;
+  last_attempt_at?: LastAttemptAt;
+  last_error?: LastError;
+  [k: string]: unknown;
+}
+/**
+ * Upload-queue health gauges (V4.8): how many markers are pending and how
+ * old the oldest one is. The Slice 7 ">3h" P2 alert lands against these.
+ */
+export interface UploadBacklog {
+  count?: Count;
+  oldest_pending_seconds?: OldestPendingSeconds;
+  [k: string]: unknown;
+}
+/**
+ * One row of supervisor GET /recordings (S4.4) — what's on the Pi.
+ *
+ * A projection of RecordingMetadata sufficient for the dashboard list; segment
+ * URLs are decided by the backend (B4.2/B4.3), not enumerated here.
+ */
+export interface RecordingListItem {
+  recording_id: RecordingId1;
+  started_at: StartedAt2;
+  ended_at?: EndedAt1;
+  duration_seconds?: DurationSeconds1;
+  operator?: Operator1;
+  flagged_for_upload?: FlaggedForUpload1;
+  upload_state?: UploadStateValue2;
+  [k: string]: unknown;
+}
+/**
  * Body of supervisor GET /state and backend GET /api/state (S3.3).
  *
  * `jetson` is whatever the Jetson's GET /state returned (opaque to the
  * backend and dashboard — supervisor caches it and passes it through);
  * `null` when the Jetson has not been reached yet.
+ *
+ * Slice 4 adds `recording` (the retained recording-state topic, cached) and
+ * `upload_backlog` (the V4.8 gauges, cached) so the dashboard's recording
+ * controls and backlog indicator read from the same /state poll as the rest.
  */
 export interface StateResponse {
   safety_state?: SafetyState;
   jetson?: Jetson;
   plugs?: Plugs;
   camera?: CameraState;
+  recording?: RecordingState;
+  upload_backlog?: UploadBacklog;
   [k: string]: unknown;
 }
 export interface Plugs {

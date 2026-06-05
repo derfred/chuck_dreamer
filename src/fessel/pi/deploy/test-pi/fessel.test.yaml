@@ -1,0 +1,86 @@
+# Test-image Fessel config. Overwrites the dpkg-seeded /etc/fessel/fessel.yaml
+# in the integration-test container ONLY. Single file (Requirements §6): shared
+# mqtt/storage + per-process subtrees.
+
+# --- shared -----------------------------------------------------------------
+
+mqtt:
+  host: 127.0.0.1
+  port: 1883
+
+storage:
+  # In the container the SSD is just a writable dir; the processes create the
+  # ring/recordings/upload_queue layout under it at startup.
+  ssd_path: /mnt/ssd
+
+# --- video ------------------------------------------------------------------
+
+video:
+  srt:
+    # In-cluster mediamtx SRT Service (stands in for the Tailscale ingress
+    # magicDNS name; config-only substitution per the Slice 1.5 plan).
+    host: mediamtx-srt
+    port: 8890
+  camera:
+    # No /dev/video0 in the container and no kernel module on the cluster
+    # nodes: use the built-in videotestsrc (moving 'ball' pattern), which
+    # gives a real moving H.264 stream for the data-plane liveness check.
+    device: /dev/video0
+    use_test_source: true
+    # Test-only software encoder (no hardware encoder in a container).
+    allow_software_encoder: true
+  live:
+    connect_timeout_s: 15.0
+  ring:
+    resolution: 640x480
+    fps: 30
+    bitrate_bps: 1000000
+    segment_seconds: 2
+    playlist_length: 10
+    max_files: 12
+  recording:
+    bitrate_bps: 1500000
+    segment_seconds: 2
+    start_timeout_s: 15.0
+
+# --- supervisor -------------------------------------------------------------
+
+supervisor:
+  # Plain HTTP (no TLS) on 0.0.0.0:8443 so mediamtx's runOnDemand curl and the
+  # test Job can reach it over in-cluster Service DNS (stands in for Tailscale).
+  http:
+    host: 0.0.0.0
+    port: 8443
+  # Slice 3 control plane wired to MOCKS so the per-PR harness exercises the
+  # full chain (backend -> supervisor -> actuators) without real power. NO real
+  # WiZ / Jetson is dialed: `wiz.driver: fake` uses an in-memory bulb, and
+  # `jetson` is a mock HTTP server (integration/mocks/jetson_mock.py).
+  control:
+    wiz:
+      driver: fake          # in-memory FakeBulb; production uses 'pywizlight'
+      retries: 3
+      retry_delay_s: 0.05
+    plugs:
+      # `jetson` is the happy-path plug (power-cycled + verified in the test).
+      # `arm` is wired to always DROP commands so /api/control/shutdown/arm
+      # deterministically fails verify -> 503 — the safety-path assertion.
+      jetson: { mode: ok }
+      arm: { mode: drop }
+    jetson:
+      base_url: http://jetson-mock:8080
+      timeout_s: 3.0
+    refresh:
+      jetson_s: 2.0          # fast so /state freshens within a test window
+      plug_s: 2.0
+
+# --- uploader ---------------------------------------------------------------
+
+uploader:
+  # The fake object store keeps "uploaded" objects in memory (no real MinIO
+  # dialed), so the upload state machine + marker lifecycle run end-to-end in
+  # the container. A real-MinIO upload assertion is a later harness extension.
+  minio:
+    driver: fake
+  upload:
+    poll_interval_s: 2.0
+    backlog_interval_s: 5.0

@@ -55,10 +55,11 @@ from datetime import datetime, timezone
 from urllib.parse import quote, urlencode
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fessel_schemas import fessel_version, mode_from_canonical
 
 from .auth import AuthHeaders, Identity
+from .recordings_store import RecordingsStore, build_recordings_store
 from .supervisor_client import SupervisorClient
 from .token import WHEP_KID, mint_whep_token
 
@@ -88,12 +89,37 @@ def _require_secret() -> str:
   return secret
 
 
-def create_app(supervisor: SupervisorClient | None = None) -> FastAPI:
+def _audit_outcome(status_code: int) -> str:
+  # Map a forwarded status to an audit outcome tag (shared by the control and
+  # recording forwarders): 2xx -> success; our 502 -> unreachable; else the
+  # supervisor status (a 503 actuator failure, a 404/409 recording guard, …).
+  if 200 <= status_code < 300:
+    return "success"
+  if status_code == 502:
+    return "supervisor_unreachable"
+  return f"supervisor_{status_code}"
+
+
+async def _safe_json_body(request: Request) -> dict:
+  # Recording POSTs may carry a JSON body (flag-upload: recording_id) or none
+  # (stop). Tolerate an empty/non-JSON body as {}.
+  try:
+    body = await request.json()
+  except Exception:  # noqa: BLE001 — empty or non-JSON body
+    return {}
+  return body if isinstance(body, dict) else {}
+
+
+def create_app(
+  supervisor: SupervisorClient | None = None,
+  recordings_store: RecordingsStore | None = None,
+) -> FastAPI:
   app        = FastAPI(title="fessel-webui-backend")
   media_base = os.environ.get("FESSEL_MEDIA_BASE", "http://localhost:8889").rstrip("/")
   ttl_s      = int(os.environ.get("FESSEL_WHEP_TTL_S", "30"))
   headers    = AuthHeaders()
   supervisor = supervisor if supervisor is not None else SupervisorClient()
+  store      = recordings_store if recordings_store is not None else build_recordings_store()
 
   def require_identity(request: Request) -> Identity:
     """Dependency for proxied endpoints: 401 unless oauth2-proxy forwarded identity."""
@@ -221,12 +247,7 @@ def create_app(supervisor: SupervisorClient | None = None) -> FastAPI:
     result = supervisor.post(CONTROL_ACTIONS[action])
     # Map the forwarded status to an audit outcome: 2xx -> success, supervisor
     # 5xx (actuator/Jetson failure) and our 502 (unreachable) -> distinct tags.
-    if 200 <= result.status_code < 300:
-      outcome = "success"
-    elif result.status_code == 502:
-      outcome = "supervisor_unreachable"
-    else:
-      outcome = f"supervisor_{result.status_code}"
+    outcome = _audit_outcome(result.status_code)
     _audit(action, identity.user, outcome, t0)
     # Pass supervisor's status + body straight through to the frontend.
     return JSONResponse(status_code=result.status_code, content=result.body)
@@ -251,6 +272,166 @@ def create_app(supervisor: SupervisorClient | None = None) -> FastAPI:
     # Pass-through of supervisor's /state. The backend does not reshape or add
     # fields; the dashboard consumes supervisor's StateResponse directly.
     result = supervisor.get("/state")
+    return JSONResponse(status_code=result.status_code, content=result.body)
+
+  # --- Slice 4: recording control + recordings/ring API (B4.1–B4.6) ----------
+  # All sit behind oauth2-proxy (auth required). Control forwarders fold the
+  # operator identity into the supervisor request body so metadata.json (V4.4)
+  # records who started the recording, and emit a B3.3-style audit line.
+
+  @app.post("/api/recording/start")
+  async def recording_start(
+    request: Request, identity: Identity = Depends(require_identity)
+  ) -> JSONResponse:
+    return await _forward_recording(request, identity, "recording/start", "/recording/start")
+
+  @app.post("/api/recording/stop")
+  async def recording_stop(
+    request: Request, identity: Identity = Depends(require_identity)
+  ) -> JSONResponse:
+    return await _forward_recording(request, identity, "recording/stop", "/recording/stop")
+
+  @app.post("/api/recording/flag-upload")
+  async def recording_flag_upload(
+    request: Request, identity: Identity = Depends(require_identity)
+  ) -> JSONResponse:
+    return await _forward_recording(
+      request, identity, "recording/flag-upload", "/recording/flag-upload"
+    )
+
+  async def _forward_recording(
+    request: Request, identity: Identity, action: str, sup_path: str
+  ) -> JSONResponse:
+    t0 = time.monotonic()
+    body = await _safe_json_body(request)
+    # Fold the trusted operator identity into start (so V4.4 records it). stop
+    # carries no body; flag-upload carries the recording_id from the client.
+    if action == "recording/start":
+      body = {**body, "operator": identity.user}
+    result = supervisor.post(sup_path, json_body=body or None)
+    outcome = _audit_outcome(result.status_code)
+    rec_id = (
+      result.body.get("recording_id") if isinstance(result.body, dict) else None
+    ) or body.get("recording_id")
+    log.info(
+      json.dumps(
+        {
+          "event": "recording",
+          "action": action,
+          "operator": identity.user,
+          "recording_id": rec_id,
+          "outcome": outcome,
+          "latency_ms": int((time.monotonic() - t0) * 1000),
+          "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+      )
+    )
+    return JSONResponse(status_code=result.status_code, content=result.body)
+
+  @app.get("/api/recordings")
+  def api_recordings(identity: Identity = Depends(require_identity)) -> JSONResponse:
+    # B4.2: unified list from supervisor (Pi-local) + MinIO (uploaded),
+    # deduplicated by recording_id, each tagged available_local/available_remote.
+    sup = supervisor.get("/recordings")
+    local: list[dict] = sup.body if isinstance(sup.body, list) else []
+    remote = {r.recording_id: r for r in store.list_recordings()}
+
+    merged: dict[str, dict] = {}
+    for item in local:
+      rid = item.get("recording_id")
+      if not rid:
+        continue
+      merged[rid] = {
+        "recording_id": rid,
+        "started_at": item.get("started_at"),
+        "ended_at": item.get("ended_at"),
+        "duration_seconds": item.get("duration_seconds"),
+        "operator": item.get("operator"),
+        "flagged_for_upload": item.get("flagged_for_upload", False),
+        "upload_state": item.get("upload_state", "none"),
+        "available_local": True,
+        "available_remote": rid in remote,
+      }
+    # Recordings present only in MinIO (Pi-side copy removed — out of Slice 4
+    # scope, but the shape must not assume Pi-only).
+    for rid in remote:
+      if rid not in merged:
+        merged[rid] = {
+          "recording_id": rid,
+          "started_at": None,
+          "ended_at": None,
+          "duration_seconds": None,
+          "operator": None,
+          "flagged_for_upload": True,
+          "upload_state": "uploaded",
+          "available_local": False,
+          "available_remote": True,
+        }
+    out = sorted(merged.values(), key=lambda r: r.get("started_at") or "", reverse=True)
+    return JSONResponse(content=out)
+
+  @app.get("/api/recordings/{recording_id}/playlist")
+  def api_recording_playlist(
+    recording_id: str, request: Request, identity: Identity = Depends(require_identity)
+  ) -> Response:
+    return _serve_recording_file(recording_id, "index.m3u8", request)
+
+  @app.get("/api/recordings/{recording_id}/segment/{name}")
+  def api_recording_segment(
+    recording_id: str, name: str, request: Request, identity: Identity = Depends(require_identity)
+  ) -> Response:
+    return _serve_recording_file(recording_id, name, request)
+
+  def _serve_recording_file(recording_id: str, filename: str, request: Request) -> Response:
+    # B4.3/B4.4 two-path model: an uploaded recording is served straight from
+    # MinIO via a presigned redirect (offloads Pi bandwidth); a local-only one
+    # is proxied from supervisor. Prefer remote when available.
+    url = store.presigned_url(recording_id, filename)
+    if url is not None:
+      return RedirectResponse(url=url, status_code=302)
+    sup_path = (
+      f"/recordings/{recording_id}/{filename}"
+      if filename != "index.m3u8"
+      else f"/recordings/{recording_id}/index.m3u8"
+    )
+    return _proxy_binary(sup_path, request)
+
+  @app.get("/api/ring/playlist")
+  def api_ring_playlist(
+    request: Request, identity: Identity = Depends(require_identity)
+  ) -> Response:
+    # B4.5: the ring is always local — no MinIO path. Range support is
+    # end-to-end (frontend -> here -> supervisor -> file).
+    return _proxy_binary("/ring/index.m3u8", request)
+
+  @app.get("/api/ring/segment/{name}")
+  def api_ring_segment(
+    name: str, request: Request, identity: Identity = Depends(require_identity)
+  ) -> Response:
+    return _proxy_binary(f"/ring/{name}", request)
+
+  def _proxy_binary(sup_path: str, request: Request) -> Response:
+    # Pass the Range header through so HLS scrubbing works; forward supervisor's
+    # status (200/206/404) + the HLS-relevant response headers verbatim.
+    fwd_headers = {}
+    rng = request.headers.get("range")
+    if rng:
+      fwd_headers["Range"] = rng
+    result = supervisor.get_bytes(sup_path, headers=fwd_headers)
+    if result.error is not None:
+      return JSONResponse(
+        status_code=502, content={"error": "supervisor_unreachable", "message": result.error}
+      )
+    return Response(
+      content=result.body, status_code=result.status_code, headers=result.headers
+    )
+
+  @app.get("/api/recordings/{recording_id}/upload")
+  def api_recording_upload(
+    recording_id: str, identity: Identity = Depends(require_identity)
+  ) -> JSONResponse:
+    # B4.6: read-only proxy of supervisor's cached per-recording upload progress.
+    result = supervisor.get(f"/recordings/{recording_id}/upload")
     return JSONResponse(status_code=result.status_code, content=result.body)
 
   # Serve the built React app at / when present (single-image deploy). The

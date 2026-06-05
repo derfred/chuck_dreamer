@@ -28,7 +28,12 @@ from .models import (
   LiveState,
   ModeTriplet,
   PlugState,
+  RecordingListItem,
+  RecordingMetadata,
+  RecordingState,
   StateResponse,
+  UploadBacklog,
+  UploadProgress,
 )
 
 _MODELS = {
@@ -39,6 +44,14 @@ _MODELS = {
   "LiveState": LiveState,
   "PlugState": PlugState,
   "CameraState": CameraState,
+  "RecordingState": RecordingState,
+  "RecordingMetadata": RecordingMetadata,
+  "UploadProgress": UploadProgress,
+  "UploadBacklog": UploadBacklog,
+  "RecordingListItem": RecordingListItem,
+  # StateResponse last: it embeds several of the above; per-model inlining wants
+  # the dependencies defined first is not required (refs resolve), but keeping
+  # the aggregate last matches the Slice 3 ordering convention.
   "StateResponse": StateResponse,
 }
 

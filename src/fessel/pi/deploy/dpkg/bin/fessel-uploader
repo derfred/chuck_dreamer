@@ -1,0 +1,11 @@
+#!/usr/bin/python3
+# Launcher for the Fessel uploader process, installed to /usr/bin by the dpkg.
+# Runs the SYSTEM python3 directly. Fessel modules live in /opt/fessel/lib
+# (prepended to sys.path here), matching the supervisor/video launchers.
+import sys
+
+sys.path.insert(0, "/opt/fessel/lib")
+
+from uploader.main import main
+
+main()

@@ -47,8 +47,8 @@ function(cfg) {
   // --- Slice 3 control-plane mocks (only when cfg.includeControlMocks) ------
   // The jetson-mock: a stdlib HTTP server (integration/mocks/jetson_mock.py)
   // mounted from a ConfigMap into a bare python:3-slim — no new image. The
-  // test-Pi's supervisor.test.yaml points control.jetson.base_url at the
-  // `jetson-mock` Service. The WiZ side needs no pod (the fake bulb is
+  // test-Pi's fessel.test.yaml points supervisor.control.jetson.base_url at
+  // the `jetson-mock` Service. The WiZ side needs no pod (the fake bulb is
   // in-process in supervisor via wiz.driver: fake).
 
   jetsonMockConfigMap: {

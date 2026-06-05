@@ -33,25 +33,39 @@ import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 
+import uuid
+
 from fastapi import FastAPI, HTTPException, Request
 from fessel_schemas import (
   LiveActivate,
   LiveDeactivate,
   LiveState,
+  LiveStateValue,
+  RecordingFlagUploadCmd,
+  RecordingListItem,
+  RecordingMetadata,
+  RecordingStartCmd,
+  RecordingState,
+  UploadBacklog,
+  UploadProgress,
   fessel_version,
   mode_from_canonical,
 )
-from fessel_shared import MqttClient, load_yaml_config
+from fessel_shared import ConfigReloader, MqttClient, Storage, load_component_config
 from fessel_shared import topics
 from pydantic import BaseModel
 
+from .bandwidth import BandwidthCoordinator
 from .control import ControlPlane, build_control_plane
 from .jetson import JetsonError
+from .recordings import RingProxy
 from .wiz import PlugError
 
 log = logging.getLogger(__name__)
 
-CONFIG_PATH = os.environ.get("SUPERVISOR_CONFIG", "/etc/fessel/supervisor.yaml")
+# Single Pi config (Requirements §6); supervisor reads its `supervisor:` subtree
+# plus the shared `mqtt`/`storage` sections. FESSEL_CONFIG overrides the path.
+CONFIG_PATH = os.environ.get("FESSEL_CONFIG", "/etc/fessel/fessel.yaml")
 HEARTBEAT_INTERVAL_S = 5.0
 
 
@@ -97,6 +111,21 @@ class DeactivateRequest(BaseModel):
   path: str
 
 
+class RecordingStartBody(BaseModel):
+  """Body of supervisor POST /recording/start (S4.1). webui-backend is the only
+  caller; the canonical mode string + operator pass-through are enough (no
+  mediamtx-style raw-query flexibility needed)."""
+
+  mode: str
+  operator: str | None = None
+
+
+class FlagUploadBody(BaseModel):
+  """Body of supervisor POST /recording/flag-upload (S4.1)."""
+
+  recording_id: str
+
+
 class Relay:
   """Owns the MQTT client and the heartbeat thread.
 
@@ -121,6 +150,16 @@ class Relay:
     self._live_history: list[str] = []
     self._lock = threading.Lock()
     self.on_camera: Callable[[bool | None], None] | None = None
+    # Slice 4: recording state + upload backlog pushed into the control plane,
+    # plus a cache of per-recording upload progress for /recordings/<id>/upload.
+    self.on_recording: Callable[[RecordingState], None] | None = None
+    self.on_backlog: Callable[[UploadBacklog], None] | None = None
+    # §2.12: the bandwidth coordinator needs live-viewer presence; fired with
+    # True when the live state machine is `running`, else False.
+    self.on_live_running: Callable[[bool], None] | None = None
+    self._backlog_count = 0
+    self._backlog_oldest: int | None = None
+    self._upload_progress: dict[str, dict] = {}
 
   def start(self) -> None:
     self._mqtt.connect()
@@ -131,6 +170,24 @@ class Relay:
     # STATE_CAMERA has no dedicated payload model yet (video may publish a
     # richer body than {"up": bool}); stay on raw subscribe and read defensively.
     self._mqtt.subscribe(topics.STATE_CAMERA, self._on_camera_state, qos=topics.QOS_STATE)
+    # Slice 4: recording state (retained, validated), upload backlog gauges, and
+    # per-recording upload progress (wildcard, validated). All Pi-internal.
+    self._mqtt.subscribe_model(
+      topics.STATE_RECORDING,
+      RecordingState.model_validate,
+      self._on_recording_state,
+      qos=topics.QOS_STATE,
+    )
+    self._mqtt.subscribe(topics.UPLOAD_BACKLOG_COUNT, self._on_backlog_count, qos=topics.QOS_UPLOAD)
+    self._mqtt.subscribe(
+      topics.UPLOAD_BACKLOG_OLDEST, self._on_backlog_oldest, qos=topics.QOS_UPLOAD
+    )
+    self._mqtt.subscribe_model(
+      f"{topics.UPLOAD_PREFIX}/+",
+      UploadProgress.model_validate,
+      self._on_upload_progress,
+      qos=topics.QOS_UPLOAD,
+    )
     self._mqtt.loop_start()
     self._hb_thread.start()
 
@@ -146,6 +203,9 @@ class Relay:
       state = live.state.value
       if not self._live_history or self._live_history[-1] != state:
         self._live_history.append(state)
+    # §2.12: a live viewer is present exactly while the live branch is running.
+    if self.on_live_running is not None:
+      self.on_live_running(live.state is LiveStateValue.running)
 
   def _on_camera_state(self, _topic: str, payload: dict) -> None:
     # video publishes {"up": true|false} (or a richer body with an `up` field)
@@ -154,6 +214,44 @@ class Relay:
     if self.on_camera is not None:
       up = payload.get("up")
       self.on_camera(up if isinstance(up, bool) else None)
+
+  # --- Slice 4: recording state + upload progress/backlog caching -----------
+
+  def _on_recording_state(self, _topic: str, recording: RecordingState) -> None:
+    # Validated by subscribe_model; forward to the control plane so /state's
+    # `recording` field reflects video's retained state machine value (S4.2).
+    if self.on_recording is not None:
+      self.on_recording(recording)
+
+  def _on_backlog_count(self, _topic: str, payload: dict) -> None:
+    with self._lock:
+      self._backlog_count = int(payload.get("value") or 0)
+    self._emit_backlog()
+
+  def _on_backlog_oldest(self, _topic: str, payload: dict) -> None:
+    with self._lock:
+      val = payload.get("value")
+      self._backlog_oldest = int(val) if isinstance(val, int) else None
+    self._emit_backlog()
+
+  def _emit_backlog(self) -> None:
+    if self.on_backlog is None:
+      return
+    with self._lock:
+      backlog = UploadBacklog(
+        count=self._backlog_count, oldest_pending_seconds=self._backlog_oldest
+      )
+    self.on_backlog(backlog)
+
+  def _on_upload_progress(self, _topic: str, progress: UploadProgress) -> None:
+    # Cache the latest per-recording progress for /recordings/<id>/upload (B4.6).
+    with self._lock:
+      self._upload_progress[progress.recording_id] = progress.model_dump(mode="json")
+
+  def upload_progress(self, recording_id: str) -> dict | None:
+    with self._lock:
+      got = self._upload_progress.get(recording_id)
+      return dict(got) if got is not None else None
 
   def live_state(self) -> dict:
     with self._lock:
@@ -184,26 +282,78 @@ class Relay:
       topics.CMD_LIVE_DEACTIVATE, cmd.model_dump(), qos=topics.QOS_CMD, retain=False
     )
 
+  # --- Slice 4: recording command publishers (S4.1) -------------------------
 
-def create_app(config: dict | None = None, control: ControlPlane | None = None) -> FastAPI:
-  cfg = config if config is not None else load_yaml_config(CONFIG_PATH)
+  def publish_recording_start(self, cmd: RecordingStartCmd) -> None:
+    self._mqtt.publish(
+      topics.CMD_RECORDING_START, cmd.model_dump(), qos=topics.QOS_CMD, retain=False
+    )
+
+  def publish_recording_stop(self) -> None:
+    self._mqtt.publish(topics.CMD_RECORDING_STOP, {}, qos=topics.QOS_CMD, retain=False)
+
+  def publish_recording_flag_upload(self, cmd: RecordingFlagUploadCmd) -> None:
+    self._mqtt.publish(
+      topics.CMD_RECORDING_FLAG_UPLOAD, cmd.model_dump(), qos=topics.QOS_CMD, retain=False
+    )
+
+
+def create_app(
+  config: dict | None = None,
+  control: ControlPlane | None = None,
+  coordinator: BandwidthCoordinator | None = None,
+) -> FastAPI:
+  cfg = config if config is not None else load_component_config(CONFIG_PATH, "supervisor")
   relay = Relay(cfg)
   # The control plane publishes verified plug state through the relay's MQTT
   # client. Tests inject a ControlPlane with a fake publish + fake actuators.
   ctl = control if control is not None else build_control_plane(cfg, relay.publish)
   relay.on_camera = ctl.set_camera_up
+  relay.on_recording = ctl.set_recording
+  relay.on_backlog = ctl.set_upload_backlog
+
+  # §2.12: the bandwidth coordinator gates recording uploads on viewer presence.
+  # It publishes the gate through the relay's MQTT client; tests may inject one
+  # with a fake publish. Live-viewer presence comes from the relay's live-state
+  # callback; ring-viewer presence from the ring proxy's read hook below.
+  bw = coordinator if coordinator is not None else BandwidthCoordinator(publish=relay.publish)
+  relay.on_live_running = bw.set_live_running
+
+  # Slice 4: SSD-backed recording storage. supervisor reads the ring + explicit
+  # recordings from the same mount video writes to (S4.3/S4.4); the proxy
+  # enforces traversal protection. ssd_path is the shared `storage` section of
+  # fessel.yaml (same value video + uploader read).
+  storage = Storage((cfg.get("storage") or {}).get("ssd_path", "/mnt/ssd"))
+  ring_proxy = RingProxy(storage.ring_dir, storage.explicit_dir, on_ring_read=bw.note_ring_read)
+
+  # SIGHUP reload (§2.13): re-read the supervisor config and apply the
+  # hot-reloadable control tunables (refresh intervals, WiZ retry policy).
+  # uvicorn handles only SIGINT/SIGTERM, so SIGHUP is ours to claim. Installed
+  # in the lifespan startup (main thread); the worker thread does the reload.
+  reloader = ConfigReloader(
+    path=CONFIG_PATH,
+    component="supervisor",
+    validate=ControlPlane.validate_config,
+    apply=ctl.apply_config,
+  )
 
   @asynccontextmanager
   async def lifespan(app: FastAPI):  # noqa: ANN001
     relay.start()
     ctl.start()
+    bw.start()
+    reloader.install()
     yield
+    reloader.close()
+    bw.close()
     ctl.close()
     relay.stop()
 
   app = FastAPI(title="fessel-supervisor", lifespan=lifespan)
   app.state.relay = relay
   app.state.control = ctl
+  app.state.bandwidth = bw
+  app.state.reloader = reloader
 
   @app.get("/healthz")
   def healthz() -> dict:
@@ -323,7 +473,99 @@ def create_app(config: dict | None = None, control: ControlPlane | None = None) 
     ps = _run_control(f"poweron/{name}", request, lambda: ctl.poweron(name))
     return {"plug": name, "state": ps.model_dump()}
 
+  # --- Slice 4: recording control + ring/recordings proxy --------------------
+  # Same network-layer auth model (Tailscale identity) as the rest of
+  # supervisor's control plane. Recording commands are async: they return once
+  # the MQTT command is published (S4.1), not once video has transitioned —
+  # the caller polls /state (S4.2) or the retained recording topic.
+
+  @app.post("/recording/start")
+  def recording_start(body: RecordingStartBody, request: Request) -> dict:
+    # Mint a fresh recording-id here (S4.1) and return it; video records under
+    # it. 200 means "command published", not "recording active".
+    try:
+      mode = mode_from_canonical(body.mode)
+    except ValueError as e:
+      raise HTTPException(status_code=400, detail=str(e)) from e
+    recording_id = str(uuid.uuid4())
+    cmd = RecordingStartCmd(recording_id=recording_id, mode=mode, operator=body.operator)
+    _log_control("recording/start", _caller(request), "published", time.monotonic())
+    relay.publish_recording_start(cmd)
+    return {"recording_id": recording_id}
+
+  @app.post("/recording/stop")
+  def recording_stop(request: Request) -> dict:
+    _log_control("recording/stop", _caller(request), "published", time.monotonic())
+    relay.publish_recording_stop()
+    return {"relayed": "recording/stop"}
+
+  @app.post("/recording/flag-upload")
+  def recording_flag_upload(body: FlagUploadBody, request: Request) -> dict:
+    # 404 if the recording does not exist locally; 409 if it is still the active
+    # recording (cannot upload a recording that has not finalised, S4.1). The
+    # actual flag + marker write happens in video (V4.5); supervisor only
+    # publishes the command after these guards pass.
+    rid = body.recording_id
+    meta = storage.read_metadata(rid)
+    if meta is None:
+      raise HTTPException(status_code=404, detail=f"unknown recording: {rid}")
+    active = ctl.state().recording.active_recording_id
+    if active == rid:
+      raise HTTPException(status_code=409, detail="recording is still active")
+    _log_control("recording/flag-upload", _caller(request), "published", time.monotonic())
+    relay.publish_recording_flag_upload(RecordingFlagUploadCmd(recording_id=rid))
+    return {"relayed": "recording/flag-upload", "recording_id": rid}
+
+  @app.get("/recordings")
+  def list_recordings() -> list[dict]:
+    # Enumerate finalised explicit recordings on the Pi, newest first (S4.4).
+    items: list[RecordingListItem] = []
+    for meta in storage.list_recordings():
+      items.append(_meta_to_list_item(meta))
+    return [i.model_dump(mode="json") for i in items]
+
+  @app.get("/recordings/{recording_id}/upload")
+  def recording_upload(recording_id: str) -> dict:
+    # B4.6: the cached per-recording upload progress (from the retained MQTT
+    # topic). 404 if no progress has been seen (never flagged).
+    progress = relay.upload_progress(recording_id)
+    if progress is None:
+      raise HTTPException(status_code=404, detail="no upload progress for recording")
+    return progress
+
+  @app.get("/recordings/{recording_id}/index.m3u8")
+  def recording_playlist(recording_id: str):  # noqa: ANN202
+    # Local playback proxy for an unflagged/not-yet-uploaded recording (B4.3
+    # open seam: symmetric with the ring proxy).
+    return ring_proxy.recording_playlist(recording_id)
+
+  @app.get("/recordings/{recording_id}/{segment}")
+  def recording_segment(recording_id: str, segment: str):  # noqa: ANN202
+    return ring_proxy.recording_segment(recording_id, segment)
+
+  @app.get("/ring/index.m3u8")
+  def ring_playlist():  # noqa: ANN202
+    # Serve the ring playlist as-is (S4.3). Range requests + traversal guard are
+    # handled in RingProxy.
+    return ring_proxy.ring_playlist()
+
+  @app.get("/ring/{segment}")
+  def ring_segment(segment: str):  # noqa: ANN202
+    return ring_proxy.ring_segment(segment)
+
   return app
+
+
+def _meta_to_list_item(meta: RecordingMetadata) -> RecordingListItem:
+  return RecordingListItem(
+    recording_id=meta.id,
+    started_at=meta.started_at,
+    ended_at=meta.ended_at,
+    duration_seconds=meta.duration_seconds,
+    operator=meta.operator,
+    flagged_for_upload=meta.flagged_for_upload,
+    upload_state=meta.upload_state,
+  )
 
 
 # Module-level app for `uvicorn supervisor.app:app`.

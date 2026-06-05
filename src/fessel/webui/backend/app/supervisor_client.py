@@ -27,10 +27,12 @@ USER_AGENT = "fessel-webui-backend"
 @dataclass(frozen=True)
 class ForwardResult:
   """The raw outcome of a forwarded call: supervisor's status + parsed JSON
-  body (or a synthesised body when supervisor was unreachable)."""
+  body (or a synthesised body when supervisor was unreachable). The body is a
+  dict for object responses and a list for array responses (e.g. /recordings),
+  passed through to the frontend verbatim."""
 
   status_code: int
-  body: dict
+  body: dict | list
 
 
 class SupervisorClient:
@@ -43,9 +45,9 @@ class SupervisorClient:
       base_url=self._base, timeout=timeout, headers={"User-Agent": USER_AGENT}
     )
 
-  def _forward(self, method: str, path: str) -> ForwardResult:
+  def _forward(self, method: str, path: str, json_body: dict | None = None) -> ForwardResult:
     try:
-      resp = self._client.request(method, path)
+      resp = self._client.request(method, path, json=json_body)
     except httpx.HTTPError as e:
       # supervisor unreachable (egress down, Pi offline). Surface as 502 with
       # a structured body — the operator should see "couldn't reach the Pi",
@@ -55,16 +57,51 @@ class SupervisorClient:
       )
     return ForwardResult(resp.status_code, _json_or_text(resp))
 
-  def post(self, path: str) -> ForwardResult:
-    return self._forward("POST", path)
+  def post(self, path: str, json_body: dict | None = None) -> ForwardResult:
+    return self._forward("POST", path, json_body)
 
   def get(self, path: str) -> ForwardResult:
     return self._forward("GET", path)
 
+  def get_bytes(self, path: str, headers: dict[str, str] | None = None) -> "ProxyResult":
+    """Fetch a binary resource (ring/recording HLS file) from supervisor,
+    passing through request headers (e.g. Range) and returning the body bytes +
+    relevant response headers so the backend can proxy HLS playback (B4.5,
+    B4.3/4 local path). Range support is end-to-end: supervisor's FileResponse
+    honours Range and returns 206, which flows through here verbatim."""
+    try:
+      resp = self._client.request("GET", path, headers=headers or {})
+    except httpx.HTTPError as e:
+      return ProxyResult(502, b"", {}, error=f"{type(e).__name__}: {e}")
+    # Forward the headers an HLS player needs for ranged playback + caching.
+    passthrough = {
+      k: v
+      for k, v in resp.headers.items()
+      if k.lower()
+      in ("content-type", "content-length", "content-range", "accept-ranges", "cache-control")
+    }
+    return ProxyResult(resp.status_code, resp.content, passthrough)
 
-def _json_or_text(resp: httpx.Response) -> dict:
+
+@dataclass(frozen=True)
+class ProxyResult:
+  """A proxied binary response: status + body bytes + the subset of headers an
+  HLS player needs (content-type, ranges, caching). `error` is set only when
+  supervisor was unreachable (status 502)."""
+
+  status_code: int
+  body: bytes
+  headers: dict
+  error: str | None = None
+
+
+def _json_or_text(resp: httpx.Response) -> dict | list:
   try:
     body = resp.json()
   except ValueError:
     return {"detail": resp.text}
-  return body if isinstance(body, dict) else {"value": body}
+  # Preserve both object and array bodies (the latter for /recordings); only a
+  # bare scalar (rare) gets wrapped so the result is always a JSON container.
+  if isinstance(body, (dict, list)):
+    return body
+  return {"value": body}

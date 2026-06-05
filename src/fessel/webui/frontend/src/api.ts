@@ -141,6 +141,78 @@ export function fetchState(): Promise<StateResponse> {
   return getJson<StateResponse>("/api/state", StateResponseSchema);
 }
 
+// --- Slice 4 recordings + ring (F4.1–F4.5) ----------------------------------
+
+// One row of /api/recordings (B4.2). Shape matches the backend's merged item
+// (Pi-local + MinIO), not a single fessel_schemas model, so it is typed here.
+export interface RecordingItem {
+  recording_id: string;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  operator: string | null;
+  flagged_for_upload: boolean;
+  upload_state: "none" | "queued" | "uploading" | "uploaded" | "failed";
+  available_local: boolean;
+  available_remote: boolean;
+}
+
+export function fetchRecordings(): Promise<RecordingItem[]> {
+  return getJson<RecordingItem[]>("/api/recordings");
+}
+
+// Start an explicit recording at the given mode. Returns the recording id the
+// supervisor minted. Throws AuthError on 401, ControlError otherwise (F4.5).
+export async function startRecording(mode: ModeTriplet): Promise<string> {
+  const res = await fetch("/api/recording/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: modeToCanonical(mode) }),
+  });
+  if (res.status === 401) throw new AuthError();
+  if (!res.ok) throw new ControlError(await diagnostic(res), res.status);
+  const body = (await res.json()) as { recording_id?: string };
+  return body.recording_id ?? "";
+}
+
+export async function stopRecording(): Promise<void> {
+  const res = await fetch("/api/recording/stop", { method: "POST" });
+  if (res.status === 401) throw new AuthError();
+  if (!res.ok) throw new ControlError(await diagnostic(res), res.status);
+}
+
+// Flag a finalised recording for upload (F4.4). Non-destructive; the dashboard
+// applies it optimistically and reverts on error.
+export async function flagForUpload(recordingId: string): Promise<void> {
+  const res = await fetch("/api/recording/flag-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ recording_id: recordingId }),
+  });
+  if (res.status === 401) throw new AuthError();
+  if (!res.ok) throw new ControlError(await diagnostic(res), res.status);
+}
+
+// URL the hls.js player points at for a recording's playlist (B4.3). The
+// backend decides MinIO-redirect vs supervisor-proxy; the frontend just loads
+// this URL.
+export function recordingPlaylistUrl(recordingId: string): string {
+  return `/api/recordings/${encodeURIComponent(recordingId)}/playlist`;
+}
+
+// The always-live ring playlist URL (B4.5 / F4.1).
+export const RING_PLAYLIST_URL = "/api/ring/playlist";
+
+async function diagnostic(res: Response): Promise<string> {
+  let body: unknown = null;
+  try {
+    body = await res.json();
+  } catch {
+    // non-JSON error body; fall through to status-only message.
+  }
+  return diagnosticOf(body, res.status);
+}
+
 // Issue a control action. Resolves on success; throws AuthError on 401 (the
 // session lapsed) or ControlError carrying the diagnostic on any other
 // failure. The frontend does NOT retry — one click, one POST (matches the
@@ -149,11 +221,5 @@ export async function postControl(action: ControlAction): Promise<void> {
   const res = await fetch(`/api/control/${action}`, { method: "POST" });
   if (res.status === 401) throw new AuthError();
   if (res.ok) return;
-  let body: unknown = null;
-  try {
-    body = await res.json();
-  } catch {
-    // non-JSON error body; fall back to the status-only message.
-  }
-  throw new ControlError(diagnosticOf(body, res.status), res.status);
+  throw new ControlError(await diagnostic(res), res.status);
 }

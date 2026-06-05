@@ -47,10 +47,10 @@ COPY pi/deploy/test-pi/entrypoint.sh /usr/local/bin/fessel-test-entrypoint
 RUN chmod +x /usr/local/bin/fessel-test-entrypoint
 
 # Test config: point video at the in-cluster mediamtx-srt Service and turn
-# on the software-encoder seam (no hardware encoder in a container). These
-# overwrite the dpkg-seeded conffiles for the test image only.
-COPY pi/deploy/test-pi/video.test.yaml /etc/fessel/video.yaml
-COPY pi/deploy/test-pi/supervisor.test.yaml /etc/fessel/supervisor.yaml
+# on the software-encoder seam (no hardware encoder in a container). The
+# uploader uses the in-memory 'fake' object store (no real MinIO). This single
+# fessel.yaml overwrites the dpkg-seeded conffile for the test image only.
+COPY pi/deploy/test-pi/fessel.test.yaml /etc/fessel/fessel.yaml
 
 EXPOSE 8443
 ENTRYPOINT ["/usr/local/bin/fessel-test-entrypoint"]

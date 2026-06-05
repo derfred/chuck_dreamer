@@ -10,13 +10,17 @@
 // failure mode guarded against is "clicked Stop by accident, hit Enter".
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { PlugState, StateResponse } from "../../shared/schemas";
+import type { Capabilities, ModeTriplet, PlugState, StateResponse } from "../../shared/schemas";
 import {
   AuthError,
   ControlError,
+  fetchCapabilities,
   fetchState,
+  modeToCanonical,
   postControl,
   redirectToLogin,
+  startRecording,
+  stopRecording,
   type ControlAction,
 } from "./api";
 import { config } from "./config";
@@ -164,9 +168,19 @@ export function Dashboard() {
         ))}
       </div>
 
-      <p style={{ marginTop: 24 }}>
+      <h2 style={{ fontSize: 16, marginTop: 24 }}>Recording</h2>
+      <RecordingControls recording={state?.recording} />
+      <BacklogIndicator backlog={state?.upload_backlog} />
+
+      <p style={{ marginTop: 24, display: "flex", gap: 16 }}>
         <a href="/live" onClick={(e) => (e.preventDefault(), navigate("/live"))}>
           Go to live view →
+        </a>
+        <a href="/ring" onClick={(e) => (e.preventDefault(), navigate("/ring"))}>
+          View ring buffer →
+        </a>
+        <a href="/recordings" onClick={(e) => (e.preventDefault(), navigate("/recordings"))}>
+          Browse recordings →
         </a>
       </p>
 
@@ -175,6 +189,141 @@ export function Dashboard() {
       )}
     </div>
   );
+}
+
+// --- recording controls (F4.5) ----------------------------------------------
+// Start/Stop derived from /api/state's `recording` field. Idle -> pick a mode +
+// "Start recording"; recording -> "Stop recording" (red, no confirmation modal
+// — stopping a recording is not destructive in the Slice-3 modal sense).
+// starting/stopping -> a disabled spinner.
+
+function RecordingControls({ recording }: { recording: StateResponse["recording"] | undefined }) {
+  const [modes, setModes] = useState<ModeTriplet[]>([]);
+  const [selected, setSelected] = useState<number>(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchCapabilities()
+      .then((c: Capabilities) => setModes(c.modes))
+      .catch((e) => {
+        if (e instanceof AuthError) redirectToLogin();
+      });
+  }, []);
+
+  const state = recording?.state ?? "idle";
+
+  const onStart = useCallback(() => {
+    const mode = modes[selected];
+    if (!mode) return;
+    setBusy(true);
+    setError(null);
+    startRecording(mode)
+      .then(() => setBusy(false))
+      .catch((e) => {
+        if (e instanceof AuthError) {
+          redirectToLogin();
+          return;
+        }
+        setBusy(false);
+        setError(e instanceof ControlError ? e.message : String(e));
+      });
+  }, [modes, selected]);
+
+  const onStop = useCallback(() => {
+    setBusy(true);
+    setError(null);
+    stopRecording()
+      .then(() => setBusy(false))
+      .catch((e) => {
+        if (e instanceof AuthError) {
+          redirectToLogin();
+          return;
+        }
+        setBusy(false);
+        setError(e instanceof ControlError ? e.message : String(e));
+      });
+  }, []);
+
+  const transitioning = state === "starting" || state === "stopping" || busy;
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+      {state === "idle" ? (
+        <>
+          <label>
+            Mode:{" "}
+            <select
+              value={selected}
+              onChange={(e) => setSelected(Number(e.target.value))}
+              disabled={transitioning || modes.length === 0}
+            >
+              {modes.map((m, i) => (
+                <option key={i} value={i}>
+                  {modeToCanonical(m)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button onClick={onStart} disabled={transitioning || modes.length === 0}>
+            {busy ? "…" : "Start recording"}
+          </button>
+        </>
+      ) : state === "recording" ? (
+        <button
+          onClick={onStop}
+          disabled={transitioning}
+          style={{ background: "#b22222", color: "#fff", padding: "6px 12px" }}
+        >
+          {busy ? "…" : "Stop recording"}
+        </button>
+      ) : (
+        <button disabled style={{ padding: "6px 12px" }}>
+          {state === "starting" ? "Starting…" : "Stopping…"}
+        </button>
+      )}
+      <span style={{ color: "#666", fontFamily: "monospace", fontSize: 13 }}>
+        state: {state}
+        {recording?.active_recording_id ? ` (${recording.active_recording_id})` : ""}
+      </span>
+      {error && <span style={{ color: "crimson", fontSize: 12 }}>{error}</span>}
+    </div>
+  );
+}
+
+// --- upload backlog indicator (F4.5) ----------------------------------------
+// Plain text count + oldest-pending age. Becomes alert-styled once it crosses
+// the Slice-7 thresholds (the architecture's "oldest pending > 3h" P2); for now
+// it is informational.
+
+const BACKLOG_ALERT_SECONDS = 3 * 3600;
+
+function BacklogIndicator({ backlog }: { backlog: StateResponse["upload_backlog"] | undefined }) {
+  const count = backlog?.count ?? 0;
+  const oldest = backlog?.oldest_pending_seconds ?? null;
+  const alert = oldest != null && oldest > BACKLOG_ALERT_SECONDS;
+  return (
+    <p
+      style={{
+        marginTop: 8,
+        fontSize: 13,
+        color: alert ? "#fff" : "#666",
+        background: alert ? "#b22222" : "transparent",
+        display: "inline-block",
+        padding: alert ? "2px 8px" : 0,
+      }}
+      role={alert ? "alert" : undefined}
+    >
+      Upload backlog: {count} pending
+      {oldest != null ? `, oldest ${fmtAge(oldest)}` : ""}
+    </p>
+  );
+}
+
+function fmtAge(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  return `${Math.floor(seconds / 3600)}h`;
 }
 
 // SPA navigation mirror of App.tsx's navigate (kept local to avoid a shared

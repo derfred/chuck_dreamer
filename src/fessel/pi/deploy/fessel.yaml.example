@@ -1,0 +1,124 @@
+# Example Fessel Pi config. Copied to /etc/fessel/fessel.yaml.
+#
+# A SINGLE config file for the whole Pi (Requirements §6). Shared sections
+# (`mqtt`, `storage`) sit at the top level; each process reads its own subtree
+# (`video:` / `supervisor:` / `uploader:`) plus those shared sections. This
+# removes the duplicate mqtt/storage that the old per-process files carried.
+
+# --- shared (read by every process) -----------------------------------------
+
+mqtt:
+  host: 127.0.0.1
+  port: 1883
+
+storage:
+  # USB SSD mount. video writes the ring + recordings here; supervisor and the
+  # uploader read from the same mount. ONE source of truth for the path.
+  ssd_path: /mnt/ssd
+
+# --- video ------------------------------------------------------------------
+
+video:
+  srt:
+    # mediamtx's Tailscale magicDNS name (from tailscale-ingress.yaml) + 8890.
+    host: mediamtx-srt
+    port: 8890
+
+  camera:
+    device: /dev/video0
+    # Set true on dev machines with no camera: uses a videotestsrc pattern.
+    use_test_source: false
+
+  live:
+    # How long `starting` waits for srtsink to connect before giving up to
+    # `off`. A config parameter, not hardcoded (V1.4).
+    connect_timeout_s: 15.0
+
+  ring:
+    # Always-on ring buffer (V4.1). Review-quality, short window. GOP is derived
+    # so every HLS segment starts on a keyframe (= fps * segment_seconds).
+    resolution: 1280x720
+    fps: 30
+    bitrate_bps: 2000000
+    segment_seconds: 2
+    # playlist_length * segment_seconds ~= the scrubbable window (here ~5 min).
+    playlist_length: 150
+    # Slightly larger than playlist_length so rotated segments are deleted, not
+    # retained indefinitely (hlssink2 deletes past max_files).
+    max_files: 160
+
+  recording:
+    # Explicit (operator) recordings (V4.2). Retention-quality, finite.
+    bitrate_bps: 8000000
+    segment_seconds: 2
+    # How long the recording state machine waits for the first segment before
+    # giving up to idle (V4.3).
+    start_timeout_s: 15.0
+
+# --- supervisor -------------------------------------------------------------
+
+supervisor:
+  http:
+    host: 0.0.0.0
+    port: 8443
+    # In production, terminate HTTPS here (reachable from the cluster over
+    # Tailscale). For local dev, leave these unset to serve plain HTTP.
+    # tls_certfile: /etc/fessel/tls/supervisor.crt
+    # tls_keyfile: /etc/fessel/tls/supervisor.key
+
+  # Slice 3 control plane: the actuators supervisor drives directly.
+  # Omit a plug (no address) or the jetson block to disable the matching
+  # endpoints rather than have them pretend an actuator exists.
+  control:
+    plugs:
+      # WiZ smart plugs on the local LAN (pywizlight over UDP, port 38899).
+      # IMPORTANT: the device switching the ARM supply must be load-rated for
+      # the arm's current draw — a hardware prerequisite, verified at install.
+      arm:
+        address: 192.168.1.50
+      jetson:
+        address: 192.168.1.51
+    wiz:
+      # Send-and-verify retry policy. A lost UDP power-off is a missed safety
+      # intervention, so each attempt re-issues the command and reads it back.
+      retries: 3
+      retry_delay_s: 0.2
+    jetson:
+      # Jetson control API over the local LAN (not on the tailnet). Short
+      # timeout: long timeouts hide failures on a local LAN.
+      base_url: http://192.168.1.40:8080
+      timeout_s: 3.0
+      # Optional pre-shared token sent as `Authorization: Bearer <token>`.
+      # Leave unset if the LAN is trusted (agree with the Jetson team).
+      # auth_token: null
+    refresh:
+      # Slow background refresh that keeps /state's cached view fresh without
+      # re-querying on every read.
+      jetson_s: 5.0
+      plug_s: 10.0
+
+# --- uploader ---------------------------------------------------------------
+
+uploader:
+  minio:
+    # 'minio' (prod, S3-compatible) | 'fake' (in-memory, integration only).
+    driver: minio
+    # MinIO reached over Tailscale (host:port, no scheme; `secure` sets TLS).
+    endpoint: minio.tailnet.ts.net:9000
+    bucket: fessel
+    # Credentials come from config for now (V4.7); the packaging slice wires
+    # these from a k8s Secret via the environment. Keep this file
+    # root-readable only.
+    access_key: CHANGE_ME
+    secret_key: CHANGE_ME
+    secure: true
+
+  upload:
+    # MinIO key prefix: recordings/explicit/<recording-id>/<file>.
+    key_prefix: recordings/explicit
+    # Retryable-failure backoff schedule (seconds); the last value is the cap.
+    backoff_s: [30, 60, 300, 900, 1800]
+    # How often to scan the upload_queue for new markers.
+    poll_interval_s: 10.0
+    # How often to publish the backlog gauges (count + oldest-pending age, V4.8).
+    backlog_interval_s: 30.0

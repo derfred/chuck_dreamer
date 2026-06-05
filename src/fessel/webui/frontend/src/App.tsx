@@ -11,6 +11,8 @@ import { useEffect, useState } from "react";
 import { AuthError, fetchMe, redirectToLogin, type Identity } from "./api";
 import { Dashboard } from "./Dashboard";
 import { Live } from "./Live";
+import { Recordings } from "./Recordings";
+import { Ring } from "./Ring";
 
 function usePath(): string {
   const [path, setPath] = useState<string>(window.location.pathname);
@@ -59,11 +61,24 @@ export function App() {
           <a href="/live" onClick={(e) => (e.preventDefault(), navigate("/live"))}>
             Live
           </a>
+          <a href="/ring" onClick={(e) => (e.preventDefault(), navigate("/ring"))}>
+            Ring
+          </a>
+          <a href="/recordings" onClick={(e) => (e.preventDefault(), navigate("/recordings"))}>
+            Recordings
+          </a>
         </nav>
         <span style={{ color: "#666", fontSize: 13 }}>{identity ? identity.user : "…"}</span>
       </header>
 
-      {path === "/live" ? <Live /> : <Dashboard />}
+      {route(path)}
     </div>
   );
+}
+
+function route(path: string) {
+  if (path === "/live") return <Live />;
+  if (path === "/ring") return <Ring />;
+  if (path === "/recordings") return <Recordings />;
+  return <Dashboard />;
 }

@@ -57,3 +57,45 @@ The repo is signed by a dedicated GPG key (separate from any personal key).
 - Create the `gh-pages` branch (empty is fine) and enable **GitHub Pages** to
   serve from it (Settings → Pages → branch `gh-pages`, root).
 - CI accumulates into that branch; do not hand-edit it.
+
+## Slice 4: capture layer (ring buffer, recordings, uploader)
+
+The package now also ships the **uploader** process (`fessel-uploader.service`,
+launcher `/usr/bin/fessel-uploader`) alongside supervisor and video. All three
+read a **single** config conffile `/etc/fessel/fessel.yaml` (Requirements §6):
+shared `mqtt`/`storage` sections at the top level plus per-process subtrees
+(`video:` / `supervisor:` / `uploader:`).
+
+### USB SSD layout (one-time, per Pi)
+
+video (ring buffer + explicit recordings) and the uploader read/write a single
+USB SSD mount. The mount path is the **one** shared `storage.ssd_path` in
+`fessel.yaml` (default `/mnt/ssd`), read by all three processes — no longer
+duplicated per file. The processes create the sub-layout at startup, but the
+mount itself is the operator's responsibility:
+
+```sh
+# Mount the USB SSD at the configured path and make it writable by the Fessel
+# processes (run as root by systemd here). Persist via /etc/fstab.
+sudo mkdir -p /mnt/ssd
+sudo mount /dev/sdX1 /mnt/ssd          # the SSD's partition
+# Resulting layout (created by the processes):
+#   /mnt/ssd/ring/                 rolling HLS ring buffer (always-on)
+#   /mnt/ssd/recordings/explicit/  per-recording HLS dirs + metadata.json
+#   /mnt/ssd/upload_queue/         flag-for-upload markers (.upload / .failed)
+```
+
+Sizing (ring duration vs. SSD size vs. bitrate) is a deployment choice — see the
+`video.ring` block in `fessel.yaml`. The architecture prefers a short ring
+(recent context, not archival); long retention is the upload-to-cluster path's
+job.
+
+### MinIO upload (uploader section)
+
+The uploader ships **flagged** recordings to the cluster MinIO over Tailscale.
+Set `uploader.minio.endpoint` / `bucket` / `access_key` / `secret_key` in
+`/etc/fessel/fessel.yaml`. The production driver (`minio`) needs the
+`python3-minio` package — it is in the deb's **Recommends** (installed by default
+with `apt install`, but the import is lazy so the service still starts without
+it; only the `minio` driver requires it). Credentials live in the conffile for
+now; a later packaging slice wires them from a managed secret.

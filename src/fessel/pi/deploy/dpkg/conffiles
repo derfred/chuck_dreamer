@@ -1,3 +1,2 @@
 /etc/fessel/mosquitto.conf
-/etc/fessel/supervisor.yaml
-/etc/fessel/video.yaml
+/etc/fessel/fessel.yaml

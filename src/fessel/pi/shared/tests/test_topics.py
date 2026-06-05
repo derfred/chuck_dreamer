@@ -20,3 +20,25 @@ def test_plug_state_topic():
   assert topics.plug_state("jetson") == "arm/supervisor/plug/jetson"
   assert topics.QOS_PLUG == 1
   assert topics.RETAIN_PLUG is True
+
+
+def test_slice4_recording_and_upload_topics():
+  assert topics.CMD_RECORDING_START == "arm/video/cmd/recording/start"
+  assert topics.CMD_RECORDING_STOP == "arm/video/cmd/recording/stop"
+  assert topics.CMD_RECORDING_FLAG_UPLOAD == "arm/video/cmd/recording/flag-upload"
+  assert topics.STATE_RECORDING == "arm/video/state/recording"
+  assert topics.RETAIN_RECORDING is True
+  # Per-recording upload progress is under the upload prefix; backlog gauges are
+  # exact siblings (so an exact-match subscriber wins over the wildcard).
+  assert topics.upload_progress("abc") == "arm/video/upload/abc"
+  assert topics.UPLOAD_BACKLOG_COUNT == "arm/video/upload/backlog_count"
+  assert topics.UPLOAD_BACKLOG_OLDEST == "arm/video/upload/oldest_pending_seconds"
+  assert topics.QOS_UPLOAD == 1
+  assert topics.RETAIN_UPLOAD is True
+
+
+def test_upload_gate_topic():
+  # §2.12: the bandwidth coordinator's gate, retained so a (re)connecting
+  # uploader sees the current value immediately.
+  assert topics.CMD_UPLOAD_GATE == "arm/video/cmd/upload/gate"
+  assert topics.RETAIN_UPLOAD_GATE is True

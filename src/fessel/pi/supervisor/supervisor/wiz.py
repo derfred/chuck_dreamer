@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 log = logging.getLogger(__name__)
@@ -85,6 +85,13 @@ class PlugController:
   @property
   def name(self) -> str:
     return self._cfg.name
+
+  def set_retry_policy(self, retries: int, retry_delay_s: float) -> None:
+    """Update the send-and-verify retry counts (SIGHUP reload, §2.13). Only the
+    retry policy is mutable — the plug's name and address (which physical device
+    it actuates) are NOT reloadable; re-binding a safety actuator at runtime is
+    restart-only."""
+    self._cfg = replace(self._cfg, retries=int(retries), retry_delay_s=float(retry_delay_s))
 
   async def _apply(self, on: bool) -> None:
     if on:
@@ -225,7 +232,7 @@ def build_controller(
       "drop") sets whether it honours or silently drops commands.
 
   The production path is unchanged — `fake` is opt-in via config and never
-  reached unless supervisor.yaml explicitly asks for it.
+  reached unless `supervisor.control.wiz.driver` explicitly asks for it.
   """
   if driver == "fake":
     return PlugController(cfg, FakeBulb(mode=mode))

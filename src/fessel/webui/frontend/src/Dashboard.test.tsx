@@ -27,6 +27,11 @@ const STATE = {
 function installFetch(controlResponder?: (url: string) => { status: number; body: unknown }) {
   const fn = vi.fn((url: string, init?: RequestInit) => {
     if (!init || init.method !== "POST") {
+      // The dashboard's recording mode selector fetches capabilities on mount;
+      // answer it with an empty mode list so it doesn't consume the STATE body.
+      if (url.startsWith("/api/capabilities")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ modes: [] }) });
+      }
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -150,11 +155,22 @@ describe("action failure (F3.2)", () => {
   });
 });
 
+// The dashboard also fetches /api/capabilities on mount (Slice-4 recording
+// mode selector). These tests target the /api/state poll specifically, so they
+// answer the capabilities call with an empty mode list and key the state
+// behaviour off the /api/state URL.
+const EMPTY_CAPS = { modes: [] };
+
 describe("re-auth escalation (F3.4)", () => {
   it("redirects to login on a 401 from the state poll", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({}) }),
+      vi.fn((url: string) => {
+        // capabilities may 401 too; either way the state poll's 401 drives the
+        // redirect. Answer both with 401 to exercise the escalation.
+        void url;
+        return Promise.resolve({ ok: false, status: 401, json: async () => ({}) });
+      }),
     );
     render(<Dashboard />);
     await act(async () => {
@@ -166,11 +182,15 @@ describe("re-auth escalation (F3.4)", () => {
 
 describe("state poll resilience (F3.4)", () => {
   it("shows the banner on a 5xx but keeps the last-known state", async () => {
-    let calls = 0;
-    const fn = vi.fn(() => {
-      calls += 1;
-      // First poll succeeds; subsequent polls 503.
-      if (calls === 1) return Promise.resolve({ ok: true, status: 200, json: async () => STATE });
+    let stateCalls = 0;
+    const fn = vi.fn((url: string) => {
+      if (url.startsWith("/api/capabilities")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_CAPS });
+      }
+      // /api/state: first poll succeeds; subsequent polls 503.
+      stateCalls += 1;
+      if (stateCalls === 1)
+        return Promise.resolve({ ok: true, status: 200, json: async () => STATE });
       return Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
     });
     vi.stubGlobal("fetch", fn);
@@ -186,5 +206,79 @@ describe("state poll resilience (F3.4)", () => {
     expect(screen.getByText(/State unavailable/)).toBeTruthy();
     // Last-known state is still on screen.
     expect(screen.getByText("SHUTDOWN_ARM")).toBeTruthy();
+  });
+});
+
+// --- Slice 4: recording controls + backlog (F4.5) ---------------------------
+
+const CAPS = { modes: [{ resolution: "1280x720", fps: 30, bitrate_bps: 2500000 }] };
+
+function installFetchWithRecording(
+  recording: unknown,
+  backlog: unknown,
+  recResponder?: (url: string) => { status: number; body: unknown },
+) {
+  const stateBody = { ...STATE, recording, upload_backlog: backlog };
+  const fn = vi.fn((url: string, init?: RequestInit) => {
+    if (url.startsWith("/api/capabilities")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => CAPS });
+    }
+    if (init?.method === "POST") {
+      const r = recResponder ? recResponder(url) : { status: 200, body: { recording_id: "x" } };
+      return Promise.resolve({
+        ok: r.status >= 200 && r.status < 300,
+        status: r.status,
+        json: async () => r.body,
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => stateBody });
+  });
+  vi.stubGlobal("fetch", fn);
+  return fn;
+}
+
+describe("recording controls (F4.5)", () => {
+  it("shows Start recording + mode selector when idle and POSTs on click", async () => {
+    const fn = installFetchWithRecording(
+      { state: "idle", active_recording_id: null, started_at: null },
+      { count: 0, oldest_pending_seconds: null },
+    );
+    render(<Dashboard />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const start = screen.getByText("Start recording");
+    await act(async () => {
+      fireEvent.click(start);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(fn.mock.calls.some((c) => c[0] === "/api/recording/start")).toBe(true);
+  });
+
+  it("shows Stop recording when a recording is active", async () => {
+    installFetchWithRecording(
+      { state: "recording", active_recording_id: "rec-1", started_at: "t" },
+      { count: 1, oldest_pending_seconds: 120 },
+    );
+    render(<Dashboard />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("Stop recording")).toBeTruthy();
+    // Backlog indicator surfaces count + oldest age.
+    expect(screen.getByText(/Upload backlog: 1 pending/)).toBeTruthy();
+  });
+
+  it("disables the control while starting", async () => {
+    installFetchWithRecording(
+      { state: "starting", active_recording_id: "rec-1", started_at: "t" },
+      { count: 0, oldest_pending_seconds: null },
+    );
+    render(<Dashboard />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const btn = screen.getByText("Starting…") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
   });
 });

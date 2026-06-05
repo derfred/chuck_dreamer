@@ -365,3 +365,50 @@ def test_unknown_plug_is_404(monkeypatch):
   with client:
     r = client.post("/control/shutdown/toaster")
     assert r.status_code == 404
+
+
+# --- §2.13 SIGHUP reload: hot-reloadable control tunables --------------------
+
+
+def test_apply_config_updates_refresh_and_retry_policy():
+  ctl, _, _ = make_control()
+  ctl.apply_config(
+    {
+      "control": {
+        "refresh": {"jetson_s": 11.0, "plug_s": 22.0},
+        "wiz": {"retries": 5, "retry_delay_s": 0.5},
+      }
+    }
+  )
+  assert ctl._jetson_refresh_s == 11.0
+  assert ctl._plug_refresh_s == 22.0
+  # Each plug controller's retry policy was updated in place.
+  for plug in ctl._plugs.values():
+    assert plug._cfg.retries == 5
+    assert plug._cfg.retry_delay_s == 0.5
+
+
+def test_apply_config_does_not_rebind_plug_addresses():
+  # Restart-only: the physical device a plug actuates must NOT change on reload.
+  ctl, _, _ = make_control()
+  before = {name: p._cfg.address for name, p in ctl._plugs.items()}
+  ctl.apply_config(
+    {"control": {"plugs": {"arm": {"address": "999.999.999.999"}}, "wiz": {"retries": 4}}}
+  )
+  after = {name: p._cfg.address for name, p in ctl._plugs.items()}
+  assert after == before  # addresses unchanged (reload ignores plug bindings)
+
+
+def test_validate_config_rejects_bad_tunables():
+  import pytest
+
+  with pytest.raises(ValueError):
+    ControlPlane.validate_config({"control": {"refresh": {"jetson_s": 0}}})
+  with pytest.raises(ValueError):
+    ControlPlane.validate_config({"control": {"wiz": {"retries": 0}}})
+  with pytest.raises(ValueError):
+    ControlPlane.validate_config({"control": {"wiz": {"retry_delay_s": -1}}})
+  # A good config validates clean.
+  ControlPlane.validate_config(
+    {"control": {"refresh": {"jetson_s": 5, "plug_s": 10}, "wiz": {"retries": 3}}}
+  )

@@ -27,7 +27,14 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-from fessel_schemas import CameraState, PlugState, SafetyState, StateResponse
+from fessel_schemas import (
+  CameraState,
+  PlugState,
+  RecordingState,
+  SafetyState,
+  StateResponse,
+  UploadBacklog,
+)
 from fessel_shared import topics
 
 from .jetson import JetsonClient, JetsonError
@@ -79,6 +86,10 @@ class ControlPlane:
     self._plug_state: dict[str, PlugState] = {name: PlugState() for name in plugs}
     self._jetson_state: dict | None = None
     self._camera_up: bool | None = None
+    # Slice 4: recording state + upload backlog, fed from the retained MQTT
+    # topics via the relay (S4.2). Cached so /state does not re-query per call.
+    self._recording = RecordingState()
+    self._upload_backlog = UploadBacklog()
 
     self._stop = threading.Event()
     self._refresh_thread = threading.Thread(
@@ -103,6 +114,60 @@ class ControlPlane:
     with self._lock:
       self._camera_up = up
 
+  def set_recording(self, recording: RecordingState) -> None:
+    with self._lock:
+      self._recording = recording
+
+  def set_upload_backlog(self, backlog: UploadBacklog) -> None:
+    with self._lock:
+      self._upload_backlog = backlog
+
+  # --- SIGHUP reload (§2.13): hot-reloadable control tunables ---------------
+
+  @staticmethod
+  def validate_config(cfg: dict) -> None:
+    """Reject a control config whose reloadable tunables are malformed. Raises
+    so the reloader keeps the running config. Restart-only keys (plug
+    addresses, wiz.driver, jetson.base_url) are NOT validated here — they are
+    not applied on reload, so a change to them is inert until restart."""
+    control = cfg.get("control", {})
+    refresh = control.get("refresh", {})
+    for key in ("jetson_s", "plug_s"):
+      if key in refresh and not (
+        isinstance(refresh[key], (int, float)) and refresh[key] > 0
+      ):
+        raise ValueError(f"control.refresh.{key} must be a positive number")
+    wiz = control.get("wiz", {})
+    if "retries" in wiz and not (isinstance(wiz["retries"], int) and wiz["retries"] >= 1):
+      raise ValueError("control.wiz.retries must be an int >= 1")
+    if "retry_delay_s" in wiz and not (
+      isinstance(wiz["retry_delay_s"], (int, float)) and wiz["retry_delay_s"] >= 0
+    ):
+      raise ValueError("control.wiz.retry_delay_s must be a non-negative number")
+
+  def apply_config(self, cfg: dict) -> None:
+    """Apply the hot-reloadable control tunables (§2.13 conservative scope):
+    the background-refresh intervals and the WiZ send-and-verify retry policy.
+
+    NOT reloaded (restart-only, deliberately): which physical device each plug
+    actuates (`control.plugs.*.address`), the WiZ driver, and the Jetson
+    base_url — re-binding a safety actuator or a control endpoint at runtime is
+    a footgun, so a change to those is inert until a restart. The Jetson client
+    is also left as-is (rebuilding it is in the next scope tier, not this one)."""
+    control = cfg.get("control", {})
+    refresh = control.get("refresh", {})
+    with self._lock:
+      if "jetson_s" in refresh:
+        self._jetson_refresh_s = float(refresh["jetson_s"])
+      if "plug_s" in refresh:
+        self._plug_refresh_s = float(refresh["plug_s"])
+    wiz = control.get("wiz", {})
+    if "retries" in wiz or "retry_delay_s" in wiz:
+      retries = int(wiz.get("retries", 3))
+      delay = float(wiz.get("retry_delay_s", 0.2))
+      for plug in self._plugs.values():
+        plug.set_retry_policy(retries, delay)
+
   # --- read path -------------------------------------------------------------
 
   def state(self) -> StateResponse:
@@ -112,6 +177,8 @@ class ControlPlane:
         jetson=self._jetson_state,
         plugs={name: ps.model_copy() for name, ps in self._plug_state.items()},
         camera=CameraState(up=self._camera_up),
+        recording=self._recording.model_copy(),
+        upload_backlog=self._upload_backlog.model_copy(),
       )
 
   # --- Jetson actions --------------------------------------------------------
@@ -181,11 +248,13 @@ class ControlPlane:
     # Wait one interval before the first refresh: the cache already starts
     # empty/known and an immediate startup refresh would (a) race operator
     # actions issued right after boot and (b) make tests nondeterministic.
-    tick = min(self._jetson_refresh_s, self._plug_refresh_s)
     next_jetson = self._jetson_refresh_s
     next_plugs = self._plug_refresh_s
     start = time.monotonic()
     while not self._stop.is_set():
+      # Re-read the intervals each iteration so a SIGHUP reload (§2.13) that
+      # changes them is honoured promptly, including a shortened tick.
+      tick = min(self._jetson_refresh_s, self._plug_refresh_s)
       self._stop.wait(tick)
       if self._stop.is_set():
         return
@@ -231,7 +300,9 @@ class ControlPlane:
 
 
 def build_control_plane(config: dict, publish: PublishFn) -> ControlPlane:
-  """Construct a ControlPlane from supervisor.yaml `control` config.
+  """Construct a ControlPlane from the supervisor component's `control` config
+  (the `supervisor.control` subtree of fessel.yaml, flattened to `control:` at
+  the top of the dict this receives).
 
   Expected shape (all under `control:`):
 

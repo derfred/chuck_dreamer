@@ -95,8 +95,8 @@ python3 -m venv --system-site-packages .venv
 ./.venv/bin/pip install -e . -e ../../schemas -e ../shared pytest
 ```
 
-For development without a camera, set `camera.use_test_source: true` in
-`video.yaml` to use a `videotestsrc` pattern. Hardware-encoder selection
+For development without a camera, set `video.camera.use_test_source: true` in
+`fessel.yaml` to use a `videotestsrc` pattern. Hardware-encoder selection
 still fails loud if the platform encoder is missing — it never silently
 falls back to software encoding.
 

@@ -2,21 +2,19 @@
 
 In production the control plane is HTTPS (terminated here, reachable from
 the cluster over Tailscale). For local dev it serves plain HTTP. TLS
-material, when present, is configured via supervisor.yaml:
-  http: {host, port, tls_certfile, tls_keyfile}
+material, when present, is configured under the `supervisor.http` section of
+the single fessel.yaml (Requirements §6):
+  supervisor: { http: {host, port, tls_certfile, tls_keyfile} }
 """
 
 from __future__ import annotations
 
 import logging
-import os
 
 import uvicorn
-from fessel_shared import load_yaml_config
+from fessel_shared import load_component_config
 
-from .app import create_app
-
-CONFIG_PATH = os.environ.get("SUPERVISOR_CONFIG", "/etc/fessel/supervisor.yaml")
+from .app import CONFIG_PATH, create_app
 
 
 def main() -> None:
@@ -24,7 +22,7 @@ def main() -> None:
     level=logging.INFO,
     format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
   )
-  config = load_yaml_config(CONFIG_PATH)
+  config = load_component_config(CONFIG_PATH, "supervisor")
   http_cfg = config.get("http", {})
   app = create_app(config)
   uvicorn.run(

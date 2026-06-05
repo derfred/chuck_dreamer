@@ -108,18 +108,160 @@ class CameraState(BaseModel):
   up: bool | None = None
 
 
+# --- Slice 4 recording / upload shapes ---------------------------------------
+# The explicit-recording lifecycle (video's recording state machine, V4.3), the
+# retained recording-state topic (V4.5), the per-recording metadata file (V4.4),
+# the upload progress topic (V4.7), the recordings listing (S4.4), and the
+# upload-backlog gauges (V4.8). The recording branch is a manual operator
+# gesture: at most one recording is active at a time.
+
+
+class RecordingStateValue(str, Enum):
+  """video's explicit-recording branch state machine (V4.3).
+
+  Separate from the live branch's LiveStateValue: the two branches share the
+  encoder hardware but are independent. `idle` is the at-rest state (no
+  recording), mirroring the live branch's `off`.
+  """
+
+  idle = "idle"
+  starting = "starting"
+  recording = "recording"
+  stopping = "stopping"
+
+
+class UploadStateValue(str, Enum):
+  """Where a recording is in the flag-for-upload pipeline (V4.6/V4.7).
+
+  `none` — never flagged. `queued` — marker written, uploader not yet acting.
+  `uploading` — transfer in progress. `uploaded` — in MinIO, marker deleted.
+  `failed` — non-retryable failure; marker renamed `.failed`.
+  """
+
+  none = "none"
+  queued = "queued"
+  uploading = "uploading"
+  uploaded = "uploaded"
+  failed = "failed"
+
+
+class RecordingStartCmd(BaseModel):
+  """Payload of arm/video/cmd/recording/start (V4.5).
+
+  `recording_id` is a UUID chosen by the caller (supervisor); `mode` is the
+  triplet to encode with; `operator` is the GitHub user passed through from
+  webui-backend so metadata.json (V4.4) records who started the recording.
+  """
+
+  recording_id: str
+  mode: ModeTriplet
+  operator: str | None = None
+
+
+class RecordingFlagUploadCmd(BaseModel):
+  """Payload of arm/video/cmd/recording/flag-upload (V4.5)."""
+
+  recording_id: str
+
+
+class RecordingState(BaseModel):
+  """Retained payload on arm/video/state/recording (V4.5).
+
+  The single source of truth for "is a recording active right now"; the
+  dashboard derives its Start/Stop button from this (via supervisor /state).
+  """
+
+  state: RecordingStateValue = RecordingStateValue.idle
+  active_recording_id: str | None = None
+  started_at: str | None = None
+
+
+class RecordingMetadata(BaseModel):
+  """The per-recording metadata.json written on finalisation (V4.4).
+
+  `flagged_for_upload` and `upload_state` are mutable in place: flag-upload
+  (V4.5) and the uploader (V4.7) rewrite this file. It is the recording's
+  source of truth for the rest of the system (listing, playback routing).
+  """
+
+  id: str
+  started_at: str
+  ended_at: str | None = None
+  operator: str | None = None
+  mode: ModeTriplet | None = None
+  duration_seconds: int | None = None
+  segments: int | None = None
+  flagged_for_upload: bool = False
+  upload_state: UploadStateValue = UploadStateValue.none
+  uploaded_at: str | None = None
+
+
+class UploadProgress(BaseModel):
+  """Payload on arm/video/upload/<recording-id> (V4.7), surfaced read-only by
+  the backend (B4.6) so the dashboard can show per-recording upload status."""
+
+  recording_id: str
+  state: UploadStateValue = UploadStateValue.queued
+  attempts: int = 0
+  last_attempt_at: str | None = None
+  last_error: str | None = None
+
+
+class UploadBacklog(BaseModel):
+  """Upload-queue health gauges (V4.8): how many markers are pending and how
+  old the oldest one is. The Slice 7 ">3h" P2 alert lands against these."""
+
+  count: int = 0
+  oldest_pending_seconds: int | None = None
+
+
+class RecordingListItem(BaseModel):
+  """One row of supervisor GET /recordings (S4.4) — what's on the Pi.
+
+  A projection of RecordingMetadata sufficient for the dashboard list; segment
+  URLs are decided by the backend (B4.2/B4.3), not enumerated here.
+  """
+
+  recording_id: str
+  started_at: str
+  ended_at: str | None = None
+  duration_seconds: int | None = None
+  operator: str | None = None
+  flagged_for_upload: bool = False
+  upload_state: UploadStateValue = UploadStateValue.none
+
+
+class UploadGate(BaseModel):
+  """Payload of arm/video/cmd/upload/gate (architecture §2.12).
+
+  The bandwidth coordinator publishes this (retained); the uploader honours it.
+  `uploads_allowed=False` means a viewer (live feed or ring playback) is active,
+  so recording uploads must suspend to free the cellular uplink (Requirements
+  §4.2). `reason` is advisory, for logs/observability.
+  """
+
+  uploads_allowed: bool = True
+  reason: str | None = None
+
+
 class StateResponse(BaseModel):
   """Body of supervisor GET /state and backend GET /api/state (S3.3).
 
   `jetson` is whatever the Jetson's GET /state returned (opaque to the
   backend and dashboard — supervisor caches it and passes it through);
   `null` when the Jetson has not been reached yet.
+
+  Slice 4 adds `recording` (the retained recording-state topic, cached) and
+  `upload_backlog` (the V4.8 gauges, cached) so the dashboard's recording
+  controls and backlog indicator read from the same /state poll as the rest.
   """
 
   safety_state: SafetyState = SafetyState.IDLE
   jetson: dict | None = None
   plugs: dict[str, PlugState] = Field(default_factory=dict)
   camera: CameraState = Field(default_factory=CameraState)
+  recording: RecordingState = Field(default_factory=RecordingState)
+  upload_backlog: UploadBacklog = Field(default_factory=UploadBacklog)
 
 
 def mode_to_canonical(mode: ModeTriplet) -> str:

@@ -4,7 +4,7 @@ After=network.target fessel-mosquitto.service
 Wants=fessel-mosquitto.service
 
 [Service]
-Environment=VIDEO_CONFIG=/etc/fessel/video.yaml
+Environment=FESSEL_CONFIG=/etc/fessel/fessel.yaml
 # Launcher wrapper (ships in /usr/bin from the dpkg). It runs the SYSTEM
 # /usr/bin/python3 directly, so PyGObject (gi) binds to the apt-installed
 # GObject-introspection / GStreamer libraries (python3-gi + gstreamer1.0-*

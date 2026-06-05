@@ -27,14 +27,20 @@ log "starting mosquitto"
 $(execstart fessel-mosquitto.service) &
 sleep 1
 
-# 2. supervisor (control plane + relay) and video (pipeline + state machine).
-# ExecStart is /usr/bin/fessel-{supervisor,video} (the dpkg's launchers) —
-# run them as-is; no path rewriting needed.
+# 2. supervisor (control plane + relay), video (pipeline + state machine), and
+# uploader. ExecStart is /usr/bin/fessel-{supervisor,video,uploader} (the dpkg's
+# launchers) — run them as-is. All three read the single fessel.yaml via
+# FESSEL_CONFIG (each loads its own subtree + the shared mqtt/storage sections).
+export FESSEL_CONFIG=/etc/fessel/fessel.yaml
+
 log "starting supervisor"
-SUPERVISOR_CONFIG=/etc/fessel/supervisor.yaml $(execstart fessel-supervisor.service) &
+$(execstart fessel-supervisor.service) &
 
 log "starting video"
-VIDEO_CONFIG=/etc/fessel/video.yaml $(execstart fessel-video.service) &
+$(execstart fessel-video.service) &
+
+log "starting uploader"
+$(execstart fessel-uploader.service) &
 
 log "all processes started"
 wait -n

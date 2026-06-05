@@ -4,10 +4,14 @@ Section: misc
 Priority: optional
 Architecture: all
 Depends: python3 (>= 3.11), python3-pydantic, python3-paho-mqtt, python3-yaml, python3-fastapi, python3-uvicorn, python3-uvloop, python3-httptools, python3-websockets, python3-watchfiles, python3-gi, gir1.2-gst-plugins-bad-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-tools, mosquitto, v4l-utils
+Recommends: python3-minio
 Maintainer: Fessel <noreply@example.com>
 Description: Fessel robot-arm monitoring (Pi side)
- supervisor (safety/control plane + MQTT relay) and video (GStreamer
- pipeline + live state machine), shipped as system-integrated Python modules
+ supervisor (safety/control plane + MQTT relay), video (GStreamer pipeline +
+ live state machine + ring buffer + explicit recordings), and uploader (ships
+ flagged recordings to MinIO), shipped as system-integrated Python modules
  under /opt/fessel/lib relying on Debian python3-* packages (no venv), with
- launcher wrappers in /usr/bin and their systemd units. Configuration lives
- in /etc/fessel and is preserved across upgrades.
+ launcher wrappers in /usr/bin and their systemd units. The uploader's MinIO
+ driver needs python3-minio (Recommends) for the production 'minio' driver; the
+ import is lazy so the package installs and the 'fake' driver runs without it.
+ Configuration lives in /etc/fessel and is preserved across upgrades.
