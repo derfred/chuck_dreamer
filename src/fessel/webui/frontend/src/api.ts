@@ -6,7 +6,12 @@
 
 import type { ZodType } from "zod";
 import { config } from "./config";
-import type { Capabilities, ModeTriplet, StateResponse } from "../../shared/schemas";
+import type {
+  AnomalyLogEntry,
+  Capabilities,
+  ModeTriplet,
+  StateResponse,
+} from "../../shared/schemas";
 import { CapabilitiesSchema, StateResponseSchema } from "./generated/validators";
 
 // Thrown on a 401 from any backend call. Callers treat this as terminal for
@@ -147,6 +152,8 @@ export function fetchState(): Promise<StateResponse> {
 // (Pi-local + MinIO), not a single fessel_schemas model, so it is typed here.
 export interface RecordingItem {
   recording_id: string;
+  // Slice 5 (S5.4): explicit (operator) vs anomaly (auto-triggered) recording.
+  type: "explicit" | "anomaly";
   started_at: string | null;
   ended_at: string | null;
   duration_seconds: number | null;
@@ -159,6 +166,12 @@ export interface RecordingItem {
 
 export function fetchRecordings(): Promise<RecordingItem[]> {
   return getJson<RecordingItem[]>("/api/recordings");
+}
+
+// The in-memory anomaly log (B5.2 / F5.2). Newest first; each entry carries the
+// full original event payload + the linked anomaly-recording id (if any).
+export function fetchAnomalies(): Promise<AnomalyLogEntry[]> {
+  return getJson<AnomalyLogEntry[]>("/api/anomalies");
 }
 
 // Start an explicit recording at the given mode. Returns the recording id the

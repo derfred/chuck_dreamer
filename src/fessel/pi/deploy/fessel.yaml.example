@@ -55,6 +55,60 @@ video:
     # giving up to idle (V4.3).
     start_timeout_s: 15.0
 
+  # Slice 5 vision analysis (V5.5). Runs on the always-on appsink branch
+  # (640x360). All values are starting points; tune against the real scene by
+  # watching the dashboard's live activity score.
+  vision:
+    background_subtractor:
+      # MOG2 (default) or KNN; history + variance threshold control sensitivity.
+      algorithm: MOG2
+      history: 500
+      var_threshold: 16
+    # EMA smoothing for the published activity score (raw per-frame is noisy).
+    ema_alpha: 0.1
+    # Morphological-open kernel size (rejects single-pixel noise before counting).
+    morphology: { kernel: 3 }
+    # Vision summary publish cadence (Hz) — dashboard-readable, MQTT-trivial.
+    publish_summary_hz: 1
+    # The arm's expected workspace as an image-space rectangle in 640x360 coords.
+    # CRITICAL: no good default — it is camera-position-specific and MUST be set
+    # at install. Use scripts/safe_box_preview.py to capture a frame with this
+    # rectangle overlaid and confirm it visually (X5.2).
+    safe_box: { x: 100, y: 60, w: 440, h: 240 }
+    # Fraction of foreground OUTSIDE the box that counts as a violation, and how
+    # many consecutive frames it must persist (debounce vs. a fly across lens).
+    safe_box_threshold: 0.05
+    safe_box_debounce_frames: 12
+    # During a rest period (between episodes / paused), activity above this (much
+    # lower — "essentially still") for the debounce window is a rest violation.
+    rest_threshold: 0.03
+    rest_debounce_frames: 30
+
+  # Slice 5 audio analysis (V5.6). Runs on the always-on level branch.
+  audio:
+    # ALSA capture device for the analysis branch (default = system default).
+    device: default
+    # Rolling window (s) over which the baseline median is taken.
+    rolling_window_seconds: 5
+    # A spike: RMS over threshold for min_duration_ms AND the peak at least
+    # baseline_gap_db above the rolling baseline (distinguishes a spike from a
+    # sustained loud room).
+    spike_threshold_db: -15
+    spike_min_duration_ms: 100
+    spike_baseline_gap_db: 20
+    # Live audio-level meter publish cadence (Hz), retained for the dashboard.
+    publish_level_hz: 2
+
+  # Slice 5 anomaly-triggered recordings (V5.7). On any anomaly, bracket the
+  # moment with a finite HLS recording: T_before from the ring + T_after of fresh
+  # forward capture, under recordings/anomaly/<id>/.
+  anomaly:
+    before_seconds: 30
+    after_seconds: 60
+    # Auto-flag anomaly recordings for upload? Default false preserves the
+    # Slice-4 "operator decides" property; revisit once the alert load is real.
+    auto_upload: false
+
 # --- supervisor -------------------------------------------------------------
 
 supervisor:
@@ -96,6 +150,18 @@ supervisor:
       # re-querying on every read.
       jetson_s: 5.0
       plug_s: 10.0
+
+  # Slice 5 sensing ingest (X5.2): the in-memory anomaly log + vision/audio
+  # heartbeat staleness. The log is lost on restart (Loki via promtail is the
+  # durable record, Slice 7).
+  anomalies:
+    # Bounded log size; `recent_cap` is how many show in /state's
+    # recent_anomalies (the full set is on /anomalies).
+    log_cap: 100
+    recent_cap: 10
+    # A vision heartbeat / audio level older than this marks the channel
+    # unhealthy in /state (vision.healthy / audio.healthy = false).
+    heartbeat_staleness_s: 6.0
 
 # --- uploader ---------------------------------------------------------------
 

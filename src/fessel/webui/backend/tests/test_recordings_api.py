@@ -117,6 +117,31 @@ def test_recordings_list_merges_local_and_remote():
   assert by["r-remote-only"]["available_remote"] and not by["r-remote-only"]["available_local"]
   # Sorted newest-first by started_at; the remote-only (no started_at) sorts last.
   assert [r["recording_id"] for r in recs][:2] == ["r-both", "r-local"]
+  # Slice 5: a `type` is always present (defaults to "explicit").
+  assert by["r-local"]["type"] == "explicit"
+
+
+def test_recordings_list_carries_anomaly_type():
+  # S5.4/B5.3: supervisor tags anomaly recordings with type="anomaly"; the
+  # backend carries the field through the merge.
+  def handler(req: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+      200,
+      json=[
+        {
+          "recording_id": "anom-1",
+          "type": "anomaly",
+          "started_at": "2026-06-05T02:00:00+00:00",
+          "flagged_for_upload": False,
+          "upload_state": "none",
+        }
+      ],
+    )
+
+  client = make_client(handler)
+  recs = client.get("/api/recordings", headers=AUTHED).json()
+  assert recs[0]["type"] == "anomaly"
+  assert recs[0]["available_local"] is True
 
 
 def test_recordings_list_requires_auth():

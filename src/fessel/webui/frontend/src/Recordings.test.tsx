@@ -9,6 +9,7 @@ import { Recordings } from "./Recordings";
 const LIST = [
   {
     recording_id: "r-new",
+    type: "explicit",
     started_at: "2026-06-04T02:00:00+00:00",
     ended_at: "2026-06-04T02:01:00+00:00",
     duration_seconds: 60,
@@ -20,6 +21,7 @@ const LIST = [
   },
   {
     recording_id: "r-uploaded",
+    type: "anomaly",
     started_at: "2026-06-04T01:00:00+00:00",
     ended_at: "2026-06-04T01:05:00+00:00",
     duration_seconds: 300,
@@ -75,6 +77,12 @@ describe("recordings list (F4.2)", () => {
   it("shows an empty state when there are no recordings", async () => {
     await renderReady(installFetch({ list: [] }));
     expect(screen.getByText(/No recordings yet/)).toBeTruthy();
+  });
+
+  it("shows a type badge discriminating explicit vs anomaly (F5.3)", async () => {
+    await renderReady();
+    expect(screen.getByText("explicit")).toBeTruthy(); // r-new
+    expect(screen.getByText("anomaly")).toBeTruthy(); // r-uploaded
   });
 });
 

@@ -1,6 +1,11 @@
 """SSD storage layout + metadata + upload-marker contract tests (V4.4/V4.6)."""
 
-from fessel_schemas import RecordingMetadata, UploadStateValue
+from fessel_schemas import (
+  AnomalyRecordingMetadata,
+  AnomalyType,
+  RecordingMetadata,
+  UploadStateValue,
+)
 from fessel_shared import Storage
 
 
@@ -8,15 +13,23 @@ def _meta(rid: str, started: str, **kw) -> RecordingMetadata:
   return RecordingMetadata(id=rid, started_at=started, **kw)
 
 
+def _anomaly_meta(aid: str, started: str, **kw) -> AnomalyRecordingMetadata:
+  kw.setdefault("anomaly_event_type", AnomalyType.safe_box_violation)
+  kw.setdefault("trigger_ts", started)
+  return AnomalyRecordingMetadata(id=aid, started_at=started, **kw)
+
+
 def test_ensure_layout_creates_dirs(tmp_path):
   s = Storage(str(tmp_path))
   s.ensure_layout()
   assert s.ring_dir.is_dir()
   assert s.explicit_dir.is_dir()
+  assert s.anomaly_dir.is_dir()
   assert s.upload_queue_dir.is_dir()
   # The documented architecture paths.
   assert s.ring_dir == tmp_path / "ring"
   assert s.explicit_dir == tmp_path / "recordings" / "explicit"
+  assert s.anomaly_dir == tmp_path / "recordings" / "anomaly"
   assert s.upload_queue_dir == tmp_path / "upload_queue"
 
 
@@ -71,6 +84,40 @@ def test_count_segments(tmp_path):
   (d / "index.m3u8").write_text("#EXTM3U")  # not a segment
   assert s.count_segments("r1") == 2
   assert s.count_segments("ghost") == 0
+
+
+def test_anomaly_metadata_roundtrip_and_listing(tmp_path):
+  # Slice 5: anomaly recordings live under recordings/anomaly/<id>/ with their
+  # own metadata shape; the listing mirrors list_recordings (newest first,
+  # partials skipped).
+  s = Storage(str(tmp_path))
+  s.write_anomaly_metadata(
+    _anomaly_meta("a-old", "2026-06-05T00:00:00+00:00", duration_seconds=90, segments=45)
+  )
+  s.write_anomaly_metadata(
+    _anomaly_meta(
+      "a-new",
+      "2026-06-05T02:00:00+00:00",
+      anomaly_event_type=AnomalyType.audio_spike,
+    )
+  )
+  s.anomaly_recording_dir("a-partial").mkdir(parents=True)  # no metadata -> skipped
+  got = s.read_anomaly_metadata("a-old")
+  assert got is not None and got.type == "anomaly" and got.duration_seconds == 90
+  ids = [m.id for m in s.list_anomaly_recordings()]
+  assert ids == ["a-new", "a-old"]
+  assert s.read_anomaly_metadata("ghost") is None
+
+
+def test_count_anomaly_segments(tmp_path):
+  s = Storage(str(tmp_path))
+  d = s.anomaly_recording_dir("a1")
+  d.mkdir(parents=True)
+  (d / "seg-00000.ts").write_bytes(b"a")
+  (d / "seg-00001.ts").write_bytes(b"b")
+  (d / "index.m3u8").write_text("#EXTM3U")
+  assert s.count_anomaly_segments("a1") == 2
+  assert s.count_anomaly_segments("ghost") == 0
 
 
 def test_upload_marker_lifecycle(tmp_path):

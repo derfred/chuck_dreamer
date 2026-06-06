@@ -42,3 +42,25 @@ def test_upload_gate_topic():
   # uploader sees the current value immediately.
   assert topics.CMD_UPLOAD_GATE == "arm/video/cmd/upload/gate"
   assert topics.RETAIN_UPLOAD_GATE is True
+
+
+def test_slice5_vision_audio_topics():
+  # Plan §7 X5.1: vision/audio analysis topic map.
+  assert topics.VISION_HEARTBEAT == "arm/video/vision/heartbeat"
+  assert topics.VISION_SUMMARY == "arm/video/vision/summary"
+  assert topics.VISION_EVENT_SAFE_BOX == "arm/video/vision/events/safe-box"
+  assert topics.VISION_EVENT_SAFE_BOX_CLEARED == "arm/video/vision/events/safe-box_cleared"
+  assert topics.VISION_EVENT_REST == "arm/video/vision/events/rest-violation"
+  assert topics.VISION_EVENT_REST_CLEARED == "arm/video/vision/events/rest_violation_cleared"
+  assert topics.AUDIO_LEVEL == "arm/video/audio/level"
+  assert topics.AUDIO_EVENT_SPIKE == "arm/video/audio/events/spike"
+  assert topics.AUDIO_EVENT_SPIKE_CLEARED == "arm/video/audio/events/spike_cleared"
+  assert topics.EVENT_ANOMALY_RECORDING == "arm/video/events/anomaly-recording"
+  # Only the live audio meter is retained (the value the dashboard wants on
+  # connect); summaries/heartbeats/events are not (no stale anomaly on connect).
+  assert topics.RETAIN_AUDIO_LEVEL is True
+  assert topics.QOS_AUDIO_LEVEL == 0
+  assert topics.QOS_VISION_SUMMARY == 1
+  assert topics.QOS_VISION_EVENT == 1
+  assert topics.QOS_AUDIO_EVENT == 1
+  assert topics.QOS_ANOMALY_RECORDING == 1

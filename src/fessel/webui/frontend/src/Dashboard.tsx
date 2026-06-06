@@ -10,10 +10,17 @@
 // failure mode guarded against is "clicked Stop by accident, hit Enter".
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Capabilities, ModeTriplet, PlugState, StateResponse } from "../../shared/schemas";
+import type {
+  AnomalyLogEntry,
+  Capabilities,
+  ModeTriplet,
+  PlugState,
+  StateResponse,
+} from "../../shared/schemas";
 import {
   AuthError,
   ControlError,
+  fetchAnomalies,
   fetchCapabilities,
   fetchState,
   modeToCanonical,
@@ -24,6 +31,7 @@ import {
   type ControlAction,
 } from "./api";
 import { config } from "./config";
+import { Sparkline } from "./Sparkline";
 
 type ButtonStatus =
   | { kind: "idle" }
@@ -76,6 +84,9 @@ export function Dashboard() {
   const [stateError, setStateError] = useState<boolean>(false);
   const [statuses, setStatuses] = useState<Record<string, ButtonStatus>>({});
   const [pending, setPending] = useState<ActionDef | null>(null);
+  // A short client-side history of the activity score (F5.1 sparkline). Capped
+  // at ~60 samples (= ~60s at the 1Hz-ish state poll); a ring, oldest dropped.
+  const [activityHistory, setActivityHistory] = useState<number[]>([]);
 
   const setStatus = useCallback((action: string, s: ButtonStatus) => {
     setStatuses((prev) => ({ ...prev, [action]: s }));
@@ -90,6 +101,11 @@ export function Dashboard() {
           if (cancelled) return;
           setState(s);
           setStateError(false);
+          // Append the latest activity score to the sparkline history (F5.1/F5.4).
+          const score = s.vision?.activity_score_ema;
+          if (typeof score === "number") {
+            setActivityHistory((h) => [...h, score].slice(-60));
+          }
         })
         .catch((e) => {
           if (cancelled) return;
@@ -155,6 +171,14 @@ export function Dashboard() {
       <h1>Fessel</h1>
 
       <StatusPanel state={state} error={stateError} />
+
+      <SensingStrip
+        vision={state?.vision}
+        audio={state?.audio}
+        history={activityHistory}
+      />
+
+      <RecentAnomaliesPanel />
 
       <h2 style={{ fontSize: 16, marginTop: 24 }}>Controls</h2>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
@@ -331,6 +355,181 @@ function fmtAge(seconds: number): string {
 function navigate(to: string): void {
   window.history.pushState({}, "", to);
   window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+// --- sensing strip (F5.1) ----------------------------------------------------
+// Live activity score (sparkline of the last ~60s) + audio level meter +
+// vision/audio health pills. A quick-glance health strip, NOT the live video
+// feed (/live). Reads from the same /api/state poll as the rest of the page.
+
+function SensingStrip({
+  vision,
+  audio,
+  history,
+}: {
+  vision: StateResponse["vision"] | undefined;
+  audio: StateResponse["audio"] | undefined;
+  history: number[];
+}) {
+  const ema = vision?.activity_score_ema ?? 0;
+  const levelDb = audio?.level_db ?? null;
+  return (
+    <section style={{ marginTop: 16 }}>
+      <h2 style={{ fontSize: 16 }}>Sensing</h2>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 24, alignItems: "center" }}>
+        <div>
+          <div style={{ color: "#666", fontSize: 13 }}>
+            Activity{" "}
+            <span style={{ fontFamily: "monospace" }}>{ema.toFixed(3)}</span>
+          </div>
+          <Sparkline values={history} ariaLabel="activity score history" max={1} />
+        </div>
+        <div>
+          <div style={{ color: "#666", fontSize: 13 }}>Audio level</div>
+          <AudioMeter levelDb={levelDb} />
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <HealthPill label="Vision" healthy={vision?.healthy ?? false} />
+          <HealthPill label="Audio" healthy={audio?.healthy ?? false} />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// Map a dBFS level (~[-60, 0]) to a 0..1 bar fill. Quiet is empty, loud full.
+function AudioMeter({ levelDb }: { levelDb: number | null }) {
+  if (levelDb == null) {
+    return <span style={{ color: "#999", fontSize: 13 }}>—</span>;
+  }
+  const frac = Math.min(1, Math.max(0, (levelDb + 60) / 60));
+  return (
+    <div
+      role="meter"
+      aria-valuenow={Math.round(levelDb)}
+      aria-valuemin={-60}
+      aria-valuemax={0}
+      style={{ width: 160, height: 14, background: "#eee", borderRadius: 3, overflow: "hidden" }}
+    >
+      <div
+        style={{
+          width: `${frac * 100}%`,
+          height: "100%",
+          background: frac > 0.85 ? "#b22222" : "#2a7",
+        }}
+      />
+      <span style={{ fontFamily: "monospace", fontSize: 11, color: "#666" }}>
+        {levelDb.toFixed(1)} dB
+      </span>
+    </div>
+  );
+}
+
+function HealthPill({ label, healthy }: { label: string; healthy: boolean }) {
+  return (
+    <span
+      style={{
+        fontSize: 12,
+        padding: "2px 8px",
+        borderRadius: 10,
+        color: "#fff",
+        background: healthy ? "#2a7" : "#b22222",
+      }}
+      title={`${label} ${healthy ? "healthy" : "degraded (heartbeat stale)"}`}
+    >
+      {label} {healthy ? "●" : "○"}
+    </span>
+  );
+}
+
+// --- recent anomalies panel (F5.2) -------------------------------------------
+// A short list of the last few anomalies from /api/anomalies. Each row links to
+// the anomaly recording's playback (the Slice-4 /recordings path) when one
+// exists. Auto-refreshes on the same cadence as the dashboard state poll.
+
+const ANOMALY_LABELS: Record<string, { label: string; color: string }> = {
+  safe_box_violation: { label: "Safe-box violation", color: "#b22222" },
+  rest_violation: { label: "Rest-period motion", color: "#cc7000" },
+  audio_spike: { label: "Audio spike", color: "#7a3" },
+};
+
+function RecentAnomaliesPanel() {
+  const [anomalies, setAnomalies] = useState<AnomalyLogEntry[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = () => {
+      fetchAnomalies()
+        .then((a) => {
+          if (!cancelled) setAnomalies(a);
+        })
+        .catch((e) => {
+          if (e instanceof AuthError) redirectToLogin();
+          // Other errors: keep the last-known list silently (informational panel).
+        });
+    };
+    poll();
+    const id = window.setInterval(poll, config.statePollMs);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  return (
+    <section style={{ marginTop: 16 }}>
+      <h2 style={{ fontSize: 16 }}>Recent anomalies</h2>
+      {anomalies == null ? (
+        <p style={{ color: "#666" }}>Loading…</p>
+      ) : anomalies.length === 0 ? (
+        <p style={{ color: "#666", fontSize: 13 }}>No anomalies recorded.</p>
+      ) : (
+        <ul style={{ listStyle: "none", padding: 0, margin: 0, maxWidth: 640 }}>
+          {anomalies.slice(0, 8).map((a, i) => (
+            <AnomalyRow key={`${a.ts}-${i}`} entry={a} />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function AnomalyRow({ entry }: { entry: AnomalyLogEntry }) {
+  const meta = ANOMALY_LABELS[entry.type] ?? { label: entry.type, color: "#666" };
+  const rid = entry.anomaly_recording_id ?? null;
+  return (
+    <li
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "4px 0",
+        borderBottom: "1px solid #f0f0f0",
+        fontSize: 13,
+      }}
+    >
+      <span style={{ width: 8, height: 8, borderRadius: 4, background: meta.color }} />
+      <span style={{ color: "#666", fontFamily: "monospace" }}>{fmtTimeShort(entry.ts)}</span>
+      <span>{meta.label}</span>
+      {entry.cleared ? <span style={{ color: "#999" }}>(cleared)</span> : null}
+      {rid ? (
+        <a
+          href="/recordings"
+          onClick={(e) => (e.preventDefault(), navigate("/recordings"))}
+          style={{ marginLeft: "auto" }}
+        >
+          View recording →
+        </a>
+      ) : null}
+    </li>
+  );
+}
+
+function fmtTimeShort(ts: string | null | undefined): string {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return ts;
+  return d.toLocaleTimeString();
 }
 
 // --- status panel (read-only facts, F3.1) -----------------------------------

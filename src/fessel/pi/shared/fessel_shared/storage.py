@@ -34,13 +34,14 @@ import json
 import os
 from pathlib import Path
 
-from fessel_schemas import RecordingMetadata
+from fessel_schemas import AnomalyRecordingMetadata, RecordingMetadata
 
 # Subdirectory names under the SSD mount. Stable strings shared with the
 # uploader and with supervisor's proxy/listing (kept here as the one source).
 RING_DIRNAME = "ring"
 RECORDINGS_DIRNAME = "recordings"
 EXPLICIT_DIRNAME = "explicit"
+ANOMALY_DIRNAME = "anomaly"
 UPLOAD_QUEUE_DIRNAME = "upload_queue"
 
 METADATA_FILENAME = "metadata.json"
@@ -68,11 +69,20 @@ class Storage:
     return self.root / RECORDINGS_DIRNAME / EXPLICIT_DIRNAME
 
   @property
+  def anomaly_dir(self) -> Path:
+    # Slice 5: anomaly-triggered recordings sit alongside explicit ones under
+    # recordings/, in their own subdirectory (§2.8, V5.7).
+    return self.root / RECORDINGS_DIRNAME / ANOMALY_DIRNAME
+
+  @property
   def upload_queue_dir(self) -> Path:
     return self.root / UPLOAD_QUEUE_DIRNAME
 
   def recording_dir(self, recording_id: str) -> Path:
     return self.explicit_dir / recording_id
+
+  def anomaly_recording_dir(self, anomaly_id: str) -> Path:
+    return self.anomaly_dir / anomaly_id
 
   def ensure_layout(self) -> None:
     """Create the ring / recordings / upload_queue directories if absent. The
@@ -80,6 +90,7 @@ class Storage:
     processes are robust to a fresh SSD without a manual mkdir."""
     self.ring_dir.mkdir(parents=True, exist_ok=True)
     self.explicit_dir.mkdir(parents=True, exist_ok=True)
+    self.anomaly_dir.mkdir(parents=True, exist_ok=True)
     self.upload_queue_dir.mkdir(parents=True, exist_ok=True)
 
   # --- metadata --------------------------------------------------------------
@@ -131,6 +142,59 @@ class Storage:
   def count_segments(self, recording_id: str) -> int:
     """Number of .ts segments written for a recording (for metadata.segments)."""
     d = self.recording_dir(recording_id)
+    if not d.is_dir():
+      return 0
+    return sum(1 for f in d.iterdir() if f.suffix == ".ts")
+
+  # --- anomaly recordings (Slice 5, V5.7) ------------------------------------
+  # Anomaly recordings live under recordings/anomaly/<id>/ with the same on-disk
+  # shape as explicit ones (index.m3u8 + seg-NNNNN.ts + metadata.json), but the
+  # metadata is AnomalyRecordingMetadata (carries a `type:"anomaly"` and the
+  # trigger events). supervisor's /recordings merges both lists (S5.4).
+
+  def anomaly_metadata_path(self, anomaly_id: str) -> Path:
+    return self.anomaly_recording_dir(anomaly_id) / METADATA_FILENAME
+
+  def write_anomaly_metadata(self, meta: AnomalyRecordingMetadata) -> None:
+    """Atomically write an anomaly recording's metadata.json (V5.7), same
+    temp-file + os.replace contract as the explicit-recording write."""
+    path = self.anomaly_metadata_path(meta.id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(meta.model_dump(mode="json"), indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+  def read_anomaly_metadata(self, anomaly_id: str) -> AnomalyRecordingMetadata | None:
+    """Read + validate an anomaly recording's metadata.json, or None if missing
+    or unparseable (a partial recording that never finalised)."""
+    path = self.anomaly_metadata_path(anomaly_id)
+    try:
+      raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+      return None
+    try:
+      return AnomalyRecordingMetadata.model_validate(raw)
+    except Exception:  # noqa: BLE001 — a malformed file is "no metadata"
+      return None
+
+  def list_anomaly_recordings(self) -> list[AnomalyRecordingMetadata]:
+    """Every finalised anomaly recording with a readable metadata.json, newest
+    first. Partial/never-finalised ones are skipped (mirrors list_recordings)."""
+    out: list[AnomalyRecordingMetadata] = []
+    if not self.anomaly_dir.is_dir():
+      return out
+    for child in self.anomaly_dir.iterdir():
+      if not child.is_dir():
+        continue
+      meta = self.read_anomaly_metadata(child.name)
+      if meta is not None:
+        out.append(meta)
+    out.sort(key=lambda m: m.started_at, reverse=True)
+    return out
+
+  def count_anomaly_segments(self, anomaly_id: str) -> int:
+    """Number of .ts segments written for an anomaly recording (before + after)."""
+    d = self.anomaly_recording_dir(anomaly_id)
     if not d.is_dir():
       return 0
     return sum(1 for f in d.iterdir() if f.suffix == ".ts")

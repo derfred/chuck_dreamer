@@ -37,6 +37,8 @@ import uuid
 
 from fastapi import FastAPI, HTTPException, Request
 from fessel_schemas import (
+  AnomalyRecordingMetadata,
+  AnomalyType,
   LiveActivate,
   LiveDeactivate,
   LiveState,
@@ -160,6 +162,9 @@ class Relay:
     self._backlog_count = 0
     self._backlog_oldest: int | None = None
     self._upload_progress: dict[str, dict] = {}
+    # Slice 5: the sensing tracker (live vision/audio + anomaly log), set by
+    # create_app to the control plane's tracker. The relay feeds it from MQTT.
+    self.anomalies = None  # type: AnomalyTracker | None
 
   def start(self) -> None:
     self._mqtt.connect()
@@ -187,6 +192,35 @@ class Relay:
       UploadProgress.model_validate,
       self._on_upload_progress,
       qos=topics.QOS_UPLOAD,
+    )
+    # Slice 5: vision/audio sensing ingest (S5.1). Summary + level feed the live
+    # /state values; heartbeat + level feed the health flags; the event topics
+    # and the anomaly-recording event feed the in-memory anomaly log. Raw
+    # subscribes (read defensively into the tracker); the tracker validates shape.
+    self._mqtt.subscribe(
+      topics.VISION_SUMMARY, self._on_vision_summary, qos=topics.QOS_VISION_SUMMARY
+    )
+    self._mqtt.subscribe(
+      topics.VISION_HEARTBEAT, self._on_vision_heartbeat, qos=topics.QOS_VISION_HEARTBEAT
+    )
+    self._mqtt.subscribe(topics.AUDIO_LEVEL, self._on_audio_level, qos=topics.QOS_AUDIO_LEVEL)
+    for topic, etype in (
+      (topics.VISION_EVENT_SAFE_BOX, AnomalyType.safe_box_violation),
+      (topics.VISION_EVENT_SAFE_BOX_CLEARED, AnomalyType.safe_box_cleared),
+      (topics.VISION_EVENT_REST, AnomalyType.rest_violation),
+      (topics.VISION_EVENT_REST_CLEARED, AnomalyType.rest_violation_cleared),
+      (topics.AUDIO_EVENT_SPIKE, AnomalyType.audio_spike),
+      (topics.AUDIO_EVENT_SPIKE_CLEARED, AnomalyType.audio_spike_cleared),
+    ):
+      self._mqtt.subscribe(
+        topic,
+        lambda _t, payload, _et=etype: self._on_anomaly_event(_et, payload),
+        qos=topics.QOS_VISION_EVENT,
+      )
+    self._mqtt.subscribe(
+      topics.EVENT_ANOMALY_RECORDING,
+      self._on_anomaly_recording,
+      qos=topics.QOS_ANOMALY_RECORDING,
     )
     self._mqtt.loop_start()
     self._hb_thread.start()
@@ -247,6 +281,28 @@ class Relay:
     # Cache the latest per-recording progress for /recordings/<id>/upload (B4.6).
     with self._lock:
       self._upload_progress[progress.recording_id] = progress.model_dump(mode="json")
+
+  # --- Slice 5: vision/audio sensing ingest (S5.1) ---------------------------
+
+  def _on_vision_summary(self, _topic: str, payload: dict) -> None:
+    if self.anomalies is not None:
+      self.anomalies.note_vision_summary(payload)
+
+  def _on_vision_heartbeat(self, _topic: str, payload: dict) -> None:
+    if self.anomalies is not None:
+      self.anomalies.note_vision_heartbeat(payload)
+
+  def _on_audio_level(self, _topic: str, payload: dict) -> None:
+    if self.anomalies is not None:
+      self.anomalies.note_audio_level(payload)
+
+  def _on_anomaly_event(self, event_type: AnomalyType, payload: dict) -> None:
+    if self.anomalies is not None:
+      self.anomalies.note_event(event_type, payload)
+
+  def _on_anomaly_recording(self, _topic: str, payload: dict) -> None:
+    if self.anomalies is not None:
+      self.anomalies.note_anomaly_recording(payload)
 
   def upload_progress(self, recording_id: str) -> dict | None:
     with self._lock:
@@ -311,6 +367,9 @@ def create_app(
   relay.on_camera = ctl.set_camera_up
   relay.on_recording = ctl.set_recording
   relay.on_backlog = ctl.set_upload_backlog
+  # Slice 5: the relay feeds the control plane's sensing tracker from MQTT; the
+  # app reads it for /state (via ctl.state()) and /anomalies.
+  relay.anomalies = ctl.anomalies
 
   # §2.12: the bandwidth coordinator gates recording uploads on viewer presence.
   # It publishes the gate through the relay's MQTT client; tests may inject one
@@ -324,7 +383,12 @@ def create_app(
   # enforces traversal protection. ssd_path is the shared `storage` section of
   # fessel.yaml (same value video + uploader read).
   storage = Storage((cfg.get("storage") or {}).get("ssd_path", "/mnt/ssd"))
-  ring_proxy = RingProxy(storage.ring_dir, storage.explicit_dir, on_ring_read=bw.note_ring_read)
+  ring_proxy = RingProxy(
+    storage.ring_dir,
+    storage.explicit_dir,
+    on_ring_read=bw.note_ring_read,
+    anomaly_dir=storage.anomaly_dir,
+  )
 
   # SIGHUP reload (§2.13): re-read the supervisor config and apply the
   # hot-reloadable control tunables (refresh intervals, WiZ retry policy).
@@ -506,8 +570,9 @@ def create_app(
     # actual flag + marker write happens in video (V4.5); supervisor only
     # publishes the command after these guards pass.
     rid = body.recording_id
+    # The recording may be explicit or anomaly (S5.4); accept either.
     meta = storage.read_metadata(rid)
-    if meta is None:
+    if meta is None and storage.read_anomaly_metadata(rid) is None:
       raise HTTPException(status_code=404, detail=f"unknown recording: {rid}")
     active = ctl.state().recording.active_recording_id
     if active == rid:
@@ -518,11 +583,23 @@ def create_app(
 
   @app.get("/recordings")
   def list_recordings() -> list[dict]:
-    # Enumerate finalised explicit recordings on the Pi, newest first (S4.4).
-    items: list[RecordingListItem] = []
+    # Enumerate finalised explicit AND anomaly recordings on the Pi, newest
+    # first, merged with a `type` discriminator (S4.4 + S5.4). The metadata
+    # schemas are compatible on the listed fields; `type` distinguishes them.
+    rows: list[dict] = []
     for meta in storage.list_recordings():
-      items.append(_meta_to_list_item(meta))
-    return [i.model_dump(mode="json") for i in items]
+      rows.append({**_meta_to_list_item(meta).model_dump(mode="json"), "type": "explicit"})
+    for ameta in storage.list_anomaly_recordings():
+      rows.append({**_anomaly_meta_to_list_item(ameta).model_dump(mode="json"), "type": "anomaly"})
+    rows.sort(key=lambda r: r.get("started_at") or "", reverse=True)
+    return rows
+
+  @app.get("/anomalies")
+  def list_anomalies() -> list[dict]:
+    # S5.3: the full in-memory anomaly log, newest first, each entry carrying its
+    # original event payload + the linked anomaly-recording id (if any). Bounded
+    # by the tracker's log cap; in-memory (a supervisor restart loses it).
+    return [e.model_dump(mode="json") for e in ctl.anomalies.full_log()]
 
   @app.get("/recordings/{recording_id}/upload")
   def recording_upload(recording_id: str) -> dict:
@@ -557,6 +634,20 @@ def create_app(
 
 
 def _meta_to_list_item(meta: RecordingMetadata) -> RecordingListItem:
+  return RecordingListItem(
+    recording_id=meta.id,
+    started_at=meta.started_at,
+    ended_at=meta.ended_at,
+    duration_seconds=meta.duration_seconds,
+    operator=meta.operator,
+    flagged_for_upload=meta.flagged_for_upload,
+    upload_state=meta.upload_state,
+  )
+
+
+def _anomaly_meta_to_list_item(meta: AnomalyRecordingMetadata) -> RecordingListItem:
+  # S5.4: an anomaly recording projected onto the same list-item shape as an
+  # explicit one (the `type` field, added at the call site, discriminates).
   return RecordingListItem(
     recording_id=meta.id,
     started_at=meta.started_at,

@@ -7,7 +7,13 @@ pure string/dataclass logic; only build_pipeline() touches GStreamer.
 import pytest
 from fessel_schemas import ModeTriplet
 
-from video.pipeline import build_live_launch, build_recording_launch, build_ring_launch
+from video.pipeline import (
+  build_audio_launch,
+  build_live_launch,
+  build_recording_launch,
+  build_ring_launch,
+  build_vision_launch,
+)
 from video.platform import encoder_profile
 
 MODE = ModeTriplet(resolution="1280x720", fps=30, bitrate_bps=2_500_000)
@@ -105,6 +111,44 @@ def test_recording_launch_is_finite_keep_everything():
   # Finite recording: keep everything, do not roll (documented hlssink2 values).
   assert "playlist-length=0" in launch
   assert "max-files=0" in launch
+
+
+# --- Slice 5: vision + audio analysis launch builders ------------------------
+
+
+def test_vision_launch_downscales_to_640x360_appsink():
+  launch = build_vision_launch(mode=MODE, use_test_source=True)
+  # Analyses at 640x360 (the coord space safe_box + detectors use).
+  assert "width=640,height=360" in launch
+  assert "appsink name=vision_sink" in launch
+  # Backpressure: drop old frames at the appsink, never queue stale ones (V5.1).
+  assert "drop=true" in launch
+  assert "max-buffers=1" in launch
+  # No encoder in the vision branch — it analyses raw frames in-process.
+  assert "h264" not in launch
+  assert "v4l2h264enc" not in launch
+
+
+def test_vision_launch_uses_test_source_in_dev():
+  launch = build_vision_launch(mode=MODE, use_test_source=True)
+  assert "videotestsrc" in launch
+  assert "v4l2src" not in launch
+
+
+def test_audio_launch_has_level_element_posting_messages():
+  launch = build_audio_launch(use_test_source=True, level_interval_ns=500_000_000)
+  assert "level name=audio_level" in launch
+  assert "post-messages=true" in launch
+  assert "interval=500000000" in launch
+  # Dev fallback avoids alsasrc (no mic on the dev box).
+  assert "audiotestsrc" in launch
+  assert "alsasrc" not in launch
+
+
+def test_audio_launch_real_mic_uses_alsasrc():
+  launch = build_audio_launch(device="hw:1", use_test_source=False)
+  assert "alsasrc device=hw:1" in launch
+  assert "audiotestsrc" not in launch
 
 
 def test_ring_and_recording_use_their_own_bitrate():

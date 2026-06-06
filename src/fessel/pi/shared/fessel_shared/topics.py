@@ -26,6 +26,12 @@ HEARTBEAT = f"{SITE_PREFIX}/video/heartbeat"
 # for the `camera` field of GET /state (S3.3).
 STATE_CAMERA = f"{SITE_PREFIX}/video/state/camera"
 
+# Supervisor safety state, published retained by supervisor on every state
+# change. Architecture §2.7 lists this primarily as a /metrics source; Slice 5
+# adds an actual retained MQTT publish so video's rest-period detection (V5.4)
+# can learn the operator-driven safety state (PAUSED/STOPPED/SHUTDOWN_ARM).
+STATE_SUPERVISOR = f"{SITE_PREFIX}/supervisor/state"
+
 # Verified WiZ plug state, published retained by supervisor on every confirmed
 # state change (S3.1). `<name>` is the plug name (arm | jetson).
 PLUG_STATE_PREFIX = f"{SITE_PREFIX}/supervisor/plug"
@@ -66,6 +72,50 @@ def upload_progress(recording_id: str) -> str:
 # sees the current gate immediately on (re)connect rather than defaulting to a
 # guess. `uploads_allowed=false` means a viewer (live or ring) is active.
 CMD_UPLOAD_GATE = f"{SITE_PREFIX}/video/cmd/upload/gate"
+
+
+# --- Slice 5: vision + audio analysis topics (plan §7 X5.1) ------------------
+# video runs vision/audio analysis on the appsink/level branches and publishes
+# a periodic summary, a heartbeat, and discrete anomaly events; supervisor
+# subscribes to all of them. The detectors self-clear (a `*_cleared` event on
+# return-to-normal) so Slice 6 sees both the entry and the exit. All Pi-internal.
+
+# Vision thread heartbeat (V5.1): absence => supervisor marks vision degraded.
+VISION_HEARTBEAT = f"{SITE_PREFIX}/video/vision/heartbeat"
+# ~1 Hz vision summary (V5.2): activity-score EMA + max-since-last for the
+# dashboard's live sensing strip and Slice-6 fusion.
+VISION_SUMMARY = f"{SITE_PREFIX}/video/vision/summary"
+# Vision anomaly events (V5.3/V5.4). Each has a self-clearing `_cleared` twin.
+VISION_EVENT_SAFE_BOX = f"{SITE_PREFIX}/video/vision/events/safe-box"
+VISION_EVENT_SAFE_BOX_CLEARED = f"{SITE_PREFIX}/video/vision/events/safe-box_cleared"
+VISION_EVENT_REST = f"{SITE_PREFIX}/video/vision/events/rest-violation"
+VISION_EVENT_REST_CLEARED = f"{SITE_PREFIX}/video/vision/events/rest_violation_cleared"
+
+# Audio level meter (V5.6), ~2 Hz, retained so a connecting dashboard sees a
+# value immediately. Audio spike events have a self-clearing `_cleared` twin.
+AUDIO_LEVEL = f"{SITE_PREFIX}/video/audio/level"
+AUDIO_EVENT_SPIKE = f"{SITE_PREFIX}/video/audio/events/spike"
+AUDIO_EVENT_SPIKE_CLEARED = f"{SITE_PREFIX}/video/audio/events/spike_cleared"
+
+# video emits this when it has bracketed an anomaly with a finite HLS recording
+# (V5.7). Not a command (`cmd/`) — an event video publishes; supervisor and the
+# dashboard react. Minted this slice (not in Slice 0's map, which is fine — the
+# slice introducing it owns adding it).
+EVENT_ANOMALY_RECORDING = f"{SITE_PREFIX}/video/events/anomaly-recording"
+
+# QoS for the Slice-5 topics (plan §7 X5.1 table). Summary/events at QoS 1
+# (delivery matters); heartbeat + level at QoS 0 (cheap, loss-tolerant).
+QOS_VISION_SUMMARY = 1
+QOS_VISION_EVENT = 1
+QOS_VISION_HEARTBEAT = 0
+QOS_AUDIO_LEVEL = 0
+QOS_AUDIO_EVENT = 1
+QOS_ANOMALY_RECORDING = 1
+
+# Retained flags (plan §7 X5.1): only the audio level meter is retained — it is
+# the live value the dashboard wants on connect. Summaries, the heartbeat, and
+# events are NOT retained (a stale anomaly event must not resurface on connect).
+RETAIN_AUDIO_LEVEL = True
 
 
 # QoS levels per the topic map.

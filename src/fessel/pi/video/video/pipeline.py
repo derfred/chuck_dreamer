@@ -54,6 +54,17 @@ LIVE_ENCODER_NAME = "live_enc"
 RING_HLS_NAME = "ring_hls"
 RECORDING_HLS_NAME = "rec_hls"
 
+# Slice 5: stable names for the vision appsink and the audio level element, so
+# the analysis handles can resolve them (pull samples / read bus messages).
+VISION_APPSINK_NAME = "vision_sink"
+AUDIO_LEVEL_NAME = "audio_level"
+
+# The downscaled resolution the vision branch analyses at (architecture §2.2:
+# "videoscale ! video/x-raw,width=640,height=360 ! appsink"). Fixed, not a
+# config value — the detectors and the safe_box config are in this coord space.
+VISION_WIDTH = 640
+VISION_HEIGHT = 360
+
 
 def _resolution_wh(mode: ModeTriplet) -> tuple[int, int]:
   w, h = (int(x) for x in mode.resolution.split("x"))
@@ -231,6 +242,64 @@ def build_recording_launch(
     f"max-files=0"
   )
   return f"{source} ! {encoder} ! {sink}"
+
+
+def build_vision_launch(
+  *,
+  mode: ModeTriplet,
+  device: str = "/dev/video0",
+  use_test_source: bool = False,
+) -> str:
+  """Launch string for the always-on vision-analysis branch (V5.1).
+
+  Capture -> videoscale to 640x360 -> appsink. No encoder: the frames are
+  analysed in-process by OpenCV (the appsink callback), never written or sent,
+  so this branch is hardware-encoder-independent (it works on any platform with
+  the camera, including dev machines without a hardware H.264 encoder).
+
+  The appsink is configured drop=true max-buffers=1 (plan §V5.1 backpressure: a
+  vision thread that can't keep up drops frames at the appsink rather than
+  queueing stale ones). `emit-signals=true` so the handle can connect to
+  `new-sample`. The 640x360 cap is the coordinate space the safe_box config and
+  the detectors operate in.
+  """
+  source = _source_chain(device, *_resolution_wh(mode), mode.fps, use_test_source)
+  scale = (
+    f"videoscale ! video/x-raw,width={VISION_WIDTH},height={VISION_HEIGHT},format=I420"
+  )
+  sink = (
+    f"appsink name={VISION_APPSINK_NAME} emit-signals=true "
+    f"max-buffers=1 drop=true sync=false"
+  )
+  return f"{source} ! {scale} ! {sink}"
+
+
+def build_audio_launch(
+  *,
+  device: str = "default",
+  use_test_source: bool = False,
+  level_interval_ns: int = 500_000_000,
+) -> str:
+  """Launch string for the always-on audio-analysis branch (V5.6).
+
+  Mic -> audioconvert -> level -> fakesink. The `level` element emits a
+  per-interval message on the GStreamer bus carrying RMS + peak dBFS; the audio
+  handle reads those messages (no appsink needed for spike detection — plan
+  §V5.6 notes the appsink is optional, for waveform archival only). `interval`
+  is in nanoseconds (default 0.5s, matching the ~2 Hz publish cadence).
+
+  Dev fallback (`use_test_source`) uses audiotestsrc so the branch builds and
+  runs on a machine without a microphone.
+  """
+  if use_test_source:
+    src = "audiotestsrc is-live=true wave=silence"
+  else:
+    src = f"alsasrc device={device}"
+  return (
+    f"{src} ! audioconvert ! audioresample "
+    f"! level name={AUDIO_LEVEL_NAME} interval={level_interval_ns} post-messages=true "
+    f"! fakesink sync=false"
+  )
 
 
 def build_pipeline(launch: str) -> "Gst.Pipeline":

@@ -32,6 +32,11 @@ function installFetch(controlResponder?: (url: string) => { status: number; body
       if (url.startsWith("/api/capabilities")) {
         return Promise.resolve({ ok: true, status: 200, json: async () => ({ modes: [] }) });
       }
+      // Slice 5: the recent-anomalies panel polls /api/anomalies; answer with an
+      // empty log so it doesn't consume the STATE body.
+      if (url.startsWith("/api/anomalies")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -187,6 +192,9 @@ describe("state poll resilience (F3.4)", () => {
       if (url.startsWith("/api/capabilities")) {
         return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_CAPS });
       }
+      if (url.startsWith("/api/anomalies")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
       // /api/state: first poll succeeds; subsequent polls 503.
       stateCalls += 1;
       if (stateCalls === 1)
@@ -222,6 +230,9 @@ function installFetchWithRecording(
   const fn = vi.fn((url: string, init?: RequestInit) => {
     if (url.startsWith("/api/capabilities")) {
       return Promise.resolve({ ok: true, status: 200, json: async () => CAPS });
+    }
+    if (url.startsWith("/api/anomalies")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => [] });
     }
     if (init?.method === "POST") {
       const r = recResponder ? recResponder(url) : { status: 200, body: { recording_id: "x" } };

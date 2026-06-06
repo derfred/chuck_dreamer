@@ -32,6 +32,8 @@ import threading
 import time
 
 from fessel_schemas import (
+  AnomalyRecordingEvent,
+  AnomalyType,
   Capabilities,
   LiveActivate,
   LiveDeactivate,
@@ -41,20 +43,29 @@ from fessel_schemas import (
   RecordingStartCmd,
   RecordingState,
   RecordingStateValue,
+  UploadStateValue,
+  VisionHeartbeat,
 )
 from fessel_shared import ConfigReloader, MqttClient, Storage, load_component_config
 from fessel_shared import topics
 
+from .analysis import AnalysisCoordinator
+from .anomaly_recording import AnomalyRecorder, AnomalyWindow
+from .audio import AudioAnalyzer, audio_config_from_dict
 from .capabilities import probe
 from .gst_pipeline_handle import GstLivePipeline
 from .gst_recording_handle import GstRecordingPipeline
 from .gst_ring_handle import GstRingPipeline
 from .recording_state_machine import RecordingStateMachine
 from .state_machine import LiveStateMachine
+from .vision import VisionAnalyzer, vision_config_from_dict
 
 log = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL_S = 5.0
+# Vision thread heartbeat cadence (V5.1): more frequent than the process
+# heartbeat so supervisor notices a wedged vision thread within a couple seconds.
+VISION_HEARTBEAT_INTERVAL_S = 2.0
 # Single Pi config (Requirements §6); this process reads its `video:` subtree
 # plus the shared `mqtt`/`storage` sections. FESSEL_CONFIG overrides the path.
 CONFIG_PATH = os.environ.get("FESSEL_CONFIG", "/etc/fessel/fessel.yaml")
@@ -75,6 +86,12 @@ DEFAULT_RECORDING = {
   "bitrate_bps": 8_000_000,
   "segment_seconds": 2,
   "start_timeout_s": 15.0,
+}
+# Anomaly-recording window defaults (V5.7) — bracket the moment.
+DEFAULT_ANOMALY = {
+  "before_seconds": 30.0,
+  "after_seconds": 60.0,
+  "auto_upload": False,
 }
 
 
@@ -127,6 +144,37 @@ class VideoApp:
       start_timeout_s=float(self._rec_cfg["start_timeout_s"]),
       count_segments=self._storage.count_segments,
     )
+
+    # --- Slice 5: vision + audio analysis ------------------------------------
+    self._vision_cfg = config.get("vision") or {}
+    self._audio_cfg = config.get("audio") or {}
+    self._anomaly_cfg = {**DEFAULT_ANOMALY, **(config.get("anomaly") or {})}
+    self._vision_analyzer = VisionAnalyzer(vision_config_from_dict(self._vision_cfg))
+    self._audio_analyzer = AudioAnalyzer(audio_config_from_dict(self._audio_cfg))
+    self._recorder = AnomalyRecorder(
+      ring_dir=self._storage.ring_dir,
+      anomaly_dir=self._storage.anomaly_dir,
+      forward_capture_factory=self._make_forward_capture,
+      publish_event=self._publish_anomaly_recording,
+      window=AnomalyWindow(
+        before_seconds=float(self._anomaly_cfg["before_seconds"]),
+        after_seconds=float(self._anomaly_cfg["after_seconds"]),
+      ),
+      mode=self._ring_mode(),
+      count_segments=self._storage.count_anomaly_segments,
+      auto_upload=bool(self._anomaly_cfg["auto_upload"]),
+      flag_for_upload=self._flag_anomaly_for_upload,
+    )
+    self._analysis = AnalysisCoordinator(
+      vision=self._vision_analyzer,
+      audio=self._audio_analyzer,
+      recorder=self._recorder,
+      publish=self._publish,
+      summary_hz=float(self._vision_cfg.get("publish_summary_hz", 1.0)),
+      level_hz=float(self._audio_cfg.get("publish_level_hz", 2.0)),
+    )
+    self._gst_vision = None  # GstVisionPipeline (best-effort spawn in run())
+    self._gst_audio = None  # GstAudioPipeline
 
   def _make_pipeline(self, mode: ModeTriplet, path: str) -> GstLivePipeline:
     return GstLivePipeline(
@@ -185,6 +233,12 @@ class VideoApp:
         isinstance(sec["start_timeout_s"], (int, float)) and sec["start_timeout_s"] > 0
       ):
         raise ValueError(f"{section}.start_timeout_s must be a positive number")
+    # Slice 5: vision/audio tunables. A malformed safe_box must be rejected
+    # (it gates the safe-box detector); vision_config_from_dict raises on a bad
+    # rectangle via the SafeBox pydantic model.
+    vis = cfg.get("vision") or {}
+    if isinstance(vis, dict) and isinstance(vis.get("safe_box"), dict):
+      vision_config_from_dict(vis)  # raises on a malformed safe_box
 
   def apply_config(self, cfg: dict) -> None:
     """Apply the hot-reloadable subset (§2.13 conservative scope): the ring and
@@ -197,6 +251,27 @@ class VideoApp:
     self._ring_cfg = {**DEFAULT_RING, **(cfg.get("ring") or {})}
     self._rec_cfg = {**DEFAULT_RECORDING, **(cfg.get("recording") or {})}
     self._rec_sm.set_start_timeout(float(self._rec_cfg["start_timeout_s"]))
+    # Slice 5: vision/audio detector tunables hot-apply (thresholds, debounce,
+    # safe_box, EMA, spike params) — the running analysis threads pick them up on
+    # the next frame/level. The background-subtractor algorithm + the appsink
+    # caps are restart-only (they're baked into the spawned pipeline), like the
+    # encoder; a change there is logged, not applied.
+    self._vision_cfg = cfg.get("vision") or {}
+    self._audio_cfg = cfg.get("audio") or {}
+    self._anomaly_cfg = {**DEFAULT_ANOMALY, **(cfg.get("anomaly") or {})}
+    self._vision_analyzer.update_config(vision_config_from_dict(self._vision_cfg))
+    self._audio_analyzer.update_config(audio_config_from_dict(self._audio_cfg))
+    self._analysis.update_rates(
+      float(self._vision_cfg.get("publish_summary_hz", 1.0)),
+      float(self._audio_cfg.get("publish_level_hz", 2.0)),
+    )
+    self._recorder.update_window(
+      AnomalyWindow(
+        before_seconds=float(self._anomaly_cfg["before_seconds"]),
+        after_seconds=float(self._anomaly_cfg["after_seconds"]),
+      )
+    )
+    self._recorder.update_auto_upload(bool(self._anomaly_cfg["auto_upload"]))
     if cfg.get("srt") != self._boot_srt or cfg.get("camera") != self._boot_camera:
       log.warning(
         '{"event":"config_reload","note":"srt/camera changed; restart required to apply"}'
@@ -239,6 +314,121 @@ class VideoApp:
     except Exception:  # noqa: BLE001
       log.exception("ring buffer failed to start (continuing without it)")
       self._ring = None
+
+  # --- Slice 5: vision + audio analysis (V5.1–V5.7) --------------------------
+
+  def _publish(self, topic: str, payload: dict, qos: int, retain: bool) -> None:
+    """Generic MQTT publish the analysis coordinator + recorder share."""
+    self._mqtt.publish(topic, payload, qos=qos, retain=retain)
+
+  def _make_forward_capture(self, rec_dir, after_seconds, on_closed):  # noqa: ANN001, ANN202
+    """Factory for the anomaly forward-capture branch (V5.7). Lazily imports the
+    GStreamer handle so the analysis core stays testable without gi."""
+    from .gst_anomaly_handle import GstAnomalyForwardCapture
+
+    return GstAnomalyForwardCapture(
+      rec_dir=rec_dir,
+      after_seconds=after_seconds,
+      on_closed=on_closed,
+      mode=self._ring_mode(),
+      bitrate_bps=int(self._rec_cfg["bitrate_bps"]),
+      segment_seconds=int(self._rec_cfg["segment_seconds"]),
+      device=self._device,
+      use_test_source=self._use_test_source,
+      allow_software_encoder=self._allow_software_encoder,
+    )
+
+  def _publish_anomaly_recording(
+    self, anomaly_recording_id: str, anomaly_event_type: AnomalyType, trigger_ts: str
+  ) -> None:
+    """Announce a finalised anomaly recording (V5.7) so supervisor + dashboard
+    can link the anomaly to its evidence."""
+    ev = AnomalyRecordingEvent(
+      anomaly_recording_id=anomaly_recording_id,
+      anomaly_event_type=anomaly_event_type,
+      trigger_ts=trigger_ts,
+    )
+    self._mqtt.publish(
+      topics.EVENT_ANOMALY_RECORDING,
+      ev.model_dump(),
+      qos=topics.QOS_ANOMALY_RECORDING,
+      retain=False,
+    )
+
+  def _flag_anomaly_for_upload(self, anomaly_id: str) -> None:
+    """Auto-flag an anomaly recording for upload (V5.7 optional knob). Updates
+    its metadata.json in place and drops the upload-queue marker the uploader
+    watches — same mechanism as explicit flag-for-upload (V4.5/V4.6)."""
+    meta = self._storage.read_anomaly_metadata(anomaly_id)
+    if meta is None:
+      log.warning("auto-flag for unknown anomaly recording %s — ignoring", anomaly_id)
+      return
+    meta.flagged_for_upload = True
+    meta.upload_state = UploadStateValue.queued
+    self._storage.write_anomaly_metadata(meta)
+    self._storage.create_upload_marker(anomaly_id)
+    log.info("auto-flagged anomaly recording %s for upload", anomaly_id)
+
+  def _start_vision_audio(self) -> None:
+    """Spawn the always-on vision + audio analysis branches (V5.1/V5.6).
+    Best-effort, like the ring: an analysis failure is degraded, not fatal —
+    supervision (live, recording, ring) still works, and the missing heartbeat
+    tells supervisor vision is down."""
+    try:
+      from .gst_vision_handle import GstVisionPipeline
+
+      bg = self._vision_cfg.get("background_subtractor") or {}
+      self._gst_vision = GstVisionPipeline(
+        analyzer=self._vision_analyzer,
+        mode=self._ring_mode(),
+        ring_dir=str(self._storage.ring_dir),
+        on_summary=self._analysis.on_vision_summary,
+        on_events=self._analysis.on_vision_events,
+        device=self._device,
+        use_test_source=self._use_test_source,
+        bg_algorithm=str(bg.get("algorithm", "MOG2")),
+        bg_history=int(bg.get("history", 500)),
+        bg_var_threshold=float(bg.get("var_threshold", 16)),
+        morph_kernel=int((self._vision_cfg.get("morphology") or {}).get("kernel", 3)),
+      )
+      self._gst_vision.start()
+      log.info("vision analysis started")
+    except Exception:  # noqa: BLE001
+      log.exception("vision analysis failed to start (continuing without it)")
+      self._gst_vision = None
+
+    try:
+      from .gst_audio_handle import GstAudioPipeline
+
+      level_hz = float(self._audio_cfg.get("publish_level_hz", 2.0))
+      interval_ns = int(1e9 / max(0.1, level_hz))
+      self._gst_audio = GstAudioPipeline(
+        analyzer=self._audio_analyzer,
+        on_level=self._analysis.on_audio_level,
+        on_events=self._analysis.on_audio_events,
+        device=str((self._audio_cfg.get("device") or "default")),
+        use_test_source=self._use_test_source,
+        level_interval_ns=interval_ns,
+      )
+      self._gst_audio.start()
+      log.info("audio analysis started")
+    except Exception:  # noqa: BLE001
+      log.exception("audio analysis failed to start (continuing without it)")
+      self._gst_audio = None
+
+  def _publish_vision_heartbeat(self) -> None:
+    """Publish the vision thread heartbeat (V5.1). Absence -> supervisor marks
+    vision degraded. Built from the GstVision handle's live counters; if vision
+    never started, publish a heartbeat with zero counters and no last_frame so
+    supervisor still sees the thread is not delivering frames."""
+    if self._gst_vision is not None:
+      hb = self._gst_vision.heartbeat()
+    else:
+      hb = {"last_frame_at": None, "frames_processed": 0, "frames_dropped": 0}
+    payload = VisionHeartbeat(ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **hb)
+    self._mqtt.publish(
+      topics.VISION_HEARTBEAT, payload.model_dump(), qos=topics.QOS_VISION_HEARTBEAT
+    )
 
   # --- Slice 4: explicit recording (V4.2/V4.3/V4.5) --------------------------
 
@@ -284,16 +474,37 @@ class VideoApp:
     # log — there is nothing meaningful to upload.
     rid = cmd.recording_id
     meta = self._storage.read_metadata(rid)
-    if meta is None:
-      log.warning("flag-upload for unknown/partial recording %s — ignoring", rid)
+    if meta is not None:
+      meta.flagged_for_upload = True
+      meta.upload_state = UploadStateValue.queued
+      self._storage.write_metadata(meta)
+      self._storage.create_upload_marker(rid)
+      log.info("flagged recording %s for upload (marker written)", rid)
       return
-    from fessel_schemas import UploadStateValue
+    # Slice 5: the recording may be an anomaly recording (same flag mechanism).
+    ameta = self._storage.read_anomaly_metadata(rid)
+    if ameta is not None:
+      ameta.flagged_for_upload = True
+      ameta.upload_state = UploadStateValue.queued
+      self._storage.write_anomaly_metadata(ameta)
+      self._storage.create_upload_marker(rid)
+      log.info("flagged anomaly recording %s for upload (marker written)", rid)
+      return
+    log.warning("flag-upload for unknown/partial recording %s — ignoring", rid)
 
-    meta.flagged_for_upload = True
-    meta.upload_state = UploadStateValue.queued
-    self._storage.write_metadata(meta)
-    self._storage.create_upload_marker(rid)
-    log.info("flagged recording %s for upload (marker written)", rid)
+  def _on_jetson_event(self, topic: str, _payload: dict) -> None:
+    # arm/jetson/events/<type>; the trailing path segment is the event type
+    # (the Jetson publishes per-type topics, §2.7). Forward to the analyzer's
+    # rest logic (V5.4). Unknown types are ignored there.
+    event_type = topic.rsplit("/", 1)[-1]
+    self._analysis.note_jetson_event(event_type)
+
+  def _on_supervisor_state(self, _topic: str, payload: dict) -> None:
+    # arm/supervisor/state carries {"safety_state": "..."} (supervisor publishes
+    # the StateResponse-shaped value; we read the field defensively). Drives the
+    # operator-driven rest period (V5.4).
+    state = payload.get("safety_state") or payload.get("state")
+    self._analysis.note_supervisor_state(state if isinstance(state, str) else None)
 
   def _publish_capabilities(self) -> None:
     modes = probe(self._device if not self._use_test_source else "")
@@ -337,10 +548,21 @@ class VideoApp:
       self._on_recording_flag_upload,
       qos=topics.QOS_CMD,
     )
+    # Slice 5 rest-period inputs (V5.4): Jetson episode boundaries and supervisor
+    # safety state both feed the vision analyzer's in_rest flag. Raw subscribes —
+    # we read defensively (the Jetson's event types and the supervisor state
+    # shape may evolve; the subscription is stable).
+    self._mqtt.subscribe(
+      f"{topics.SITE_PREFIX}/jetson/events/+", self._on_jetson_event, qos=topics.QOS_STATE
+    )
+    self._mqtt.subscribe(
+      topics.STATE_SUPERVISOR, self._on_supervisor_state, qos=topics.QOS_STATE
+    )
     self._mqtt.loop_start()
     self._sm.start()
     self._rec_sm.start()
     self._start_ring()
+    self._start_vision_audio()
     self._publish_capabilities()
 
     signal.signal(signal.SIGTERM, lambda *_: self._stop.set())
@@ -354,16 +576,29 @@ class VideoApp:
     )
     reloader.install()
 
+    # The vision heartbeat (V5.1) ticks faster than the process heartbeat, so
+    # the loop waits on the vision cadence and publishes the process heartbeat
+    # every Nth tick.
+    last_proc_hb = 0.0
     while not self._stop.is_set():
-      self._mqtt.publish(
-        topics.HEARTBEAT, {"from": "video", "ts": time.time()}, qos=topics.QOS_HEARTBEAT
-      )
-      self._stop.wait(HEARTBEAT_INTERVAL_S)
+      now = time.monotonic()
+      if now - last_proc_hb >= HEARTBEAT_INTERVAL_S:
+        self._mqtt.publish(
+          topics.HEARTBEAT, {"from": "video", "ts": time.time()}, qos=topics.QOS_HEARTBEAT
+        )
+        last_proc_hb = now
+      self._publish_vision_heartbeat()
+      self._stop.wait(VISION_HEARTBEAT_INTERVAL_S)
 
     log.info("video shutting down")
     reloader.close()
     self._sm.shutdown()
     self._rec_sm.shutdown()
+    self._recorder.shutdown()
+    if self._gst_vision is not None:
+      self._gst_vision.stop()
+    if self._gst_audio is not None:
+      self._gst_audio.stop()
     if self._ring is not None:
       self._ring.stop()
     self._mqtt.loop_stop()

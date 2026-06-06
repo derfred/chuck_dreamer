@@ -244,6 +244,185 @@ class UploadGate(BaseModel):
   reason: str | None = None
 
 
+# --- Slice 5 vision / audio analysis shapes ----------------------------------
+# The sensing layer that feeds the safety system (Slice 6). video runs vision
+# and audio analysis threads on the appsink/level branches and publishes a
+# periodic summary plus discrete anomaly events; supervisor caches the live
+# values, keeps a bounded anomaly log, and surfaces both in /state and a small
+# /anomalies endpoint. None of this drives an intervention yet (that is Slice 6).
+
+
+class AnomalyType(str, Enum):
+  """The discrete anomaly events the Slice-5 detectors emit (and clear).
+
+  `safe_box_violation` — foreground motion outside the configured safe box.
+  `rest_violation` — motion during a rest period (between episodes / paused).
+  `audio_spike` — a sound-level spike above baseline. The `*_cleared` variants
+  are the self-clearing return-to-normal events the Slice-6 state machine wants
+  to see paired with the entry.
+  """
+
+  safe_box_violation = "safe_box_violation"
+  safe_box_cleared = "safe_box_cleared"
+  rest_violation = "rest_violation"
+  rest_violation_cleared = "rest_violation_cleared"
+  audio_spike = "audio_spike"
+  audio_spike_cleared = "audio_spike_cleared"
+
+
+class VisionHeartbeat(BaseModel):
+  """Payload on arm/video/vision/heartbeat (V5.1).
+
+  Published periodically while the vision thread is alive; its absence is how
+  supervisor marks vision degraded (`vision.healthy=false`). `last_frame_at` is
+  the wall-clock of the most recent appsink frame.
+  """
+
+  ts: str
+  last_frame_at: str | None = None
+  frames_processed: int = 0
+  frames_dropped: int = 0
+
+
+class VisionSummary(BaseModel):
+  """Payload on arm/video/vision/summary (V5.2), ~1 Hz.
+
+  `activity_score_ema` is the smoothed foreground-area fraction in [0,1];
+  `activity_score_max_since_last` is the peak per-frame score since the last
+  summary, so a transient spike the EMA smoothed out is still visible.
+  """
+
+  ts: str
+  activity_score_ema: float = 0.0
+  activity_score_max_since_last: float = 0.0
+  frame_count: int = 0
+
+
+class SafeBox(BaseModel):
+  """The image-space safe-box rectangle (V5.3), in 640x360 downscaled coords."""
+
+  x: int = Field(ge=0)
+  y: int = Field(ge=0)
+  w: int = Field(gt=0)
+  h: int = Field(gt=0)
+
+
+class SafeBoxEvent(BaseModel):
+  """Payload on arm/video/vision/events/safe-box[_cleared] (V5.3)."""
+
+  ts: str
+  type: AnomalyType = AnomalyType.safe_box_violation
+  outside_fraction: float = 0.0
+  threshold: float = 0.0
+  duration_frames: int = 0
+  ring_segment_hint: str | None = None
+
+
+class RestViolationEvent(BaseModel):
+  """Payload on arm/video/vision/events/rest-violation[_cleared] (V5.4)."""
+
+  ts: str
+  type: AnomalyType = AnomalyType.rest_violation
+  activity_score: float = 0.0
+  threshold: float = 0.0
+  # Why this is a rest period: episode boundary vs operator-driven safety state.
+  rest_reason: str | None = None
+  ring_segment_hint: str | None = None
+
+
+class AudioLevel(BaseModel):
+  """Retained payload on arm/video/audio/level (V5.6), ~2 Hz, for the live
+  meter. Retained so the dashboard sees a value immediately on connect."""
+
+  rms_db: float = 0.0
+  peak_db: float = 0.0
+
+
+class AudioSpikeEvent(BaseModel):
+  """Payload on arm/video/audio/events/spike[_cleared] (V5.6)."""
+
+  ts: str
+  type: AnomalyType = AnomalyType.audio_spike
+  peak_db: float = 0.0
+  baseline_db: float = 0.0
+  duration_ms: int = 0
+  ring_segment_hint: str | None = None
+
+
+class AnomalyRecordingEvent(BaseModel):
+  """Payload on arm/video/events/anomaly-recording (V5.7).
+
+  Emitted by video when it has bracketed an anomaly with a finite HLS recording
+  lifted from the ring buffer plus a forward capture, so supervisor and the
+  dashboard can link the anomaly to its evidence.
+  """
+
+  anomaly_recording_id: str
+  anomaly_event_type: AnomalyType
+  trigger_ts: str
+
+
+class AnomalyRecordingMetadata(BaseModel):
+  """The per-anomaly-recording metadata.json (V5.7).
+
+  Compatible with RecordingMetadata on the fields supervisor's listing reads
+  (id, started/ended, duration, segments, flagged_for_upload, upload_state) —
+  the `type` field is what discriminates an anomaly recording from an explicit
+  one (S5.4). `trigger_events` carries every coalesced trigger (V5.7 coalesce
+  rule), the first of which is the original trigger.
+  """
+
+  id: str
+  type: str = "anomaly"
+  anomaly_event_type: AnomalyType
+  trigger_ts: str
+  window: dict = Field(default_factory=dict)  # {before_seconds, after_seconds}
+  trigger_events: list[dict] = Field(default_factory=list)
+  started_at: str
+  ended_at: str | None = None
+  operator: str | None = None  # anomaly recordings have no operator
+  mode: ModeTriplet | None = None
+  duration_seconds: int | None = None
+  segments: int | None = None
+  flagged_for_upload: bool = False
+  upload_state: UploadStateValue = UploadStateValue.none
+  uploaded_at: str | None = None
+
+
+class VisionState(BaseModel):
+  """The `vision` field of supervisor /state (S5.2).
+
+  `healthy` is supervisor's interpretation of the vision heartbeat: false when
+  the heartbeat is stale. Not a separate safety state, just a flag Slice 6 reads.
+  """
+
+  activity_score_ema: float = 0.0
+  last_frame_at: str | None = None
+  healthy: bool = False
+
+
+class AudioState(BaseModel):
+  """The `audio` field of supervisor /state (S5.2)."""
+
+  level_db: float | None = None
+  healthy: bool = False
+
+
+class AnomalyLogEntry(BaseModel):
+  """One entry of supervisor's bounded in-memory anomaly log (S5.1/S5.3).
+
+  `payload` is the full original event so the dashboard can show details;
+  `anomaly_recording_id` links to the evidence recording if one was created.
+  `cleared` flips true when the matching `*_cleared` event arrives.
+  """
+
+  ts: str
+  type: AnomalyType
+  anomaly_recording_id: str | None = None
+  cleared: bool = False
+  payload: dict = Field(default_factory=dict)
+
+
 class StateResponse(BaseModel):
   """Body of supervisor GET /state and backend GET /api/state (S3.3).
 
@@ -254,6 +433,10 @@ class StateResponse(BaseModel):
   Slice 4 adds `recording` (the retained recording-state topic, cached) and
   `upload_backlog` (the V4.8 gauges, cached) so the dashboard's recording
   controls and backlog indicator read from the same /state poll as the rest.
+
+  Slice 5 adds `vision` and `audio` (live sensing values + health) and
+  `recent_anomalies` (a short tail of the in-memory anomaly log), so the
+  dashboard's sensing strip and recent-anomalies panel read from the same poll.
   """
 
   safety_state: SafetyState = SafetyState.IDLE
@@ -262,6 +445,9 @@ class StateResponse(BaseModel):
   camera: CameraState = Field(default_factory=CameraState)
   recording: RecordingState = Field(default_factory=RecordingState)
   upload_backlog: UploadBacklog = Field(default_factory=UploadBacklog)
+  vision: VisionState = Field(default_factory=VisionState)
+  audio: AudioState = Field(default_factory=AudioState)
+  recent_anomalies: list[AnomalyLogEntry] = Field(default_factory=list)
 
 
 def mode_to_canonical(mode: ModeTriplet) -> str:

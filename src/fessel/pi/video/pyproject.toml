@@ -3,11 +3,14 @@ name = "fessel-video"
 version = "0.1.0"
 description = "Fessel video process: GStreamer pipeline + live state machine"
 requires-python = ">=3.12"
-# NOTE: PyGObject (gi) is NOT a pip dependency. video binds to the
-# system GObject-introspection libraries, so its venv must be created with
-# --system-site-packages against the system Python. See pi/deploy and the
-# repo dev-env docs. pip-installing pygobject here would shadow the system
-# bindings and break GStreamer.
+# NOTE: PyGObject (gi), numpy, and OpenCV (cv2) are NOT pip dependencies. video
+# binds to the system GObject-introspection libraries (and, for Slice-5 vision
+# analysis, the apt-provided numpy + python3-opencv), so its venv must be created
+# with --system-site-packages against the system Python. See pi/deploy and the
+# repo dev-env docs. pip-installing pygobject/opencv here would shadow the system
+# bindings and break GStreamer. The pure detector logic (vision.py / audio.py /
+# anomaly_recording.py) is unit-tested without numpy/cv2; only the gst_*_handle
+# modules import them, lazily.
 dependencies = [
   "fessel-schemas",
   "fessel-shared",

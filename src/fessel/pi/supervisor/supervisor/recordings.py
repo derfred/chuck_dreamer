@@ -69,9 +69,14 @@ class RingProxy:
     ring_dir: Path,
     explicit_dir: Path,
     on_ring_read: Callable[[], None] | None = None,
+    anomaly_dir: Path | None = None,
   ) -> None:
     self._ring_dir = ring_dir
     self._explicit_dir = explicit_dir
+    # Slice 5: anomaly recordings live under recordings/anomaly/<id>/ with the
+    # same on-disk shape; playback resolves a recording id in either dir (S5.4 /
+    # B5.3 — playback works unchanged for both types).
+    self._anomaly_dir = anomaly_dir
     self._on_ring_read = on_ring_read
 
   def _note_read(self) -> None:
@@ -91,15 +96,25 @@ class RingProxy:
     return resp
 
   def recording_playlist(self, recording_id: str) -> FileResponse:
-    rec_dir = _recording_dir(self._explicit_dir, recording_id)
+    rec_dir = self._resolve_recording_dir(recording_id)
     path = rec_dir / "index.m3u8"
     if not path.is_file():
       raise HTTPException(status_code=404, detail="recording playlist not found")
     return _serve(path)
 
   def recording_segment(self, recording_id: str, name: str) -> FileResponse:
-    rec_dir = _recording_dir(self._explicit_dir, recording_id)
+    rec_dir = self._resolve_recording_dir(recording_id)
     return _serve(_safe_child(rec_dir, name))
+
+  def _resolve_recording_dir(self, recording_id: str) -> Path:
+    # Try explicit/ first; fall back to anomaly/ (a recording id is a UUID, so a
+    # collision across the two dirs cannot happen).
+    try:
+      return _recording_dir(self._explicit_dir, recording_id)
+    except HTTPException:
+      if self._anomaly_dir is not None:
+        return _recording_dir(self._anomaly_dir, recording_id)
+      raise
 
 
 def _recording_dir(explicit_dir: Path, recording_id: str) -> Path:

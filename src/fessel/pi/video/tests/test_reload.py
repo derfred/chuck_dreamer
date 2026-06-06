@@ -55,3 +55,38 @@ def test_validate_config_rejects_bad_values():
   VideoApp.validate_config(
     {"ring": {"resolution": "1280x720", "fps": 30, "bitrate_bps": 2_000_000}}
   )
+
+
+# --- Slice 5: vision/audio/anomaly tunables reload ---------------------------
+
+
+def test_apply_config_updates_vision_audio_tunables():
+  app = _app()
+  app.apply_config(
+    {
+      "vision": {
+        "safe_box": {"x": 10, "y": 20, "w": 100, "h": 80},
+        "safe_box_threshold": 0.09,
+        "publish_summary_hz": 2,
+      },
+      "audio": {"spike_threshold_db": -12, "publish_level_hz": 4},
+      "anomaly": {"before_seconds": 15, "after_seconds": 45, "auto_upload": True},
+    }
+  )
+  # Vision detector picked up the new safe box + threshold.
+  assert app._vision_analyzer._cfg.safe_box is not None
+  assert app._vision_analyzer._cfg.safe_box_threshold == 0.09
+  # Audio detector picked up the new spike threshold.
+  assert app._audio_analyzer._cfg.spike_threshold_db == -12.0
+  # Anomaly window + auto-upload applied to the recorder.
+  assert app._recorder._window.before_seconds == 15.0
+  assert app._recorder._window.after_seconds == 45.0
+  assert app._recorder._auto_upload is True
+
+
+def test_validate_config_rejects_malformed_safe_box():
+  with pytest.raises(ValueError):
+    # w must be > 0 (SafeBox pydantic constraint).
+    VideoApp.validate_config({"vision": {"safe_box": {"x": 0, "y": 0, "w": 0, "h": 10}}})
+  # A good safe box validates clean.
+  VideoApp.validate_config({"vision": {"safe_box": {"x": 0, "y": 0, "w": 10, "h": 10}}})

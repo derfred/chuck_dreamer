@@ -270,8 +270,16 @@ def create_app(
   @app.get("/api/state")
   def api_state(identity: Identity = Depends(require_identity)) -> JSONResponse:
     # Pass-through of supervisor's /state. The backend does not reshape or add
-    # fields; the dashboard consumes supervisor's StateResponse directly.
+    # fields; the dashboard consumes supervisor's StateResponse directly. Slice 5
+    # adds vision/audio/recent_anomalies, which propagate automatically (B5.1).
     result = supervisor.get("/state")
+    return JSONResponse(status_code=result.status_code, content=result.body)
+
+  @app.get("/api/anomalies")
+  def api_anomalies(identity: Identity = Depends(require_identity)) -> JSONResponse:
+    # B5.2: pass-through of supervisor's /anomalies (the full in-memory anomaly
+    # log). Behind oauth2-proxy; read-only, so no audit logging.
+    result = supervisor.get("/anomalies")
     return JSONResponse(status_code=result.status_code, content=result.body)
 
   # --- Slice 4: recording control + recordings/ring API (B4.1–B4.6) ----------
@@ -343,6 +351,8 @@ def create_app(
         continue
       merged[rid] = {
         "recording_id": rid,
+        # Slice 5 (S5.4/B5.3): explicit vs anomaly, from supervisor's listing.
+        "type": item.get("type", "explicit"),
         "started_at": item.get("started_at"),
         "ended_at": item.get("ended_at"),
         "duration_seconds": item.get("duration_seconds"),
@@ -358,6 +368,7 @@ def create_app(
       if rid not in merged:
         merged[rid] = {
           "recording_id": rid,
+          "type": "explicit",
           "started_at": None,
           "ended_at": None,
           "duration_seconds": None,

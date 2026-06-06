@@ -5,7 +5,7 @@ upload-progress cache (B4.6). Uses a FakeMqtt (no broker) and a tmp SSD."""
 import paho.mqtt.client as mqtt
 import pytest
 from fastapi.testclient import TestClient
-from fessel_schemas import RecordingMetadata
+from fessel_schemas import AnomalyRecordingMetadata, AnomalyType, RecordingMetadata
 from fessel_shared import MqttClient, Storage
 
 
@@ -69,6 +69,18 @@ def _seed_recording(storage: Storage, rid: str, **kw) -> None:
   (d / "seg-00000.ts").write_bytes(b"TSDATA")
   storage.write_metadata(
     RecordingMetadata(id=rid, started_at="2026-06-04T00:00:00+00:00", **kw)
+  )
+
+
+def _seed_anomaly_recording(storage: Storage, aid: str, started: str, **kw) -> None:
+  d = storage.anomaly_recording_dir(aid)
+  d.mkdir(parents=True, exist_ok=True)
+  (d / "index.m3u8").write_text("#EXTM3U")
+  (d / "seg-00000.ts").write_bytes(b"TSDATA")
+  kw.setdefault("anomaly_event_type", AnomalyType.safe_box_violation)
+  kw.setdefault("trigger_ts", started)
+  storage.write_anomaly_metadata(
+    AnomalyRecordingMetadata(id=aid, started_at=started, **kw)
   )
 
 
@@ -210,3 +222,87 @@ def test_upload_progress_cache(client):
     body = client.get("/recordings/r1/upload").json()
     assert body["state"] == "uploaded" and body["attempts"] == 2
     assert client.get("/recordings/none/upload").status_code == 404
+
+
+# --- Slice 5: anomaly recordings + sensing /state + /anomalies ---------------
+
+
+def test_recordings_merges_explicit_and_anomaly_with_type(client):
+  _seed_recording(client._ssd, "exp1", operator="octocat")
+  client._ssd.write_metadata(
+    RecordingMetadata(id="exp1", started_at="2026-06-05T01:00:00+00:00", operator="octocat")
+  )
+  _seed_anomaly_recording(client._ssd, "anom1", "2026-06-05T02:00:00+00:00")
+  with client:
+    recs = client.get("/recordings").json()
+  by_id = {r["recording_id"]: r for r in recs}
+  assert by_id["exp1"]["type"] == "explicit"
+  assert by_id["anom1"]["type"] == "anomaly"
+  # Newest first: the anomaly (02:00) precedes the explicit (01:00).
+  assert [r["recording_id"] for r in recs] == ["anom1", "exp1"]
+
+
+def test_anomaly_recording_is_playable(client):
+  _seed_anomaly_recording(client._ssd, "anom1", "2026-06-05T02:00:00+00:00")
+  with client:
+    assert client.get("/recordings/anom1/index.m3u8").status_code == 200
+    assert client.get("/recordings/anom1/seg-00000.ts").status_code == 200
+
+
+def test_flag_upload_works_for_anomaly_recording(client):
+  _seed_anomaly_recording(client._ssd, "anom1", "2026-06-05T02:00:00+00:00")
+  with client:
+    r = client.post("/recording/flag-upload", json={"recording_id": "anom1"})
+    assert r.status_code == 200
+  assert any(p[0] == "arm/video/cmd/recording/flag-upload" for p in client._published)
+
+
+def test_state_includes_vision_audio_and_recent_anomalies(client):
+  with client:
+    relay = client.app.state.relay
+    relay._mqtt.deliver("arm/video/vision/summary", {"activity_score_ema": 0.12})
+    relay._mqtt.deliver(
+      "arm/video/vision/heartbeat",
+      {"last_frame_at": "2026-06-05T00:00:00Z", "frames_processed": 10, "frames_dropped": 0},
+    )
+    relay._mqtt.deliver("arm/video/audio/level", {"rms_db": -33.0, "peak_db": -30.0})
+    relay._mqtt.deliver(
+      "arm/video/vision/events/safe-box",
+      {"ts": "2026-06-05T00:00:01Z", "type": "safe_box_violation", "outside_fraction": 0.2},
+    )
+    body = client.get("/state").json()
+  assert body["vision"]["activity_score_ema"] == 0.12
+  assert body["vision"]["healthy"] is True
+  assert body["audio"]["level_db"] == -33.0
+  assert body["audio"]["healthy"] is True
+  assert len(body["recent_anomalies"]) == 1
+  assert body["recent_anomalies"][0]["type"] == "safe_box_violation"
+
+
+def test_anomalies_endpoint_returns_log_with_recording_link(client):
+  with client:
+    relay = client.app.state.relay
+    relay._mqtt.deliver(
+      "arm/video/audio/events/spike",
+      {"ts": "t0", "type": "audio_spike", "peak_db": -3.0},
+    )
+    relay._mqtt.deliver(
+      "arm/video/events/anomaly-recording",
+      {"anomaly_recording_id": "rec-7", "anomaly_event_type": "audio_spike", "trigger_ts": "t0"},
+    )
+    body = client.get("/anomalies").json()
+  assert len(body) == 1
+  assert body[0]["type"] == "audio_spike"
+  assert body[0]["anomaly_recording_id"] == "rec-7"
+  assert body[0]["payload"]["peak_db"] == -3.0
+
+
+def test_safety_state_published_on_startup_and_change(client, monkeypatch):
+  # On startup the control plane publishes the initial IDLE safety state retained
+  # so video's rest detection has a value immediately (V5.4).
+  with client:
+    startup = [
+      p for p in client._published if p[0] == "arm/supervisor/state"
+    ]
+  assert startup and startup[0][1]["safety_state"] == "IDLE"
+  assert startup[0][3] is True  # retained

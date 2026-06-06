@@ -69,6 +69,30 @@ export type FlaggedForUpload1 = boolean;
  * `failed` — non-retryable failure; marker renamed `.failed`.
  */
 export type UploadStateValue2 = "none" | "queued" | "uploading" | "uploaded" | "failed";
+export type ActivityScoreEma = number;
+export type LastFrameAt = string | null;
+export type Healthy = boolean;
+export type LevelDb = number | null;
+export type Healthy1 = boolean;
+export type Ts = string;
+/**
+ * The discrete anomaly events the Slice-5 detectors emit (and clear).
+ *
+ * `safe_box_violation` — foreground motion outside the configured safe box.
+ * `rest_violation` — motion during a rest period (between episodes / paused).
+ * `audio_spike` — a sound-level spike above baseline. The `*_cleared` variants
+ * are the self-clearing return-to-normal events the Slice-6 state machine wants
+ * to see paired with the entry.
+ */
+export type AnomalyType =
+  | "safe_box_violation"
+  | "safe_box_cleared"
+  | "rest_violation"
+  | "rest_violation_cleared"
+  | "audio_spike"
+  | "audio_spike_cleared";
+export type AnomalyRecordingId = string | null;
+export type Cleared = boolean;
 /**
  * Abbreviated supervisor safety state (architecture §2.4).
  *
@@ -88,6 +112,7 @@ export type SafetyState =
 export type Jetson = {
   [k: string]: unknown;
 } | null;
+export type RecentAnomalies = AnomalyLogEntry[];
 
 export interface FesselSchemas {
   ModeTriplet?: ModeTriplet;
@@ -102,6 +127,9 @@ export interface FesselSchemas {
   UploadProgress?: UploadProgress;
   UploadBacklog?: UploadBacklog;
   RecordingListItem?: RecordingListItem;
+  VisionState?: VisionState;
+  AudioState?: AudioState;
+  AnomalyLogEntry?: AnomalyLogEntry;
   StateResponse?: StateResponse;
   [k: string]: unknown;
 }
@@ -241,6 +269,44 @@ export interface RecordingListItem {
   [k: string]: unknown;
 }
 /**
+ * The `vision` field of supervisor /state (S5.2).
+ *
+ * `healthy` is supervisor's interpretation of the vision heartbeat: false when
+ * the heartbeat is stale. Not a separate safety state, just a flag Slice 6 reads.
+ */
+export interface VisionState {
+  activity_score_ema?: ActivityScoreEma;
+  last_frame_at?: LastFrameAt;
+  healthy?: Healthy;
+  [k: string]: unknown;
+}
+/**
+ * The `audio` field of supervisor /state (S5.2).
+ */
+export interface AudioState {
+  level_db?: LevelDb;
+  healthy?: Healthy1;
+  [k: string]: unknown;
+}
+/**
+ * One entry of supervisor's bounded in-memory anomaly log (S5.1/S5.3).
+ *
+ * `payload` is the full original event so the dashboard can show details;
+ * `anomaly_recording_id` links to the evidence recording if one was created.
+ * `cleared` flips true when the matching `*_cleared` event arrives.
+ */
+export interface AnomalyLogEntry {
+  ts: Ts;
+  type: AnomalyType;
+  anomaly_recording_id?: AnomalyRecordingId;
+  cleared?: Cleared;
+  payload?: Payload;
+  [k: string]: unknown;
+}
+export interface Payload {
+  [k: string]: unknown;
+}
+/**
  * Body of supervisor GET /state and backend GET /api/state (S3.3).
  *
  * `jetson` is whatever the Jetson's GET /state returned (opaque to the
@@ -250,6 +316,10 @@ export interface RecordingListItem {
  * Slice 4 adds `recording` (the retained recording-state topic, cached) and
  * `upload_backlog` (the V4.8 gauges, cached) so the dashboard's recording
  * controls and backlog indicator read from the same /state poll as the rest.
+ *
+ * Slice 5 adds `vision` and `audio` (live sensing values + health) and
+ * `recent_anomalies` (a short tail of the in-memory anomaly log), so the
+ * dashboard's sensing strip and recent-anomalies panel read from the same poll.
  */
 export interface StateResponse {
   safety_state?: SafetyState;
@@ -258,6 +328,9 @@ export interface StateResponse {
   camera?: CameraState;
   recording?: RecordingState;
   upload_backlog?: UploadBacklog;
+  vision?: VisionState;
+  audio?: AudioState;
+  recent_anomalies?: RecentAnomalies;
   [k: string]: unknown;
 }
 export interface Plugs {

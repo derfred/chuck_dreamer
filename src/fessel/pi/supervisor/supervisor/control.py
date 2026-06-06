@@ -37,6 +37,7 @@ from fessel_schemas import (
 )
 from fessel_shared import topics
 
+from .anomalies import AnomalyTracker
 from .jetson import JetsonClient, JetsonError
 from .wiz import PlugController, PlugError
 
@@ -74,12 +75,16 @@ class ControlPlane:
     publish: PublishFn,
     jetson_refresh_s: float = 5.0,
     plug_refresh_s: float = 10.0,
+    anomalies: AnomalyTracker | None = None,
   ) -> None:
     self._plugs = plugs
     self._jetson = jetson
     self._publish = publish
     self._jetson_refresh_s = jetson_refresh_s
     self._plug_refresh_s = plug_refresh_s
+    # Slice 5: live vision/audio values + the in-memory anomaly log, fed from
+    # the new MQTT topics via the relay (S5.1). Surfaced in /state + /anomalies.
+    self._anomalies = anomalies if anomalies is not None else AnomalyTracker()
 
     self._lock = threading.Lock()
     self._safety = SafetyState.IDLE
@@ -99,6 +104,11 @@ class ControlPlane:
   # --- lifecycle -------------------------------------------------------------
 
   def start(self) -> None:
+    # Publish the initial (IDLE) safety state retained so video's rest detection
+    # (V5.4) has a value immediately. Done here, not in __init__, so it runs
+    # after the relay has connected MQTT (create_app builds the control plane
+    # before relay.start()).
+    self._publish_safety_state(self._safety)
     self._refresh_thread.start()
 
   def close(self) -> None:
@@ -121,6 +131,24 @@ class ControlPlane:
   def set_upload_backlog(self, backlog: UploadBacklog) -> None:
     with self._lock:
       self._upload_backlog = backlog
+
+  @property
+  def anomalies(self) -> AnomalyTracker:
+    """The Slice-5 sensing tracker; the relay feeds it from MQTT, the app reads
+    it for /anomalies."""
+    return self._anomalies
+
+  def _publish_safety_state(self, state: SafetyState) -> None:
+    """Publish the safety state retained on arm/supervisor/state so video's
+    rest detection (V5.4) can learn the operator-driven state. Publishing the
+    full StateResponse-shaped {safety_state} keeps the topic forward-compatible
+    with the Slice-6 machine."""
+    self._publish(
+      topics.STATE_SUPERVISOR,
+      {"safety_state": state.value},
+      topics.QOS_STATE,
+      topics.RETAIN_STATE,
+    )
 
   # --- SIGHUP reload (§2.13): hot-reloadable control tunables ---------------
 
@@ -171,6 +199,11 @@ class ControlPlane:
   # --- read path -------------------------------------------------------------
 
   def state(self) -> StateResponse:
+    # The Slice-5 sensing fields come from the tracker (its own lock); read them
+    # outside self._lock to avoid nesting the two locks.
+    vision = self._anomalies.vision_state()
+    audio = self._anomalies.audio_state()
+    recent = self._anomalies.recent()
     with self._lock:
       return StateResponse(
         safety_state=self._safety,
@@ -179,6 +212,9 @@ class ControlPlane:
         camera=CameraState(up=self._camera_up),
         recording=self._recording.model_copy(),
         upload_backlog=self._upload_backlog.model_copy(),
+        vision=vision,
+        audio=audio,
+        recent_anomalies=recent,
       )
 
   # --- Jetson actions --------------------------------------------------------
@@ -196,10 +232,14 @@ class ControlPlane:
     if self._jetson is None:
       raise JetsonError(action, "jetson client not configured")
     result = getattr(self._jetson, action)()
+    changed = False
     with self._lock:
+      changed = self._safety != new_state
       self._safety = new_state
       if isinstance(result, dict) and result:
         self._jetson_state = result
+    if changed:
+      self._publish_safety_state(new_state)
     return result
 
   # --- plug actions ----------------------------------------------------------
@@ -225,10 +265,14 @@ class ControlPlane:
         self._plug_state[name] = ps
       raise
     ps = PlugState(on=verified_on, verified=True, verified_at=_now_iso())
+    new_safety = self._safety_after_plug(name, verified_on)
     with self._lock:
       self._plug_state[name] = ps
-      self._safety = self._safety_after_plug(name, verified_on)
+      changed = self._safety != new_safety
+      self._safety = new_safety
     self._publish_plug(name, ps)
+    if changed:
+      self._publish_safety_state(new_safety)
     return ps
 
   @staticmethod
@@ -365,10 +409,19 @@ def build_control_plane(config: dict, publish: PublishFn) -> ControlPlane:
     )
 
   refresh = cc.get("refresh", {})
+  # Slice 5: the sensing tracker. `anomalies.{log_cap, recent_cap, staleness_s}`
+  # live under the supervisor subtree (X5.2); defaults match the plan.
+  acfg = config.get("anomalies") or {}
+  anomalies = AnomalyTracker(
+    log_cap=int(acfg.get("log_cap", 100)),
+    recent_cap=int(acfg.get("recent_cap", 10)),
+    staleness_s=float(acfg.get("heartbeat_staleness_s", 6.0)),
+  )
   return ControlPlane(
     plugs=plugs,
     jetson=jetson_client,
     publish=publish,
     jetson_refresh_s=float(refresh.get("jetson_s", 5.0)),
     plug_refresh_s=float(refresh.get("plug_s", 10.0)),
+    anomalies=anomalies,
   )

@@ -21,6 +21,8 @@ import sys
 from pydantic import TypeAdapter
 
 from .models import (
+  AnomalyLogEntry,
+  AudioState,
   CameraState,
   Capabilities,
   LiveActivate,
@@ -34,6 +36,7 @@ from .models import (
   StateResponse,
   UploadBacklog,
   UploadProgress,
+  VisionState,
 )
 
 _MODELS = {
@@ -49,6 +52,10 @@ _MODELS = {
   "UploadProgress": UploadProgress,
   "UploadBacklog": UploadBacklog,
   "RecordingListItem": RecordingListItem,
+  # Slice 5 sensing shapes the dashboard reads (via /api/state and /api/anomalies).
+  "VisionState": VisionState,
+  "AudioState": AudioState,
+  "AnomalyLogEntry": AnomalyLogEntry,
   # StateResponse last: it embeds several of the above; per-model inlining wants
   # the dependencies defined first is not required (refs resolve), but keeping
   # the aggregate last matches the Slice 3 ordering convention.

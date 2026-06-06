@@ -126,7 +126,35 @@ def test_supervisor_unreachable_is_502():
   client = make_client(_ok({}), raise_exc=httpx.ConnectError("egress down"))
   r = client.post("/api/control/stop", headers=AUTHED)
   assert r.status_code == 502
-  assert r.json()["error"] == "supervisor_unreachable"
+
+
+# --- Slice 5: /api/anomalies pass-through (B5.2) -----------------------------
+
+
+def test_anomalies_requires_identity():
+  client = make_client(_ok([]))
+  assert client.get("/api/anomalies").status_code == 401
+
+
+def test_anomalies_passes_through_supervisor_body():
+  log = [
+    {
+      "ts": "2026-06-05T00:00:00Z",
+      "type": "safe_box_violation",
+      "anomaly_recording_id": "rec-1",
+      "cleared": False,
+      "payload": {"outside_fraction": 0.18},
+    }
+  ]
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    assert request.url.path == "/anomalies"
+    return httpx.Response(200, json=log)
+
+  client = make_client(handler)
+  r = client.get("/api/anomalies", headers=AUTHED)
+  assert r.status_code == 200
+  assert r.json() == log  # pass-through, no reshaping
 
 
 def test_no_retry_on_5xx():

@@ -110,6 +110,7 @@ export function Recordings() {
         <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 960 }}>
           <thead>
             <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+              <Th>Type</Th>
               <Th>Started</Th>
               <Th>Ended</Th>
               <Th>Duration</Th>
@@ -159,6 +160,24 @@ function fmtDuration(seconds: number | null): string {
   return `${m}m ${s}s`;
 }
 
+// Discriminate explicit (operator) vs anomaly (auto-triggered) recordings (F5.3).
+function TypeBadge({ type }: { type: "explicit" | "anomaly" }) {
+  const anomaly = type === "anomaly";
+  return (
+    <span
+      style={{
+        fontSize: 11,
+        padding: "1px 6px",
+        borderRadius: 3,
+        color: anomaly ? "#fff" : "#333",
+        background: anomaly ? "#b22222" : "#e8e8e8",
+      }}
+    >
+      {anomaly ? "anomaly" : "explicit"}
+    </span>
+  );
+}
+
 // A failed upload can be re-flagged to retry (F4.4); "none" can be flagged for
 // the first time. Anything else (queued/uploading/uploaded) is not re-flaggable.
 function canFlag(rec: RecordingItem): boolean {
@@ -182,6 +201,9 @@ function Row({
   const flaggable = canFlag(rec) && !flagging;
   return (
     <tr style={{ borderBottom: "1px solid #f0f0f0" }}>
+      <Td>
+        <TypeBadge type={rec.type} />
+      </Td>
       <Td>{fmtTime(rec.started_at)}</Td>
       <Td>{fmtTime(rec.ended_at)}</Td>
       <Td>{fmtDuration(rec.duration_seconds)}</Td>

@@ -70,3 +70,54 @@ def test_plug_state_unverified_default():
   # A plug whose verify failed: on may be known-or-unknown, verified is False.
   p = PlugState(on=False, verified=False, verified_at="2026-06-04T00:00:00Z")
   assert p.verified is False
+
+
+# --- Slice 5 sensing shapes ---------------------------------------------------
+
+
+def test_state_response_slice5_defaults():
+  # Vision/audio default to not-healthy (no heartbeat seen yet); no anomalies.
+  st = StateResponse()
+  dumped = st.model_dump()
+  assert dumped["vision"]["healthy"] is False
+  assert dumped["vision"]["activity_score_ema"] == 0.0
+  assert dumped["audio"]["healthy"] is False
+  assert dumped["audio"]["level_db"] is None
+  assert dumped["recent_anomalies"] == []
+
+
+def test_anomaly_log_entry_roundtrip():
+  from fessel_schemas import AnomalyLogEntry, AnomalyType, SafeBoxEvent
+
+  ev = SafeBoxEvent(ts="2026-06-05T00:00:00Z", outside_fraction=0.18, threshold=0.05)
+  entry = AnomalyLogEntry(
+    ts=ev.ts,
+    type=AnomalyType.safe_box_violation,
+    anomaly_recording_id="rec-1",
+    payload=ev.model_dump(mode="json"),
+  )
+  dumped = entry.model_dump(mode="json")
+  assert dumped["type"] == "safe_box_violation"
+  assert dumped["cleared"] is False
+  assert dumped["payload"]["outside_fraction"] == 0.18
+
+
+def test_anomaly_recording_metadata_is_listing_compatible():
+  # S5.4: the anomaly metadata must carry the fields supervisor's /recordings
+  # listing reads, plus a `type` discriminator.
+  from fessel_schemas import AnomalyRecordingMetadata, AnomalyType
+
+  meta = AnomalyRecordingMetadata(
+    id="anom-1",
+    anomaly_event_type=AnomalyType.audio_spike,
+    trigger_ts="2026-06-05T00:00:00Z",
+    started_at="2026-06-05T00:00:00Z",
+    ended_at="2026-06-05T00:01:30Z",
+    duration_seconds=90,
+    segments=45,
+  )
+  dumped = meta.model_dump(mode="json")
+  assert dumped["type"] == "anomaly"
+  assert dumped["operator"] is None
+  assert dumped["flagged_for_upload"] is False
+  assert dumped["upload_state"] == "none"
