@@ -1,26 +1,35 @@
 """Integration tests for :class:`chuck_dreamer.runtime.harness.Runtime`.
 
 FakeBackend only, bounded runs, no real SIGINT (we drive the shutdown event
-directly). These cover the M0 end-to-end exit criterion (boots, both loops
-run, CSV written, clean shutdown) and the M1 envelope criterion (an
-out-of-box scripted sweep is clamped on every tick).
+directly). These cover the M0 end-to-end exit criterion (boots, both loops run,
+telemetry logged, clean shutdown), the M1 envelope criterion (an out-of-box
+scripted sweep is clamped on every tick), and the M3 additions (the .rrd is
+written; startup fails fast on an unproduced required modality).
+
+The runtime logs to Rerun now, not CSV. The ``fake_rerun`` fixture (conftest.py)
+captures logged entities; :func:`control_tick_rows` reconstructs the per-tick
+row view the CSV-era assertions used. FakeBackend tests set ``sensors: []`` —
+the default config's ``SimCameraSensor`` needs a MuJoCo backend.
 """
 
 from __future__ import annotations
 
-import csv
 import threading
 import time
 from pathlib import Path
 
 import numpy as np
+import pytest
 from omegaconf import OmegaConf
 
 from chuck_dreamer.config import load_config
 from chuck_dreamer.runtime.backend import FakeBackend
 from chuck_dreamer.runtime.harness import PolicyLoop, Runtime
 from chuck_dreamer.runtime.kernel import Mode
+from chuck_dreamer.runtime.modalities import ModalityError
 from chuck_dreamer.runtime.setpoint_channel import SetpointChannel
+
+from .conftest import control_tick_rows
 
 
 def _cfg(tmp_path: Path, **runtime_overrides):
@@ -30,17 +39,13 @@ def _cfg(tmp_path: Path, **runtime_overrides):
     "duration_s": 0.3,
     "control_rate_hz": 200,
     "policy_rate_hz": 50,
-    "logging": {"csv_path": str(tmp_path / "telemetry.csv"), "flush_every_n": 10},
+    "sensors": [],   # FakeBackend has no MuJoCo scene for SimCameraSensor
+    "logging": {"rerun": {"rrd_dir": str(tmp_path / "rrd")}},
     "viewer": {"enabled": False},
   }
   cfg.runtime = OmegaConf.merge(cfg.runtime, OmegaConf.create(base),
                                 OmegaConf.create(runtime_overrides))
   return cfg
-
-
-def _read_rows(path: Path):
-  with path.open() as f:
-    return list(csv.DictReader(f))
 
 
 def _runtime_threads():
@@ -85,34 +90,41 @@ def test_policy_loop_resets_and_publishes_act_output():
   obs = policy.seen[-1]
   assert obs.t >= 0.0                                      # obs carries elapsed time
   assert obs.q_meas.shape == (2,)                          # and measured joints
+  assert obs.present() >= {"t", "q_meas"}                  # M3 modality dict present
 
 
-def test_boots_runs_and_shuts_down_cleanly(tmp_path):
+def test_boots_runs_and_shuts_down_cleanly(tmp_path, fake_rerun):
   cfg = _cfg(tmp_path)
   rt = Runtime(cfg)
   rt.run()  # bounded by duration_s
 
-  rows = _read_rows(tmp_path / "telemetry.csv")
-  tick_rows = [r for r in rows if r["event"] == ""]
-  assert len(tick_rows) > 0          # control loop ran
+  assert control_tick_rows(fake_rerun.rec)   # control loop logged ticks
   assert rt.control_loop.ticks > 0
-  assert rt.channel.seq > 0          # policy loop published
+  assert rt.channel.seq > 0                   # policy loop published
+  assert fake_rerun.rec.flushed              # .rrd flushed on shutdown
   # No leftover runtime threads.
   time.sleep(0.05)
   assert _runtime_threads() == []
 
 
-def test_csv_has_header_and_parses(tmp_path):
+def test_writes_rrd_file(tmp_path):
+  # Real rerun (no fake): a non-empty .rrd lands in the configured dir.
   rt = Runtime(_cfg(tmp_path))
   rt.run()
-  rows = _read_rows(tmp_path / "telemetry.csv")
+  assert rt.sink.path is not None and rt.sink.path.exists()
+  assert rt.sink.path.stat().st_size > 0
+  assert rt.sink.path.parent == tmp_path / "rrd"
+
+
+def test_control_rows_carry_per_joint_commands(tmp_path, fake_rerun):
+  rt = Runtime(_cfg(tmp_path))
+  rt.run()
+  rows = control_tick_rows(fake_rerun.rec)
   assert rows
-  # Per-joint columns exist for all 6 SO-101 joints.
-  for i in range(6):
-    assert f"q_cmd_{i}" in rows[0]
+  assert rows[0]["q_cmd"].shape == (6,)       # all 6 SO-101 joints logged
 
 
-def test_simulated_sigint_shuts_down_and_flushes(tmp_path):
+def test_simulated_sigint_shuts_down_and_flushes(tmp_path, fake_rerun):
   # duration None would block forever; emulate Ctrl-C by setting the same
   # event the installed handler sets, from a timer thread.
   cfg = _cfg(tmp_path, duration_s=None)
@@ -127,12 +139,12 @@ def test_simulated_sigint_shuts_down_and_flushes(tmp_path):
   rt.run()
   killer.join()
 
-  rows = _read_rows(tmp_path / "telemetry.csv")
-  assert len(rows) > 0
+  assert control_tick_rows(fake_rerun.rec)
+  assert fake_rerun.rec.flushed
   assert _runtime_threads() == []
 
 
-def test_out_of_envelope_sweep_is_clamped_every_tick(tmp_path):
+def test_out_of_envelope_sweep_is_clamped_every_tick(tmp_path, fake_rerun):
   # Sine amplitude far exceeds the joint box -> every commanded position must
   # stay in-box and clamp events must appear.
   cfg = _cfg(
@@ -144,16 +156,69 @@ def test_out_of_envelope_sweep_is_clamped_every_tick(tmp_path):
   lower, upper = rt._limits.lower, rt._limits.upper
   rt.run()
 
-  rows = _read_rows(tmp_path / "telemetry.csv")
-  tick_rows = [r for r in rows if r["event"] == ""]
-  assert tick_rows
-  for r in tick_rows:
-    for i in range(6):
-      q = float(r[f"q_cmd_{i}"])
-      assert lower[i] - 1e-9 <= q <= upper[i] + 1e-9
-  assert any(r["clamped"] == "1" for r in tick_rows)
+  rows = control_tick_rows(fake_rerun.rec)
+  assert rows
+  for r in rows:
+    q = r["q_cmd"]
+    assert np.all(q >= lower - 1e-9) and np.all(q <= upper + 1e-9)
+  assert any(r["clamped"] == 1 for r in rows)
 
 
 def test_fake_backend_runtime_starts_in_normal(tmp_path):
   rt = Runtime(_cfg(tmp_path))
   assert rt.kernel.mode is Mode.NORMAL
+
+
+# -- M3: modality composition + fail-fast ------------------------------------
+
+
+def test_startup_fails_fast_on_unproduced_required_modality(tmp_path):
+  # Require object_xy but configure no perception that produces it -> the
+  # runtime must refuse to construct (before any thread starts).
+  cfg = _cfg(tmp_path, required_modalities=["object_xy"])
+  with pytest.raises(ModalityError, match="object_xy"):
+    Runtime(cfg)
+  # And nothing was spun up.
+  assert _runtime_threads() == []
+
+
+def test_startup_passes_when_required_modality_is_produced(tmp_path):
+  # ee is produced by EePoseModule; but EePoseModule needs a backend with FK.
+  # FakeBackend has none, so require only the base modalities here — the point
+  # is that a satisfiable required set constructs cleanly.
+  cfg = _cfg(tmp_path, required_modalities=["q_meas", "t"])
+  rt = Runtime(cfg)
+  assert "q_meas" in rt.available and "t" in rt.available
+
+
+# -- M3: sim camera path must not starve the control loop --------------------
+
+
+def test_sim_camera_does_not_stall_control_loop(tmp_path):
+  """Regression: SimCameraSensor renders on the policy thread; if it held the
+  physics lock across the full GL render it starved the control loop badly
+  enough to trip the watchdog. Run the real MuJoCo + camera + perception path
+  under the strict default watchdog and assert the loop survives (spec
+  §3.2/§4.1: slow perception must not affect the control loop)."""
+  pytest.importorskip("mujoco")
+  cfg = load_config()
+  base = {
+    "duration_s": 1.5,
+    "backend": {"target": "chuck_dreamer.runtime.mujoco_backend:MujocoBackend",
+                "params": {"realtime": True}},
+    "perception": [{"target": "chuck_dreamer.runtime.perception:EePoseModule"}],
+    "required_modalities": ["image", "ee"],
+    "logging": {"rerun": {"rrd_dir": str(tmp_path / "rrd")}},
+    "viewer": {"enabled": False},
+  }
+  cfg.runtime = OmegaConf.merge(cfg.runtime, OmegaConf.create(base))
+  rt = Runtime(cfg)
+  assert {"image", "ee"} <= rt.available
+  rt.run()
+
+  assert rt.kernel.mode is not Mode.ESTOP   # watchdog did not trip
+  assert rt.control_loop.ticks > 0
+  assert rt.channel.seq > 0                  # observations flowed despite rendering
+  assert rt.sink.path is not None and rt.sink.path.stat().st_size > 0
+  time.sleep(0.05)
+  assert _runtime_threads() == []

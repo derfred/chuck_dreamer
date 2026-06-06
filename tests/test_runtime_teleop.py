@@ -4,13 +4,12 @@ No real hardware: the leader-action mapping is pure; the real
 :class:`LerobotLeaderReader` thread is exercised with a monkeypatched lerobot
 stub; everything else uses :class:`FakeLeaderReader`. The end-to-end tests
 follow the harness conventions in ``test_runtime_harness.py`` — ``FakeBackend``,
-bounded ``duration_s``, shutdown driven directly, CSV read back, no leftover
-``runtime-*`` threads.
+bounded ``duration_s``, shutdown driven directly, telemetry read back from the
+``fake_rerun`` capture, no leftover ``runtime-*`` threads.
 """
 
 from __future__ import annotations
 
-import csv
 import sys
 import threading
 import time
@@ -24,8 +23,10 @@ from omegaconf import OmegaConf
 from chuck_dreamer.config import load_config
 from chuck_dreamer.runtime.harness import Runtime
 from chuck_dreamer.runtime.kernel import Mode
-from chuck_dreamer.runtime.observation import RuntimeObservation
+from chuck_dreamer.runtime.modalities import RuntimeObservation
 from chuck_dreamer.runtime.sources import ManualPolicy
+
+from .conftest import control_tick_rows
 from chuck_dreamer.runtime.teleop import (
   FakeLeaderReader,
   LerobotLeaderReader,
@@ -276,7 +277,8 @@ def _manual_cfg(tmp_path: Path, pose, **runtime_overrides):
     "duration_s": 0.4,
     "control_rate_hz": 200,
     "policy_rate_hz": 100,
-    "logging": {"csv_path": str(tmp_path / "telemetry.csv"), "flush_every_n": 10},
+    "sensors": [],   # FakeBackend has no MuJoCo scene for SimCameraSensor
+    "logging": {"rerun": {"rrd_dir": str(tmp_path / "rrd")}},
     "viewer": {"enabled": False},
     "source": {"kind": "manual"},
     "leader": {
@@ -290,16 +292,11 @@ def _manual_cfg(tmp_path: Path, pose, **runtime_overrides):
   return cfg
 
 
-def _read_rows(path: Path):
-  with path.open() as f:
-    return list(csv.DictReader(f))
-
-
 def _runtime_threads():
   return [t for t in threading.enumerate() if t.name.startswith("runtime-")]
 
 
-def test_manual_teleop_follower_tracks_leader(tmp_path):
+def test_manual_teleop_follower_tracks_leader(tmp_path, fake_rerun):
   pose = [0.5, -1.0, 1.0, 0.3, -0.4, 0.2]      # all within the default envelope
   # High velocity cap so the slew reaches the (in-box) leader pose within the
   # bounded run; ManualPolicy publishes the leader pose verbatim as the target.
@@ -307,33 +304,30 @@ def test_manual_teleop_follower_tracks_leader(tmp_path):
   home = rt.kernel.q_cmd.copy()                # boot pose, before any setpoint
   rt.run()
 
-  rows = _read_rows(tmp_path / "telemetry.csv")
-  tick_rows = [r for r in rows if r["event"] == ""]
-  assert tick_rows
+  rows = control_tick_rows(fake_rerun.rec)
+  assert rows
   # The published target IS the leader pose (pass-through), and q_cmd slews to it.
-  last = tick_rows[-1]
+  last = rows[-1]
   for i in range(6):
-    assert float(last[f"target_{i}"]) == pytest.approx(pose[i], abs=1e-9)
-    assert float(last[f"q_cmd_{i}"]) == pytest.approx(pose[i], abs=1e-2)
+    assert last["target"][i] == pytest.approx(pose[i], abs=1e-9)
+    assert last["q_cmd"][i] == pytest.approx(pose[i], abs=1e-2)
     # And it genuinely moved from home toward the leader (not coincidentally there).
-    assert abs(pose[i] - float(last[f"q_cmd_{i}"])) < abs(pose[i] - home[i]) + 1e-9
+    assert abs(pose[i] - last["q_cmd"][i]) < abs(pose[i] - home[i]) + 1e-9
   assert _runtime_threads() == []
 
 
-def test_manual_teleop_out_of_box_is_clamped(tmp_path):
+def test_manual_teleop_out_of_box_is_clamped(tmp_path, fake_rerun):
   pose = [50.0] * 6                             # far outside the joint box
   rt = Runtime(_manual_cfg(tmp_path, pose, safety={"max_velocity": 1000.0}))
   lower, upper = rt._limits.lower, rt._limits.upper
   rt.run()
 
-  rows = _read_rows(tmp_path / "telemetry.csv")
-  tick_rows = [r for r in rows if r["event"] == ""]
-  assert tick_rows
-  for r in tick_rows:
-    for i in range(6):
-      q = float(r[f"q_cmd_{i}"])
-      assert lower[i] - 1e-9 <= q <= upper[i] + 1e-9
-  assert any(r["clamped"] == "1" for r in tick_rows)
+  rows = control_tick_rows(fake_rerun.rec)
+  assert rows
+  for r in rows:
+    q = r["q_cmd"]
+    assert np.all(q >= lower - 1e-9) and np.all(q <= upper + 1e-9)
+  assert any(r["clamped"] == 1 for r in rows)
 
 
 def test_estop_freezes_teleop(tmp_path):
@@ -365,7 +359,8 @@ def test_estop_freezes_teleop(tmp_path):
 
 def _build_only_cfg(tmp_path, **runtime_overrides):
   cfg = load_config()
-  base = {"duration_s": 0.1, "logging": {"csv_path": str(tmp_path / "t.csv")}}
+  base = {"duration_s": 0.1, "sensors": [],
+          "logging": {"rerun": {"rrd_dir": str(tmp_path / "rrd")}}}
   cfg.runtime = OmegaConf.merge(cfg.runtime, OmegaConf.create(base),
                                 OmegaConf.create(runtime_overrides))
   return cfg

@@ -313,6 +313,34 @@ runtime:
     # Boot pose; matches the so100 SceneConfig default home.
     home_qpos: [0, -3.14, 3.14, 0, 0, 0]
 
+  # Sensors (M3, spec §3.1/§4.2): latest-value producer slots sampled at
+  # policy-step time. Each declares the modalities it produces; the startup
+  # composition fails fast if a required modality is unproduced. SimCameraSensor
+  # renders the MuJoCo scene (needs MujocoBackend); swap to WebcamSensor for a
+  # real camera. `render_size` reuses the "HxW" convention.
+  sensors:
+    - target: "chuck_dreamer.runtime.sensors:SimCameraSensor"
+      params: { camera: "main_camera", name: "camera/front", render_size: "240x320" }
+    # Real camera:
+    #   target: "chuck_dreamer.runtime.sensors:WebcamSensor"
+    #   params: { device_index: 0, render_size: "480x640" }
+
+  # Perception pipeline (M3, spec §3.2/§3.3): ordered modules run inline at the
+  # start of each policy step, each declaring consumed/emitted modalities. Empty
+  # by default (the scaffold). EePoseModule is cheap + real-time (FK only);
+  # ObjectLocalizerModule wraps the SAM2 pose estimator and needs M4 calibration
+  # (and a first_frame_prompt, since there's no UI until M7) — keep it off here.
+  perception: []
+    # - target: "chuck_dreamer.runtime.perception:EePoseModule"
+    # - target: "chuck_dreamer.runtime.perception_object:ObjectLocalizerModule"
+    #   params: { dataset_id: "user/dataset", first_frame_prompt: [160, 120] }
+
+  # Modalities the session declares it needs (spec §9.1 step 5). Startup raises
+  # if any are unproduced by the sensors + perception above. Empty for the
+  # scripted M3 sources (they need only t / q_meas); a real policy unions in its
+  # declared obs-space at M6.
+  required_modalities: []
+
   # Scripted setpoint source (M1; replaced by the policy at M6).
   source:
     kind: "sine_sweep"        # "go_to_pose" | "sine_sweep" | "manual" | custom import path
@@ -355,11 +383,17 @@ runtime:
   watchdog:
     timeout_s: 0.1
 
-  # Telemetry -> CSV (spec §3.11, scaled to CSV for M0; Rerun at M3).
+  # Telemetry -> Rerun (spec §3.11). The flat per-tick record shape is unchanged
+  # from M0; M3 swaps the sink from CSV to a Rerun .rrd (one per episode) that
+  # also carries the policy thread's sensor frames, perception outputs, and
+  # composed observations on a shared timeline. `queue_maxsize` bounds the
+  # control telemetry queue; `obs_queue_maxsize` bounds the policy-thread
+  # observation queue (drop-on-full so the policy loop never blocks on encoding).
   logging:
-    csv_path: "runtime_logs/telemetry.csv"
     queue_maxsize: 10000
-    flush_every_n: 50
+    rerun:
+      rrd_dir: "runtime_logs/rrd"
+      obs_queue_maxsize: 256
 
   # Optional MuJoCo viewer (off by default -> headless / test-safe). When on
   # it draws the commanded setpoint + current EE markers; the task-space

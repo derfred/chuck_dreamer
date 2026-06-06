@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from chuck_dreamer.runtime.observation import RuntimeObservation
+from chuck_dreamer.runtime.modalities import RuntimeObservation
 from chuck_dreamer.runtime.sources import GoToPose, SineSweep
 
 

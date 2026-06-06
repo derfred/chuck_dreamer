@@ -148,6 +148,18 @@ class MujocoBackend:
     with self._lock:
       return cast(np.ndarray, self.data.site_xpos[self._ee_sid].copy())
 
+  def ee_quat(self) -> np.ndarray:
+    """EE orientation as a ``(4,)`` quaternion ``[w, x, y, z]`` (sim convention).
+
+    Mirrors ``ee_pos``; together they form the 7-D ``ee`` modality the
+    perception layer emits (``ee_pos ‖ ee_quat``), matching
+    ``Controller.get_ee_quat`` in ``sim/pushing_env.py``.
+    """
+    quat = np.zeros(4, dtype=np.float64)
+    with self._lock:
+      mujoco.mju_mat2Quat(quat, self.data.site_xmat[self._ee_sid])
+    return quat
+
   def physics_lock(self):
     """The mutex serializing all access to ``self.data``.
 

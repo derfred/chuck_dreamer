@@ -1,15 +1,22 @@
-"""Telemetry: a flat record, a non-blocking queue, and a CSV logger thread.
+"""Telemetry: a flat record, a non-blocking queue, and logger sinks.
 
-The record shape (spec §3.11, scaled to CSV for M0) is intentionally flat —
-one row per control tick, plus sparse "event" rows (overrun, watchdog trip,
-e-stop, mode change). M3 upgrades the *sink* to Rerun without changing the
-record shape, so downstream tooling keeps working.
+The record shape (spec §3.11) is intentionally flat — one row per control
+tick, plus sparse "event" rows (overrun, watchdog trip, e-stop, mode change).
+The control loop emits :class:`TelemetryRecord`s onto a :class:`TelemetryQueue`;
+a sink thread drains and writes them.
+
+As of M3 the *active* runtime sink is the Rerun
+:class:`~chuck_dreamer.runtime.rerun_sink.RerunSink` (one ``.rrd`` per episode,
+control telemetry + the policy thread's observations on a shared timeline) —
+this fulfils the "upgrade the sink to Rerun without changing the record shape"
+plan. :class:`CsvSink` is kept here as a standalone, dependency-free sink (and
+the canonical documentation of the flat row layout) but is no longer wired into
+:class:`Runtime`.
 
 The control loop must never block on logging, so :meth:`TelemetryQueue.emit`
-is a non-blocking ``put_nowait`` that drops (and counts) on a full queue.
-The :class:`CsvSink` is the sole writer, draining the queue on its own
-thread and flushing on a clean ``stop`` — that is the "flushed logs on
-shutdown" guarantee.
+is a non-blocking ``put_nowait`` that drops (and counts) on a full queue. A
+sink drains the queue on its own thread and flushes on a clean ``stop`` — that
+is the "flushed logs on shutdown" guarantee.
 """
 
 from __future__ import annotations

@@ -33,13 +33,22 @@ from ..policy import Policy
 from .backend import RobotBackend, ViewableBackend
 from .control_loop import ControlLoop, Watchdog
 from .kernel import ControlKernel, KernelLimits, Mode
-from .observation import RuntimeObservation
+from .modalities import (
+  RuntimeObservation,
+  check_required,
+  compose_modalities,
+  required_modalities,
+)
+from .perception import PerceptionPipeline
 from .registry import construct, import_symbol
+from .rerun_sink import RerunSink
 from .setpoint_channel import SetpointChannel
 from .sources import GoToPose, ManualPolicy, SineSweep
-from .telemetry import CsvSink, TelemetryQueue
+from .telemetry import TelemetryQueue
 
 if TYPE_CHECKING:
+  from .perception import PerceptionModule
+  from .sensors import Sensor
   from .teleop import LeaderReader
 
 logger = logging.getLogger(__name__)
@@ -48,12 +57,20 @@ _FAKE_BACKEND_TARGET = "chuck_dreamer.runtime.backend:FakeBackend"
 
 
 class PolicyLoop:
-  """Threaded policy producer: ``policy.act(obs)`` -> setpoint channel.
+  """Threaded policy producer: sense → perceive → ``policy.act(obs)`` → channel.
 
-  Resets the policy once with ``reset_arg`` (a joint vector or a SceneConfig)
-  then, at the policy rate, builds a :class:`RuntimeObservation` from the
-  elapsed clock and the backend's measured joints and publishes the resulting
-  action. This is the exact producer path Dreamer will use at M6.
+  Resets the policy and the perception pipeline once with ``reset_arg`` (a joint
+  vector or a SceneConfig), then, at the policy rate: samples each sensor's
+  latest value, runs the perception pipeline inline, composes a
+  :class:`RuntimeObservation`, publishes ``policy.act(obs)``, and (if a Rerun
+  sink is wired) logs the observation. This is the exact producer path Dreamer
+  will use at M6.
+
+  Perception runs inline here, on the policy thread: a slow ``process`` only
+  delays the next ``channel.publish`` — the control loop keeps slewing the last
+  published setpoint, so slow perception reduces the *policy* rate, not control
+  correctness (spec §3.2/§4.1). The ``sleep_for <= 0`` branch lets the loop run
+  as fast as it can when a tick overruns its period.
   """
 
   def __init__(
@@ -65,20 +82,27 @@ class PolicyLoop:
     *,
     rate_hz: float,
     leader: "LeaderReader | None" = None,
+    sensors: "list[Sensor] | None" = None,
+    perception: PerceptionPipeline | None = None,
+    rerun_sink: RerunSink | None = None,
   ) -> None:
     if rate_hz <= 0:
       raise ValueError("rate_hz must be positive")
-    self._policy    = policy
-    self._channel   = channel
-    self._backend   = backend
-    self._reset_arg = reset_arg
-    self._leader    = leader
-    self._period    = 1.0 / float(rate_hz)
-    self._stop      = threading.Event()
+    self._policy     = policy
+    self._channel    = channel
+    self._backend    = backend
+    self._reset_arg  = reset_arg
+    self._leader     = leader
+    self._sensors    = sensors or []
+    self._perception = perception or PerceptionPipeline([])
+    self._rerun_sink = rerun_sink
+    self._period     = 1.0 / float(rate_hz)
+    self._stop       = threading.Event()
     self._thread: threading.Thread | None = None
 
   def start(self) -> None:
     self._policy.reset(self._reset_arg)
+    self._perception.reset()
     self._stop.clear()
     self._thread = threading.Thread(target=self._run, name="runtime-policy", daemon=True)
     self._thread.start()
@@ -92,16 +116,34 @@ class PolicyLoop:
   def _run(self) -> None:
     t0 = time.monotonic()
     next_deadline = t0
+    step = 0
     while not self._stop.is_set():
+      t = time.monotonic() - t0
+      q_meas = self._backend.read_positions()
       # latest() is non-blocking by contract, so the policy loop never waits on
-      # serial; when no leader is configured the obs is identical to M1.
+      # serial / the camera; when no leader is configured leader_qpos is None.
       leader_qpos = self._leader.latest() if self._leader is not None else None
+
+      # Compose the modality dict: base + sensors + perception emits. The dict
+      # is the RuntimeObservation's full `modalities`; `t`/`q_meas`/`leader_qpos`
+      # also ride as named fields for the scripted policies.
+      data: dict[str, Any] = {"t": t, "q_meas": q_meas}
+      if leader_qpos is not None:
+        data["leader_qpos"] = leader_qpos
+      for s in self._sensors:
+        snap = s.latest()
+        if snap:
+          data.update(snap)
+      data = self._perception.run(data, t=t)
+
       obs = RuntimeObservation(
-        t=time.monotonic() - t0,
-        q_meas=self._backend.read_positions(),
-        leader_qpos=leader_qpos,
+        t=t, q_meas=q_meas, leader_qpos=leader_qpos, modalities=data,
       )
       self._channel.publish(self._policy.act(obs))
+      if self._rerun_sink is not None:
+        self._rerun_sink.log_observation(obs, step=step, t=t)
+      step += 1
+
       next_deadline += self._period
       sleep_for = next_deadline - time.monotonic()
       self._stop.wait(sleep_for if sleep_for > 0 else 0)
@@ -128,12 +170,12 @@ class Runtime:
     home        = _to_array(rt.safety.home_qpos, n)
     self.kernel = ControlKernel(self._limits, np.clip(home, lower, upper), mode=Mode.NORMAL)
 
-    # 3. Channel, telemetry sink, loops, watchdog.
+    # 3. Channel, telemetry queue, Rerun sink, loops, watchdog.
     self.channel   = SetpointChannel()
     self.telemetry = TelemetryQueue(maxsize=int(rt.logging.queue_maxsize))
-    self.sink      = CsvSink(
-      rt.logging.csv_path, self.telemetry, n_joints=n,
-      flush_every_n=int(rt.logging.flush_every_n),
+    self.sink      = RerunSink(
+      rt.logging.rerun.rrd_dir, self.telemetry, n_joints=n,
+      obs_queue_maxsize=int(rt.logging.rerun.get("obs_queue_maxsize", 256)),
     )
     self.watchdog = Watchdog(
       timeout_s=float(rt.watchdog.timeout_s),
@@ -145,15 +187,30 @@ class Runtime:
     )
     self.policy      = self._build_policy(rt, home)
     self.leader      = self._build_leader(rt)  # None unless source.kind == "manual"
+
+    # 4. Observation half (M3): sensors + perception pipeline, then compose the
+    #    active modality set and fail fast (spec §9.1 step 4-5) before any thread
+    #    starts if a required modality is unproduced.
+    self.sensors     = self._build_sensors(rt)
+    self.perception  = self._build_perception(rt)
+    self.available   = compose_modalities(
+      self.sensors, self.perception.modules, leader_present=self.leader is not None)
+    check_required(required_modalities(rt), self.available)
+
     self.policy_loop = PolicyLoop(
       self.policy, self.channel, self.backend, home,
       rate_hz=float(rt.policy_rate_hz), leader=self.leader,
+      sensors=self.sensors, perception=self.perception, rerun_sink=self.sink,
     )
 
     self._duration_s = None if rt.duration_s is None else float(rt.duration_s)
     self._viewer_enabled = bool(rt.viewer.enabled)
     self._shutdown = threading.Event()
     self._n = n
+    # One .rrd per episode (spec §3.11). Episode lifecycle is M7; until then a
+    # single recording spans the run, named by start time so successive runs
+    # don't clobber each other.
+    self._recording_id = f"episode-{time.strftime('%Y%m%d-%H%M%S')}"
 
   # -- construction helpers -------------------------------------------------
 
@@ -248,6 +305,58 @@ class Runtime:
       return cast("LeaderReader", from_config(self.cfg, **params))
     return cast("LeaderReader", construct(spec, jaw_lower=jaw_lo, jaw_upper=jaw_hi))
 
+  def _build_sensors(self, rt: DictConfig) -> "list[Sensor]":
+    """Construct the configured camera sensors (spec §3.1).
+
+    Reuses the construct/from_config convention from :meth:`_build_backend`.
+    Sensors that need the backend (``SimCameraSensor`` renders its model/data)
+    get it injected when their ``from_config`` accepts a ``backend`` keyword.
+    """
+    return [
+      cast("Sensor", self._construct_component(entry))
+      for entry in (rt.get("sensors") or [])
+    ]
+
+  def _build_perception(self, rt: DictConfig) -> PerceptionPipeline:
+    """Construct the ordered perception pipeline (spec §3.2).
+
+    Same construction convention as sensors; modules run inline at the start of
+    each policy step. Empty by default (the M3 scaffold) — enable modules
+    (``EePoseModule`` / ``ObjectLocalizerModule``) explicitly in config.
+    """
+    modules = [
+      cast("PerceptionModule", self._construct_component(entry))
+      for entry in (rt.get("perception") or [])
+    ]
+    return PerceptionPipeline(modules)
+
+  def _construct_component(self, entry) -> Any:
+    """Build one sensor / perception module from a ``{target, params}`` entry.
+
+    Prefers a ``from_config`` classmethod (fed ``self.cfg`` + params), injecting
+    ``backend=self.backend`` only when the factory accepts it; falls back to
+    direct ``construct`` of the spec, again injecting ``backend`` only if the
+    constructor takes it. This mirrors :meth:`_build_backend` / :meth:`_build_leader`.
+    """
+    import inspect
+
+    target = str(entry["target"])
+    params = _params_dict(entry.get("params"))
+    spec: dict[str, Any] = {"target": target, "params": params}
+    factory = import_symbol(target)
+
+    from_config = getattr(factory, "from_config", None)
+    if callable(from_config):
+      kwargs = dict(params)
+      if "backend" in inspect.signature(from_config).parameters:
+        kwargs["backend"] = self.backend
+      return from_config(self.cfg, **kwargs)
+
+    extra: dict[str, Any] = {}
+    if "backend" in inspect.signature(factory).parameters:
+      extra["backend"] = self.backend
+    return construct(spec, **extra)
+
   def _on_watchdog_trip(self) -> None:
     self.kernel.request_estop()
     self.telemetry.emit_event("watchdog_trip", detail="control loop stalled -> ESTOP")
@@ -257,7 +366,9 @@ class Runtime:
 
   def start(self) -> None:
     self.backend.start()
-    self.sink.start()
+    for s in self.sensors:   # after backend: SimCameraSensor renders its model/data
+      s.start()
+    self.sink.start(self._recording_id)
     self.control_loop.start()
     self.watchdog.start()
     if self.leader is not None:
@@ -305,6 +416,8 @@ class Runtime:
   def shutdown(self) -> None:
     # Ordered (project plan): stop new setpoints, hold, flush, tear down.
     self.policy_loop.stop()
+    for s in self.sensors:   # no more observations after the policy loop stops
+      s.stop()
     if self.leader is not None:
       self.leader.stop()
     self.kernel.request_hold()
@@ -313,9 +426,11 @@ class Runtime:
     self.control_loop.stop()
     self.watchdog.stop()
     self.backend.stop()
-    self.sink.stop()
+    self.sink.stop()  # drains both queues + flushes the .rrd (one per episode)
     if self.telemetry.dropped:
       logger.warning("dropped %d telemetry records (queue full)", self.telemetry.dropped)
+    if self.sink.dropped:
+      logger.warning("dropped %d observation records (rerun queue full)", self.sink.dropped)
 
 
 # -- small config coercions ----------------------------------------------------

@@ -32,12 +32,13 @@ logger = logging.getLogger(__name__)
               help="Open the MuJoCo 3D viewer (MujocoBackend only). Off by default.")
 @click.option("--duration", "duration_s", default=None, type=float,
               help="Run for this many seconds, then stop. Omit to run until Ctrl-C.")
-@click.option("--log-path", "log_path", default=None, type=str,
-              help="CSV telemetry output path (alias for -o runtime.logging.csv_path=...).")
+@click.option("--rrd-dir", "rrd_dir", default=None, type=str,
+              help="Rerun .rrd output directory "
+                   "(alias for -o runtime.logging.rerun.rrd_dir=...).")
 @click.option("--seed", default=None, type=int, help="Random seed (random if omitted)")
 @override_option
 @click.pass_context
-def run_cmd(ctx, backend, source, leader_port, viewer, duration_s, log_path, seed, overrides):
+def run_cmd(ctx, backend, source, leader_port, viewer, duration_s, rrd_dir, seed, overrides):
   """Run the runtime: spin the control + policy loops against a backend."""
   from chuck_dreamer.runtime.harness import Runtime
 
@@ -63,7 +64,7 @@ def run_cmd(ctx, backend, source, leader_port, viewer, duration_s, log_path, see
       "runtime.leader.params.port": leader_port,
       "runtime.viewer.enabled":     viewer,
       "runtime.duration_s":         duration_s,
-      "runtime.logging.csv_path":   log_path,
+      "runtime.logging.rerun.rrd_dir": rrd_dir,
     },
   )
   click.echo("Runtime config:")

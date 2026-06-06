@@ -27,7 +27,7 @@ from typing import Any, cast
 
 import numpy as np
 
-from .observation import RuntimeObservation
+from .modalities import RuntimeObservation
 
 
 def _start_qpos(scene_or_q0: Any) -> np.ndarray:
