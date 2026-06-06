@@ -16,7 +16,7 @@ sudo curl -fsSL https://derfred.github.io/chuck_dreamer/fessel-archive-keyring.g
   -o /usr/share/keyrings/fessel-archive-keyring.gpg
 
 # 2. Add the signed source
-echo "deb [signed-by=/usr/share/keyrings/fessel-archive-keyring.gpg] https://derfred.github.io/chuck_dreamer stable main" \
+echo "deb [arch=all signed-by=/usr/share/keyrings/fessel-archive-keyring.gpg] https://derfred.github.io/chuck_dreamer stable main" \
   | sudo tee /etc/apt/sources.list.d/fessel.list
 
 # 3. Install

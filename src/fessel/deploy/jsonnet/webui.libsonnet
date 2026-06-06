@@ -46,7 +46,15 @@ function(cfg)
               { name: 'FESSEL_WHEP_SECRET', valueFrom: { secretKeyRef: { name: 'fessel-whep-secret', key: 'secret' } } },
               { name: 'FESSEL_MEDIA_BASE', value: mediaBase },
               { name: 'FESSEL_WHEP_TTL_S', value: if nodeport then '300' else '60' },
-            ] + minioEnv,
+            ]
+            // Public-host gate for /jwks (I2.1): in nodeport mode the backend
+            // 404s /jwks for requests on the public ingress host, since the
+            // `oct` JWK is the signing secret. This replaces the ingress
+            // server-snippet (`location = /jwks { return 404; }`) so the block
+            // survives clusters that disallow snippet annotations. In podip
+            // (test) mode there's no public ingress, so the gate is unset.
+            + (if nodeport then [{ name: 'FESSEL_PUBLIC_WEBUI_HOST', value: cfg.hosts.webui }] else [])
+            + minioEnv,
             ports: [{ containerPort: 8000 }],
             readinessProbe: {
               httpGet: { path: '/healthz', port: 8000 },
@@ -78,10 +86,12 @@ function(cfg)
         // Proxy-bypass split (I2.1): /jwks must NEVER be reachable on the
         // public ingress — an `oct` JWK *is* the signing secret. mediamtx
         // fetches it via the in-cluster Service (http://webui:8000/jwks),
-        // not this host, so denying it publicly costs nothing. This is the
-        // deployment-level half of the split; the backend's
-        // forbid_identity_headers guard is the in-cluster half.
-        'nginx.ingress.kubernetes.io/server-snippet': 'location = /jwks { return 404; }\n',
+        // not this host. The public block is enforced in the backend via the
+        // FESSEL_PUBLIC_WEBUI_HOST host gate (set on the Deployment above),
+        // which 404s /jwks for requests on this host — replacing the former
+        // `server-snippet: location = /jwks { return 404; }` so it works on
+        // clusters that disallow snippet annotations. forbid_identity_headers
+        // is the spoofed-identity half of the split.
       },
     },
     spec: {

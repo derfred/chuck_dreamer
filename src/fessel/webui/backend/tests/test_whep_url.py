@@ -95,6 +95,42 @@ def test_jwks_rejects_spoofed_identity_headers(client):
   assert r.status_code == 400
 
 
+PUBLIC_HOST = "fessel.example.com"
+
+
+@pytest.fixture()
+def public_client(monkeypatch):
+  # Same app, but with the public-host gate armed (FESSEL_PUBLIC_WEBUI_HOST),
+  # as the nodeport-mode Deployment sets it. Replaces the former ingress
+  # server-snippet that 404'd /jwks on the public host (I2.1).
+  monkeypatch.setenv("FESSEL_WHEP_SECRET", SECRET)
+  monkeypatch.setenv("FESSEL_MEDIA_BASE", "https://media-test.example.com")
+  monkeypatch.setenv("FESSEL_WHEP_TTL_S", "30")
+  monkeypatch.setenv("FESSEL_PUBLIC_WEBUI_HOST", PUBLIC_HOST)
+  import app.main as appmod
+
+  return TestClient(appmod.create_app())
+
+
+def test_jwks_404_on_public_host(public_client):
+  # A request arriving on the public ingress host must not see the JWK
+  # (the `oct` key is the signing secret). 404, not 403 — the public
+  # surface doesn't admit the path exists.
+  r = public_client.get("/jwks", headers={"host": PUBLIC_HOST})
+  assert r.status_code == 404
+  # Host with a port still matches (host:port is split before compare).
+  r = public_client.get("/jwks", headers={"host": f"{PUBLIC_HOST}:443"})
+  assert r.status_code == 404
+
+
+def test_jwks_served_in_cluster_when_gate_armed(public_client):
+  # mediamtx fetches via the in-cluster Service (Host: webui:8000); the gate
+  # only fires for the public host, so the in-cluster fetch still works.
+  r = public_client.get("/jwks", headers={"host": "webui:8000"})
+  assert r.status_code == 200
+  assert r.json()["keys"][0]["kty"] == "oct"
+
+
 def test_jwt_header_has_matching_kid(client):
   r = client.get("/api/auth/whep-url", params={"path": "pi", "mode": "640x480@30@1000000"}, headers=AUTHED)
   token = parse_qs(urlparse(r.json()["url"]).query)["jwt"][0]

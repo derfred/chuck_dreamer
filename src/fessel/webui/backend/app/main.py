@@ -42,6 +42,10 @@ Env config:
   FESSEL_AUTH_*_HEADER     identity header names (see app.auth)
   FESSEL_SUPERVISOR_BASE   supervisor base URL via Tailscale egress (default http://supervisor:8443)
   FESSEL_SUPERVISOR_TIMEOUT_S  forward timeout seconds (default 10)
+  FESSEL_PUBLIC_WEBUI_HOST public ingress host (e.g. fessel.example.com); when
+                           set, /jwks 404s for requests arriving on it (the JWK
+                           is the signing secret and must stay in-cluster only).
+                           Unset -> no host gate (the in-cluster default).
 """
 
 from __future__ import annotations
@@ -117,6 +121,10 @@ def create_app(
   app        = FastAPI(title="fessel-webui-backend")
   media_base = os.environ.get("FESSEL_MEDIA_BASE", "http://localhost:8889").rstrip("/")
   ttl_s      = int(os.environ.get("FESSEL_WHEP_TTL_S", "30"))
+  # Public ingress host. /jwks must never be reachable on it (the `oct` JWK *is*
+  # the signing secret); mediamtx fetches /jwks via the in-cluster Service
+  # (Host: webui:8000), not this host. Empty -> no host gate (in-cluster dev).
+  public_webui_host = os.environ.get("FESSEL_PUBLIC_WEBUI_HOST", "").split(":")[0].lower()
   headers    = AuthHeaders()
   supervisor = supervisor if supervisor is not None else SupervisorClient()
   store      = recordings_store if recordings_store is not None else build_recordings_store()
@@ -142,6 +150,25 @@ def create_app(
           detail="identity headers not permitted on bypass endpoint",
         )
 
+  def forbid_public_host(request: Request) -> None:
+    """Dependency for /jwks: 404 if the request arrived on the public host.
+
+    The JWK is an `oct` key — it *is* the WHEP signing secret — so /jwks must
+    stay reachable only in-cluster. mediamtx fetches it via the in-cluster
+    Service (Host: webui:8000); a public request carries the ingress host
+    (FESSEL_PUBLIC_WEBUI_HOST). This is the network-level half of the I2.1
+    proxy-bypass split that the ingress used to enforce with a server-snippet
+    (`location = /jwks { return 404; }`); doing it in the app keeps the block
+    when the ingress controller disallows snippet annotations. forbid_identity
+    _headers remains the spoofed-identity half. 404 (not 403) so the public
+    surface doesn't even admit the path exists.
+    """
+    if not public_webui_host:
+      return
+    host = request.headers.get("host", "").split(":")[0].lower()
+    if host == public_webui_host:
+      raise HTTPException(status_code=404, detail="not found")
+
   @app.get("/healthz")
   def healthz() -> dict:
     # `version` is the release stamp (image tag == dpkg version). A deployed
@@ -149,7 +176,7 @@ def create_app(
     # mismatch means the two halves of a release drifted.
     return {"status": "ok", "version": fessel_version()}
 
-  @app.get("/jwks", dependencies=[Depends(forbid_identity_headers)])
+  @app.get("/jwks", dependencies=[Depends(forbid_public_host), Depends(forbid_identity_headers)])
   def jwks() -> dict:
     # mediamtx (authMethod: jwt) fetches this JWKS to validate the HS256
     # signature locally — no per-request callback to the backend. The

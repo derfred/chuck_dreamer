@@ -44,11 +44,14 @@ per-request callback.
 never be reachable publicly, and a direct in-cluster caller must not be
 able to forge an operator identity against it. Two layers enforce this:
 
-1. **Deployment / ingress (this library).** The public webui Ingress
-   (`webui.libsonnet`, nodeport mode only) carries an nginx
-   `server-snippet` returning 404 for `location = /jwks`. The public host
-   therefore never serves the JWK. mediamtx's in-cluster Service path is
-   unaffected.
+1. **Public-host gate (application, driven by the deployment).** In nodeport
+   mode `webui.libsonnet` sets `FESSEL_PUBLIC_WEBUI_HOST` on the Deployment to
+   the public ingress host. The backend 404s `/jwks` for any request whose
+   `Host` is that public host, so the public host never serves the JWK.
+   mediamtx's in-cluster Service path (`Host: webui:8000`) is unaffected.
+   (This replaces an earlier nginx `server-snippet: location = /jwks { return
+   404; }` on the Ingress — moving the block into the app keeps it working on
+   clusters whose ingress admission webhook disallows snippet annotations.)
 
 2. **Application (`forbid_identity_headers`).** `/jwks` rejects (400) any
    request carrying identity headers. On the bypass path those headers are
