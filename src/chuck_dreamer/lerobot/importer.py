@@ -18,16 +18,99 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
 import numpy as np
 
+from chuck_dreamer.common.episode import Episode
 from chuck_dreamer.sim.episode_writer import EpisodeWriter
 
 if TYPE_CHECKING:
+  from chuck_dreamer.common.episode_spec import EpisodeSlice
   from .pipeline import Run
 
 logger = logging.getLogger(__name__)
+
+
+def assemble_episode(
+  run: Run,
+  sl: EpisodeSlice,
+  *,
+  tags: tuple[str, ...] = (),
+  name_prefix: str | None = None,
+  debug_dir: str | None = None,
+) -> tuple[Episode, dict[str, Any], str] | None:
+  """Decode one episode and build its ``(episode, metadata, name_suffix)``,
+  *before* any analysis stage runs. Returns ``None`` if no frames decoded.
+
+  This is the shared assembler for both the serial loop and the parallel
+  producer, so the :class:`Episode` / metadata / debug-dump construction lives in
+  exactly one place. The caller is responsible for running the stages (serially
+  in :func:`import_dataset`, split across producer/worker lanes in
+  :mod:`chuck_dreamer.lerobot.parallel`) and writing the result."""
+  frames = run.episode_frames(sl.episode_index)
+  if frames is None:
+    logger.warning("episode %d: no frames decoded, skipping", sl.episode_index)
+    return None
+
+  T = frames.length
+  if T != sl.length:
+    logger.warning(
+      "episode %d: decoded length %d != meta length %d",
+      sl.episode_index, T, sl.length)
+
+  episode = Episode.from_arrays({
+    "image":        frames.images,
+    "joint_action": frames.action,
+    "reward":       np.zeros((T,),          dtype=np.float32),
+    "timestamp":    frames.timestamp,
+    "joint_qpos":   frames.state,
+    "ee_pos":       np.zeros((T, 3),        dtype=np.float32),
+    "ee_quat":      np.zeros((T, 4),        dtype=np.float32),
+    "object_xy":    np.zeros((T, 2),        dtype=np.float32),
+  })
+  metadata = {
+    "config": {
+      "source_repo":   run.dataset_id,
+      "video_key":     run.video_key,
+      "episode_index": sl.episode_index,
+      "task":          sl.task,
+      "n_joints":      frames.n_joints,
+    },
+    "seed":    sl.episode_index,
+    "source":  f"lerobot:{run.dataset_id}",
+    "outcome": "imported",
+    "number_of_frames": T,
+  }
+  if sl.video_path is not None:
+    window = float(sl.video_to_ts) - float(sl.video_from_ts)
+    metadata["source_video"] = {
+      "path":    str(sl.video_path),
+      "from_ts": float(sl.video_from_ts),
+      "to_ts":   float(sl.video_to_ts),
+      "fps":     (sl.length / window) if window > 0 else None,
+    }
+  if tags:
+    metadata["tags"] = tuple(tags)
+
+  # Debug mode: dump the LeRobot-decoded frames and tell the segmentation
+  # stage to retain its SAM2 JPEGs, both under <debug_dir>/epNNN, so
+  # scripts/analyze_video_sync.py can compare them against the .rrd video.
+  if debug_dir is not None:
+    ep_debug = Path(debug_dir) / f"ep{sl.episode_index:05d}"
+    ep_debug.mkdir(parents=True, exist_ok=True)
+    np.save(ep_debug / "frames_images.npy", frames.images)
+    logger.info("episode %d: saved frames.images %s → %s",
+                sl.episode_index, frames.images.shape,
+                ep_debug / "frames_images.npy")
+    metadata["debug_dir"] = str(ep_debug)
+
+  if name_prefix:
+    name_suffix = f"{name_prefix}-{sl.episode_index:05d}"
+  else:
+    name_suffix = f"{sl.episode_index:05d}"
+
+  return episode, metadata, name_suffix
 
 
 def import_dataset(
@@ -38,6 +121,8 @@ def import_dataset(
   tags: tuple[str, ...] = (),
   name_prefix: str | None = None,
   debug_dir: str | None = None,
+  jobs: int = 1,
+  devices: list[str] | None = None,
 ) -> Iterator[tuple[int, Path]]:
   """Yield ``(episode_index, output_path)`` per converted episode.
 
@@ -66,81 +151,43 @@ def import_dataset(
   so the replay buffer's tag-protection and tag-weighting can pick
   them up later (see :class:`ReplayBuffer`).
 
+  ``jobs`` > 1 runs the parallel pipeline (see
+  :mod:`chuck_dreamer.lerobot.parallel`): GPU producer(s) stream episodes
+  through decode + ``ee_pos`` + SAM2 segmentation while a pool of ``jobs`` CPU
+  worker processes runs the ``object_pose`` fit and writes. ``devices`` pins one
+  producer per GPU (e.g. ``["cuda:0", "cuda:1"]``). ``jobs == 1`` (the default)
+  is the serial path below, byte-for-byte unchanged — the correctness anchor.
+  Per-episode results are identical across ``jobs`` because the only stage with
+  cross-frame state (``object_pose``'s warm-start) runs *within* one episode,
+  and parallelism is only *across* episodes.
+
   Generator so callers can wrap in ``tqdm`` and show progress. The
   returned path points at the file produced by :class:`HDF5EpisodeWriter`
   or :class:`RerunEpisodeWriter`.
   """
   slices = run.slices
-  resolved_video_key = run.video_key
   if not slices:
     raise RuntimeError(f"{run.dataset_id}: no episodes to import")
+
+  if jobs != 1:
+    from .parallel import import_dataset_parallel
+    yield from import_dataset_parallel(
+      run, output_dir, format=format, tags=tags, name_prefix=name_prefix,
+      debug_dir=debug_dir, jobs=jobs, devices=devices)
+    return
 
   writer = EpisodeWriter(output_dir, format=format)
 
   for sl in slices:
-    frames = run.episode_frames(sl.episode_index)
-    if frames is None:
-      logger.warning("episode %d: no frames decoded, skipping", sl.episode_index)
+    assembled = assemble_episode(
+      run, sl, tags=tags, name_prefix=name_prefix, debug_dir=debug_dir)
+    if assembled is None:
       continue
-
-    T = frames.length
-    if T != sl.length:
-      logger.warning(
-        "episode %d: decoded length %d != meta length %d", sl.episode_index, T, sl.length)
-
-    episode = {
-      "image":        frames.images,
-      "joint_action": frames.action,
-      "reward":       np.zeros((T,),          dtype=np.float32),
-      "timestamp":    frames.timestamp,
-      "joint_qpos":   frames.state,
-      "ee_pos":       np.zeros((T, 3),        dtype=np.float32),
-      "ee_quat":      np.zeros((T, 4),        dtype=np.float32),
-      "object_xy":    np.zeros((T, 2),        dtype=np.float32),
-    }
-    metadata = {
-      "config": {
-        "source_repo":   run.dataset_id,
-        "video_key":     resolved_video_key,
-        "episode_index": sl.episode_index,
-        "task":          sl.task,
-        "n_joints":      frames.n_joints,
-      },
-      "seed":    sl.episode_index,
-      "source":  f"lerobot:{run.dataset_id}",
-      "outcome": "imported",
-      "number_of_frames": T,
-    }
-    if sl.video_path is not None:
-      window = float(sl.video_to_ts) - float(sl.video_from_ts)
-      metadata["source_video"] = {
-        "path":    str(sl.video_path),
-        "from_ts": float(sl.video_from_ts),
-        "to_ts":   float(sl.video_to_ts),
-        "fps":     (sl.length / window) if window > 0 else None,
-      }
-    if tags:
-      metadata["tags"] = tuple(tags)
-
-    # Debug mode: dump the LeRobot-decoded frames and tell the segmentation
-    # stage to retain its SAM2 JPEGs, both under <debug_dir>/epNNN, so
-    # scripts/analyze_video_sync.py can compare them against the .rrd video.
-    if debug_dir is not None:
-      ep_debug = Path(debug_dir) / f"ep{sl.episode_index:05d}"
-      ep_debug.mkdir(parents=True, exist_ok=True)
-      np.save(ep_debug / "frames_images.npy", frames.images)
-      logger.info("episode %d: saved frames.images %s → %s",
-                  sl.episode_index, frames.images.shape,
-                  ep_debug / "frames_images.npy")
-      metadata["debug_dir"] = str(ep_debug)
+    episode, metadata, name_suffix = assembled
 
     for stage in run.pipeline(sl.episode_index):
       stage.apply(episode, metadata)
 
-    if name_prefix:
-      suffix = f"{name_prefix}-{sl.episode_index:05d}"
-    else:
-      suffix = f"{sl.episode_index:05d}"
-
-    out_path = writer.write_episode(episode, metadata=metadata, name_suffix=suffix)
+    out_path = writer.write_episode(
+      episode, metadata=metadata, name_suffix=name_suffix)
     yield sl.episode_index, out_path

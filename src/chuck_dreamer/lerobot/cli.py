@@ -87,6 +87,8 @@ def _import_dataset(
   tags: tuple[str, ...] = (),
   name_prefix: str | None = None,
   debug_dir: str | None = None,
+  jobs: int = 1,
+  devices: list[str] | None = None,
 ) -> int:
   """Run the importer over ``run`` with a tqdm progress bar; return the count
   of episodes written. Surfaces missing-artifact errors as ``ClickException``."""
@@ -100,6 +102,7 @@ def _import_dataset(
     f"with_ee_pos={run.params.get('with_ee_pos', False)}, "
     f"with_object_pose={run.params.get('with_object_pose', False)}, "
     f"tags={list(tags)}, name_prefix={name_prefix!r}, "
+    f"jobs={jobs}, devices={devices or 'configured'}, "
     f"episodes={'all' if episode_filter is None else sorted(episode_filter)})"
   )
 
@@ -107,7 +110,8 @@ def _import_dataset(
   try:
     for ep_idx, out_path in tqdm(
       import_dataset(run, output_dir, format=format, tags=tags,
-                     name_prefix=name_prefix, debug_dir=debug_dir),
+                     name_prefix=name_prefix, debug_dir=debug_dir,
+                     jobs=jobs, devices=devices),
       desc="Episodes",
       total=len(episode_filter) if episode_filter is not None else None,
     ):
@@ -117,6 +121,31 @@ def _import_dataset(
     raise click.ClickException(str(e))
   click.echo(f"Done. Wrote {count} episodes.")
   return count
+
+
+def _resolve_jobs_and_devices(
+  jobs: int, gpus: str | None, n_episodes: int,
+) -> tuple[int, list[str] | None]:
+  """Turn the ``--jobs`` / ``--gpus`` CLI flags into ``(jobs, devices)``.
+
+  ``jobs == 0`` ⇒ auto: ``min(cpu_count - 2, n_episodes)`` (leave headroom for
+  the producer + decode threads), floored at 1. ``--gpus`` is either an integer
+  count (``"2"`` → ``["cuda:0", "cuda:1"]``) or an explicit comma-separated
+  device list (``"cuda:0,cuda:3"``). ``None`` leaves the configured device
+  untouched (one producer)."""
+  import os
+
+  if jobs == 0:
+    jobs = max(1, min((os.cpu_count() or 2) - 2, n_episodes))
+
+  devices: list[str] | None
+  if gpus is None:
+    devices = None
+  elif gpus.strip().isdigit():
+    devices = [f"cuda:{i}" for i in range(int(gpus))]
+  else:
+    devices = [d.strip() for d in gpus.split(",") if d.strip()]
+  return jobs, devices
 
 
 @click.command("import-lerobot")
@@ -166,10 +195,22 @@ def _import_dataset(
                    "the LeRobot-decoded frames.images stack. Use with "
                    "scripts/analyze_video_sync.py to diagnose video / mask "
                    "frame alignment.")
+@click.option("--jobs", "-j", default=1, type=int, metavar="N",
+              help="Number of CPU worker processes for the object-pose fit "
+                   "(default 1 = serial, byte-identical output). N>1 pipelines "
+                   "GPU segmentation against the CPU pose fit across episodes; "
+                   "N=0 auto-picks min(cpu_count-2, n_episodes). Per-episode "
+                   "results are identical regardless of N.")
+@click.option("--gpus", "gpus", default=None, type=str, metavar="N|LIST",
+              help="GPU producer devices for parallel import (with --jobs>1). "
+                   "Either a count (2 → cuda:0,cuda:1) or an explicit list "
+                   "(cuda:0,cuda:3). One producer thread is pinned per device, "
+                   "raising the segmentation throughput ceiling ~Nx. Default: "
+                   "the configured object_localization.device, one producer.")
 @click.pass_context
 def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
                        with_ee_pos, with_object_pose, tags, name_prefix,
-                       episode_config_path, doctor, debug):
+                       episode_config_path, doctor, debug, jobs, gpus):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
 
   Loads the dataset through ``LeRobotDataset`` (which decodes video frames
@@ -205,5 +246,13 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
     ctx.exit(0 if ok else 1)
   else:
     debug_dir = str(Path(output) / "debug") if debug else None
+    n_episodes = len(run.slices)
+    resolved_jobs, devices = _resolve_jobs_and_devices(jobs, gpus, n_episodes)
+    # Debug mode interleaves per-episode stdout and is meant for inspecting one
+    # episode at a time; force serial so its output stays readable and ordered.
+    if debug and resolved_jobs != 1:
+      click.echo("--debug: forcing --jobs 1 (parallel stdout would interleave).")
+      resolved_jobs, devices = 1, None
     _import_dataset(run, output, format=fmt, tags=tuple(tags),
-                    name_prefix=name_prefix, debug_dir=debug_dir)
+                    name_prefix=name_prefix, debug_dir=debug_dir,
+                    jobs=resolved_jobs, devices=devices)

@@ -33,6 +33,8 @@ from typing import Any, Callable, Iterator, TypeAlias, Union
 import h5py  # type: ignore[import-untyped]
 import numpy as np
 
+from chuck_dreamer.common.episode import Episode as EpisodeData
+
 
 # ---------------------------------------------------------------------------
 # Types
@@ -42,7 +44,12 @@ import numpy as np
 ProgressCallback: TypeAlias = Callable[[int, int, Path], None]
 Progress: TypeAlias = Union[bool, ProgressCallback]
 
-RawEpisode: TypeAlias = dict[str, Any]
+# A loaded episode's array container: the field-attributed
+# :class:`~chuck_dreamer.common.episode.Episode` shared with the write side.
+# It is a ``Mapping`` returning values, so every consumer that indexes it by
+# name (``raw["image"]``, ``raw.get``, ``"x" in raw``) is unchanged from when
+# this was a bare dict; loading just tags each field with its kind/persist.
+RawEpisode: TypeAlias = EpisodeData
 # Processor type — applied inside the loader worker by stream_processed()
 # so raw images never travel back to the main process. Kept as a generic
 # callable on RawEpisode to avoid pulling in episode_processor here.
@@ -77,8 +84,14 @@ _HDF5_DATASET = {
 
 
 def _load_hdf5_episode(path: str | Path) -> RawEpisode:
-  """Read one HDF5 episode written by ``HDF5EpisodeWriter``."""
-  raw: RawEpisode = {}
+  """Read one HDF5 episode written by ``HDF5EpisodeWriter`` into an
+  :class:`~chuck_dreamer.common.episode.Episode`.
+
+  The arrays are gathered into a plain dict first (one h5py read per
+  dataset), then wrapped via :meth:`Episode.from_arrays`, which tags each
+  field with its kind/persist from the registry — the symmetric inverse of
+  the field-kind-driven writer."""
+  raw: dict[str, Any] = {}
   with h5py.File(path, "r") as f:
     for key, dataset in _HDF5_DATASET.items():
       raw[key] = np.asarray(f[dataset][()])
@@ -111,7 +124,7 @@ def _load_hdf5_episode(path: str | Path) -> RawEpisode:
         raw["tags"] = tuple(
           t.decode("utf-8") if isinstance(t, bytes) else str(t) for t in raw_tags
         )
-  return raw
+  return EpisodeData.from_arrays(raw)
 
 
 def _collect_rerun_chunks(path: str | Path) -> tuple[dict[str, list[Any]], dict[str, dict]]:
@@ -246,7 +259,12 @@ def _durations_to_seconds(arrow_col: Any) -> np.ndarray:
 
 
 def _load_rerun_episode(path: str | Path) -> RawEpisode:
-  """Read one Rerun ``.rrd`` episode written by ``RerunEpisodeWriter``."""
+  """Read one Rerun ``.rrd`` episode written by ``RerunEpisodeWriter`` into an
+  :class:`~chuck_dreamer.common.episode.Episode`.
+
+  Fields are gathered into a plain dict (the ``_load_rerun_*`` helpers mutate
+  it by name), then wrapped via :meth:`Episode.from_arrays` so each field is
+  tagged with its kind/persist — symmetric with the writer."""
   by_entity, static = _collect_rerun_chunks(path)
 
   def _scalars(entity: str) -> np.ndarray:
@@ -254,7 +272,7 @@ def _load_rerun_episode(path: str | Path) -> RawEpisode:
       raise KeyError(f"entity {entity!r} not found in {path}")
     return _ordered_scalar_column(by_entity[entity])
 
-  raw: RawEpisode = {}
+  raw: dict[str, Any] = {}
   has_joint = "/joint_action" in by_entity
   has_ee    = "/ee_action"    in by_entity
   if has_joint:
@@ -276,12 +294,12 @@ def _load_rerun_episode(path: str | Path) -> RawEpisode:
   _load_rerun_segmentation(by_entity, raw)
   _load_rerun_metadata(static, raw)
 
-  return raw
+  return EpisodeData.from_arrays(raw)
 
 
 def _load_rerun_camera(
   by_entity: dict[str, list[Any]], static: dict[str, dict],
-  raw: RawEpisode, path: str | Path,
+  raw: dict[str, Any], path: str | Path,
 ) -> None:
   """Decode the camera RGB stack + per-step timestamps.
 
@@ -340,7 +358,7 @@ def _ordered_video_times(record_batches: list[Any]) -> np.ndarray:
   return times[order]
 
 
-def _load_rerun_metadata(static: dict[str, dict], raw: RawEpisode) -> None:
+def _load_rerun_metadata(static: dict[str, dict], raw: dict[str, Any]) -> None:
   """Pull whole-episode sidecar fields out of static ``/metadata/*`` entities.
 
   Metadata is logged as static :class:`rr.TextDocument` cells on
@@ -433,7 +451,7 @@ def _ordered_raw_seg_masks(record_batches: list[Any]) -> np.ndarray:
   return masks[order]
 
 
-def _load_rerun_segmentation(by_entity: dict[str, list[Any]], raw: RawEpisode) -> None:
+def _load_rerun_segmentation(by_entity: dict[str, list[Any]], raw: dict[str, Any]) -> None:
   """Pull segmentation masks (if present) out of a rerun recording's entities.
 
   Mirrors :class:`RerunEpisodeWriter`'s log layout: ``/camera/seg/{name}`` for
@@ -537,9 +555,16 @@ def _extract_metadata(raw: RawEpisode) -> dict[str, Any]:
 class Episode:
   """One episode loaded from disk: arrays + provenance.
 
-  ``data`` carries the per-step arrays in the same flat-dict shape the
-  processors in :mod:`.episode_processor` consume. ``metadata`` carries
-  whole-episode sidecar fields the writers serialize separately.
+  ``data`` is the field-attributed
+  :class:`~chuck_dreamer.common.episode.Episode` the readers return — the same
+  container the write side fills. It is a ``Mapping`` returning values, so the
+  processors in :mod:`.episode_processor` (and every other ``data[...]``
+  consumer) read it exactly as they read the old flat dict. ``metadata``
+  carries whole-episode sidecar fields the writers serialize separately.
+
+  This handle is the read-side *provenance wrapper* (path / format / metadata);
+  the array container itself is :class:`EpisodeData`. They stay separate: a
+  handle has a source, a container is just fields.
 
   ``Episode`` instances are read-only — load once, share freely.
   """

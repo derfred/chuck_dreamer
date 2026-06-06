@@ -122,11 +122,12 @@ def test_pipeline_sets_episode_index_on_context():
   assert run.ctx.episode_index == 7
 
 
-def test_pipeline_clears_masks_on_construction():
+def test_context_carries_no_episode_scratch():
+  # Inter-stage episode state (e.g. SAM2 masks) lives on the Episode now, not
+  # the RunContext — the context is purely run-scoped. Guard that the old
+  # per-episode mask cache is gone so concurrent producers can't collide on it.
   run = Run(None, _FakeSpec(), {"with_ee_pos": True, "with_object_pose": False})
-  run.ctx.masks["object"] = ["stale"]
-  run.pipeline(1)
-  assert run.ctx.masks == {}
+  assert not hasattr(run.ctx, "masks")
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from ..common.episode import Episode
 from .observation_image import ObservationImage
 from .scene_config import SceneConfig
 from .step_info import StepInfo, stack_step_infos
@@ -103,15 +104,24 @@ def _stack_image_obs(image_obs_list: list[ObservationImage]) -> dict[str, np.nda
   return out
 
 
-def _stack_steps(steps: list[dict[str, Any]], action_kind: str) -> RawEpisode:
-  """Stack per-step records into T-stacked arrays, plus the action under its kind name."""
-  out: RawEpisode = {
+def _stack_steps(steps: list[dict[str, Any]], action_kind: str) -> Episode:
+  """Stack per-step records into a T-stacked :class:`Episode`, plus the action
+  under its kind name.
+
+  The per-step arrays + segmentation masks become normal (persisted) episode
+  fields; ``step_info`` is attached as a non-persisted ("scratch") field — it is
+  consumed in-memory by the replay buffer but never written to a recording, so
+  it rides on the episode without reaching the writers."""
+  arrays: dict[str, Any] = {
     k: np.stack([np.asarray(s[k]) for s in steps], axis=0) for k in _SHARED_KEYS
   }
-  out.update(_stack_image_obs([s["image_obs"] for s in steps]))
-  out[action_kind] = np.stack([np.asarray(s["action"]) for s in steps], axis=0)
-  out["step_info"] = stack_step_infos([s["step_info"] for s in steps])
-  return out
+  arrays.update(_stack_image_obs([s["image_obs"] for s in steps]))
+  arrays[action_kind] = np.stack([np.asarray(s["action"]) for s in steps], axis=0)
+
+  episode = Episode.from_arrays(arrays)
+  episode.set("step_info", stack_step_infos([s["step_info"] for s in steps]),
+              persist=False)
+  return episode
 
 
 class EpisodeCollector:
@@ -130,14 +140,14 @@ class EpisodeCollector:
     self.policy.reset(scene)
     return scene
 
-  def run(self) -> tuple[RawEpisode | None, str]:
+  def run(self) -> tuple[Episode | None, str]:
     """Roll one episode using ``scene.max_steps`` as the cap.
 
-    Returns ``(episode, outcome)`` where ``episode`` is a ``RawEpisode``
-    (dict of T-stacked arrays) or ``None`` if no steps were collected.
-    Catches exceptions raised during ``policy.act`` or ``env.step`` (e.g.
-    IK non-convergence) and reports ``"crashed"`` with whatever data was
-    collected up to that point.
+    Returns ``(episode, outcome)`` where ``episode`` is an :class:`Episode`
+    (T-stacked array fields plus a non-persisted ``step_info``) or ``None`` if
+    no steps were collected. Catches exceptions raised during ``policy.act`` or
+    ``env.step`` (e.g. IK non-convergence) and reports ``"crashed"`` with
+    whatever data was collected up to that point.
     """
     assert self.scene is not None, "Call reset() before run()."
 

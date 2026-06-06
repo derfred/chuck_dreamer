@@ -19,11 +19,14 @@ The stage produces:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from .base import Requirement, RunContext, as_uint8_hwc
+
+if TYPE_CHECKING:
+  from chuck_dreamer.common.episode import Episode
 
 # Pose-fit knobs (mirroring the notebook).
 _INIT_DEPTH_M = 0.8       # seed depth along the camera ray, metres
@@ -151,6 +154,8 @@ class ObjectPoseStage:
   produces: tuple[str, ...] = (
     "object_xy", "object_gap_too_long", "object_mesh_overlay")
   requires: tuple[str, ...] = ("segment:object",)
+  # CPU-bound per-frame Nelder-Mead fit; runs in the worker pool.
+  lane: str = "worker"
 
   def __init__(self, ctx: RunContext) -> None:
     self.ctx = ctx
@@ -171,7 +176,7 @@ class ObjectPoseStage:
         "to a valid .obj/.ply"),
     ]
 
-  def apply(self, episode: dict[str, Any], metadata: dict[str, Any]) -> None:
+  def apply(self, episode: "Episode", metadata: dict[str, Any]) -> None:
     images = episode.get("image")
     if images is None or len(images) == 0:
       return
@@ -183,10 +188,14 @@ class ObjectPoseStage:
       raise RuntimeError("object_pose: metadata['config']['source_repo'] missing")
     episode_index = int(cfg.get("episode_index", 0))
 
-    masks = self.ctx.masks.get("object")
+    # Masks come from segment:object as a non-persisted ("scratch") episode
+    # field. Because they live on the episode (not the ctx), they cross the
+    # parallel importer's process boundary automatically with the rest of the
+    # episode — no special handoff, same read in the serial and parallel paths.
+    masks = episode.get("object_masks")
     if masks is None:
       raise RuntimeError(
-        "object_pose: no object masks on context — segment:object must "
+        "object_pose: no object masks on episode — segment:object must "
         "run first")
 
     imgs = as_uint8_hwc(images)

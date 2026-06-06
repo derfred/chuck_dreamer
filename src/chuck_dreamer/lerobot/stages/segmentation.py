@@ -11,12 +11,15 @@ from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from chuck_dreamer.config import lookup_device
 import numpy as np
 
 from .base import Requirement, RunContext
+
+if TYPE_CHECKING:
+  from chuck_dreamer.common.episode import Episode
 
 SAM2_MODEL = "facebook/sam2-hiera-large"
 
@@ -86,6 +89,8 @@ class SegmentationStage:
   name = "segment:object"
   produces: tuple[str, ...] = ("segmentation_target", "object_uv")
   requires: tuple[str, ...] = ()
+  # SAM2 runs on the GPU; this is the producer's GPU work.
+  lane: str = "producer"
 
   def __init__(self, ctx: RunContext) -> None:
     self.ctx = ctx
@@ -214,7 +219,7 @@ class SegmentationStage:
         check=frame0_prompt_present),
     ]
 
-  def apply(self, episode: dict[str, Any], metadata: dict[str, Any]) -> None:
+  def apply(self, episode: "Episode", metadata: dict[str, Any]) -> None:
     T = metadata.get("number_of_frames")
     if T is None or T == 0:
       return
@@ -236,7 +241,7 @@ class SegmentationStage:
     with self._video_as_jpgs(metadata) as jpg_dir:
       masks = self._segment_jpgs(jpg_dir, keyframes)
 
-    self.ctx.masks["object"] = masks
+    episode.set("object_masks", masks, persist=False)
 
     seg_and_uv = _masks_to_seg_and_uv(T, masks) if masks is not None else None
     if seg_and_uv is not None:

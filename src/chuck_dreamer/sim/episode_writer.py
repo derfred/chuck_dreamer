@@ -25,9 +25,31 @@ from typing import Any
 import h5py  # type: ignore[import-untyped]
 import numpy as np
 
+from chuck_dreamer.common.episode import Episode, FieldKind
+
 logger = logging.getLogger(__name__)
 
 SUPPORTED_FORMATS = ("hdf5", "rerun")
+
+# Per-step fields whose HDF5 dataset name differs from the field name. Every
+# other persisted SCALAR/ACTION field is written to a dataset of its own name.
+# (Mirrors the reader's ``_HDF5_DATASET`` map so the round-trip lines up.)
+_HDF5_DATASET_ALIAS = {
+    "image":     "images",
+    "reward":    "rewards",
+    "timestamp": "timestamps",
+}
+
+
+def _as_episode(episode: Episode | dict[str, Any]) -> Episode:
+    """Coerce a writer input to an :class:`Episode`.
+
+    Already-:class:`Episode` inputs pass through (keeping their per-field
+    kind/persist metadata); a plain dict is wrapped, inferring each field's
+    disposition from its name. Lets the writers be field-kind-driven while every
+    legacy caller that still passes a bare dict keeps working unchanged."""
+    return episode if isinstance(episode, Episode) else Episode.from_arrays(episode)
+
 
 # Filename prefixes — different kinds of episodes live alongside one
 # another in the same dump dir, so :class:`EpisodeDataset` can find sim
@@ -269,69 +291,56 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
     file_extension = "hdf5"
 
     @staticmethod
-    def _write_segmentation_hdf5(f, episode: dict[str, Any]) -> None:
-        """Persist any segmentation_* arrays in ``episode`` under ``segmentation/``.
+    def _write_fields_hdf5(f, episode: Episode) -> None:
+        """Persist the episode's per-step fields, dispatching on each field's
+        :class:`FieldKind` to reproduce the historical layout exactly:
 
-        No-op for episodes that don't carry masks (e.g. lerobot imports).
-        Mask names are stored without the ``segmentation_`` prefix.
+          * ``IMAGE`` / ``MASK`` → gzip-compressed (``images`` / under
+            ``segmentation/<name>`` with the ``segmentation_`` prefix stripped),
+          * ``SCALAR`` / ``ACTION`` → an uncompressed dataset named by the field
+            (``reward``→``rewards`` etc. via :data:`_HDF5_DATASET_ALIAS`),
+          * ``OVERLAY`` (Rerun-only) and ``SCRATCH`` → not written.
+
+        Field kinds replace the old hardcoded key lists, so a new persisted
+        field needs no edit here — it's written per its declared kind.
         """
-        seg_items = {
-            k[len("segmentation_"):]: v
-            for k, v in episode.items()
-            if k.startswith("segmentation_")
-        }
-        if not seg_items:
-            return
-        seg_grp = f.create_group("segmentation")
-        for name, mask in seg_items.items():
-            seg_grp.create_dataset(
-                name,
-                data=np.asarray(mask, dtype=bool),
-                compression="gzip",
-                compression_opts=4,
-            )
+        seg_grp = None
+        for name, fld in episode.persisted():
+            if fld.kind is FieldKind.OVERLAY:
+                continue  # Rerun-only; HDF5 has never carried the mesh overlay.
+            if fld.kind is FieldKind.IMAGE:
+                f.create_dataset(
+                    _HDF5_DATASET_ALIAS.get(name, name),
+                    data=np.asarray(fld.value, dtype=np.uint8),
+                    compression="gzip", compression_opts=4)
+            elif fld.kind is FieldKind.MASK:
+                if seg_grp is None:
+                    seg_grp = f.create_group("segmentation")
+                seg_grp.create_dataset(
+                    name[len("segmentation_"):],
+                    data=np.asarray(fld.value, dtype=bool),
+                    compression="gzip", compression_opts=4)
+            else:  # SCALAR / ACTION
+                f.create_dataset(
+                    _HDF5_DATASET_ALIAS.get(name, name),
+                    data=np.asarray(fld.value))
 
     def write_episode(
         self,
-        episode: dict[str, np.ndarray],
+        episode: Episode | dict[str, np.ndarray],
         metadata: dict[str, Any] | None = None,
         *,
         name_suffix: str,
     ) -> Path:
+        episode = _as_episode(episode)
         actions = _collect_actions(episode)
         T = next(iter(actions.values())).shape[0]
         if T == 0:
             raise ValueError("episode must not be empty")
 
-        rewards    = np.asarray(episode["reward"],     dtype=np.float32)
-        timestamps = np.asarray(episode["timestamp"],  dtype=np.float32)
-        joint_qpos = np.asarray(episode["joint_qpos"], dtype=np.float32)
-        ee_pos     = np.asarray(episode["ee_pos"],     dtype=np.float32)
-        ee_quat    = np.asarray(episode["ee_quat"],    dtype=np.float32)
-        object_xy  = np.asarray(episode["object_xy"],  dtype=np.float32)
-        images     = np.asarray(episode["image"],      dtype=np.uint8)
-
         ep_path = self._path_for(EPISODE_FILENAME_PREFIX, name_suffix)
         with h5py.File(ep_path, "w") as f:
-            f.create_dataset("images",     data=images,  compression="gzip", compression_opts=4)
-            for kind, arr in actions.items():
-                f.create_dataset(kind, data=arr)
-            f.create_dataset("rewards",    data=rewards)
-            f.create_dataset("timestamps", data=timestamps)
-            f.create_dataset("joint_qpos", data=joint_qpos)
-            f.create_dataset("ee_pos",     data=ee_pos)
-            f.create_dataset("ee_quat",    data=ee_quat)
-            f.create_dataset("object_xy",  data=object_xy)
-            object_uv = episode.get("object_uv")
-            if object_uv is not None:
-                f.create_dataset("object_uv", data=np.asarray(object_uv, dtype=np.float32))
-            object_gap = episode.get("object_gap_too_long")
-            if object_gap is not None:
-                f.create_dataset(
-                    "object_gap_too_long",
-                    data=np.asarray(object_gap, dtype=np.bool_))
-
-            self._write_segmentation_hdf5(f, episode)
+            self._write_fields_hdf5(f, episode)
 
             meta_grp = f.create_group("metadata")
             if metadata is not None:
@@ -533,13 +542,19 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         rgba[m] = cls._SEG_RGBA.get(name, (0, 200, 255, 110))
         return rgba
 
+    # Per-step fields the Rerun writer consumes *structurally* rather than as
+    # generic scalar entities: ``image`` becomes the video, ``timestamp`` drives
+    # the time axis. Everything else SCALAR/ACTION is logged as ``rr.Scalars``.
+    _RERUN_STRUCTURAL = ("image", "timestamp")
+
     def write_episode(
         self,
-        episode: dict[str, np.ndarray],
+        episode: Episode | dict[str, np.ndarray],
         metadata: dict[str, Any] | None = None,
         *,
         name_suffix: str,
     ) -> Path:
+        episode = _as_episode(episode)
         actions = _collect_actions(episode)
         T = next(iter(actions.values())).shape[0]
         if T == 0:
@@ -570,36 +585,27 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             })
         self._log_metadata(rec, props)
 
-        images     = np.asarray(episode["image"],      dtype=np.uint8)
-        rewards    = np.asarray(episode["reward"],     dtype=np.float32)
-        timestamps = np.asarray(episode["timestamp"],  dtype=np.float32)
-        joint_qpos = np.asarray(episode["joint_qpos"], dtype=np.float32)
-        ee_pos     = np.asarray(episode["ee_pos"],     dtype=np.float32)
-        ee_quat    = np.asarray(episode["ee_quat"],    dtype=np.float32)
-        object_xy  = np.asarray(episode["object_xy"],  dtype=np.float32)
-        object_uv_raw = episode.get("object_uv")
-        object_uv  = (
-          np.asarray(object_uv_raw, dtype=np.float32)
-          if object_uv_raw is not None else None
-        )
-        object_gap_raw = episode.get("object_gap_too_long")
-        object_gap = (
-          np.asarray(object_gap_raw, dtype=np.bool_)
-          if object_gap_raw is not None else None
-        )
+        timestamps = np.asarray(episode["timestamp"], dtype=np.float32)
+        images     = np.asarray(episode["image"],     dtype=np.uint8)
 
-        seg_masks = {
-            name: episode[f"segmentation_{name}"]
-            for name in ("target", "goal", "arm", "background")
-            if episode.get(f"segmentation_{name}") is not None
-        }
-
-        # Optional fitted-mesh overlay: a per-frame binary silhouette the
-        # object-pose stage fills. Tinted + logged as transparent PNGs under
-        # the camera/ space so the viewer composites it over camera/video.
-        mesh_overlay = episode.get("object_mesh_overlay")
-        if mesh_overlay is not None:
-            mesh_overlay = np.asarray(mesh_overlay)
+        # Bucket the persisted per-step fields by kind. SCALAR/ACTION fields
+        # (minus the structural ones) become ``rr.Scalars`` entities named by
+        # the field; MASK fields become tinted PNG overlays under camera/seg/;
+        # the OVERLAY field becomes camera/mesh_overlay. This dispatch replaces
+        # the old hardcoded per-field blocks, so a new field is logged per its
+        # declared kind with no edit here.
+        scalar_fields: dict[str, np.ndarray] = {}
+        seg_masks: dict[str, np.ndarray] = {}
+        mesh_overlay: np.ndarray | None = None
+        for name, fld in episode.persisted():
+            if fld.kind in (FieldKind.SCALAR, FieldKind.ACTION):
+                if name in self._RERUN_STRUCTURAL:
+                    continue
+                scalar_fields[name] = np.asarray(fld.value)
+            elif fld.kind is FieldKind.MASK:
+                seg_masks[name[len("segmentation_"):]] = np.asarray(fld.value)
+            elif fld.kind is FieldKind.OVERLAY:
+                mesh_overlay = np.asarray(fld.value)
 
         # RGB rides as one encoded video blob (logged once, static) plus a
         # per-step VideoFrameReference, instead of a raw rr.Image per frame —
@@ -615,20 +621,19 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             rec.set_time("time", duration=float(timestamps[i]))
 
             rec.log("camera/video", rr.VideoFrameReference(seconds=frame_pts[i]))
-            for kind, arr in actions.items():
-                rec.log(kind, rr.Scalars(arr[i].tolist()))
-            rec.log("reward",       rr.Scalars(float(rewards[i])))
-            rec.log("joint_qpos",   rr.Scalars(joint_qpos[i].tolist()))
-            rec.log("ee_pos",       rr.Scalars(ee_pos[i].tolist()))
-            rec.log("ee_quat",      rr.Scalars(ee_quat[i].tolist()))
-            rec.log("object_xy",    rr.Scalars(object_xy[i].tolist()))
-            if object_uv is not None:
-                rec.log("object_uv",  rr.Scalars(object_uv[i].tolist()))
-            if object_gap is not None:
-                rec.log("object_gap_too_long", rr.Scalars(int(object_gap[i])))
+            for name, arr in scalar_fields.items():
+                cell = arr[i]
+                if cell.ndim:
+                    value: Any = cell.tolist()
+                elif cell.dtype == np.bool_:
+                    value = int(cell)  # match the old int() cast for gap flags
+                else:
+                    value = cell.item()
+                rec.log(name, rr.Scalars(value))
 
             # Masks ride as transparent RGBA PNGs (tinted where set) so they
-            # composite over the video, rather than raw SegmentationImage.
+            # composite over the video, rather than raw SegmentationImage. Masks
+            # whose name has no dedicated colour fall back to the target tint.
             for name, mask in seg_masks.items():
                 rec.log(f"camera/seg/{name}",
                         rr.EncodedImage(

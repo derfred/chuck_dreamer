@@ -85,6 +85,21 @@ class Run:
   def dataset_id(self) -> str:
     return self.spec.dataset_id
 
+  def set_object_localization_device(self, device: str) -> None:
+    """Pin this run's SAM2 segmentation to ``device`` (e.g. ``"cuda:1"``).
+
+    Used by the parallel importer to give each GPU producer its own device.
+    Mutates *this run's* config in place; producers each hold their own
+    ``Run`` (with a copied config — see the parallel orchestrator), so one
+    producer's device never leaks into another's. The segmentation stage reads
+    the value back through ``lookup_device(ctx.config,
+    "object_localization.device")``."""
+    from omegaconf import OmegaConf
+    if self.ctx.config is None:
+      return
+    OmegaConf.update(
+      self.ctx.config, "object_localization.device", device, force_add=True)
+
   # ---- slice / video-key resolution (offline ``meta/`` sidecars) ----------
   @cached_property
   def _resolved(self) -> tuple[list[EpisodeSlice], str]:
@@ -154,12 +169,11 @@ class Run:
     """The dependency-ordered stages for one episode, bound to this run's
     shared context and stage registry.
 
-    Sets the context's episode index and clears the per-episode mask cache so
-    a stage never sees a prior episode's masks, then resolves the enabled
-    flags into a dependency-ordered list (auto-pulling each stage's
-    ``requires``)."""
+    Sets the context's episode index, then resolves the enabled flags into a
+    dependency-ordered list (auto-pulling each stage's ``requires``). Inter-stage
+    mask state lives on the :class:`Episode` now, so there is no per-episode ctx
+    cache to reset here."""
     self.ctx.episode_index = episode_index
-    self.ctx.masks.clear()
     # Expose this run's slices (video window / MP4 path) to stages so a
     # segmentation stage can decode the video without re-reading metadata.
     if not self.ctx.slices_by_index:
@@ -171,3 +185,15 @@ class Run:
     if self.params.get("with_object_pose", False):
       enabled.add("object_pose")
     return resolve_stages(enabled, self.ctx, registry=self._registry)
+
+  def lane_pipeline(self, episode_index: int, lane: str) -> list[Stage]:
+    """The subset of :meth:`pipeline` whose stages run on ``lane``, in the
+    same dependency order.
+
+    Used by the parallel importer to split each episode's stages at the
+    GPU/CPU boundary: the ``"producer"`` lane (decode-adjacent + SAM2
+    segmentation) runs on the GPU producer, the ``"worker"`` lane (the
+    object-pose fit) runs in the CPU pool. Because :meth:`pipeline` already
+    sets the context's episode index and slice map, this just filters its
+    result — call it once per lane for the same episode."""
+    return [s for s in self.pipeline(episode_index) if getattr(s, "lane", "worker") == lane]

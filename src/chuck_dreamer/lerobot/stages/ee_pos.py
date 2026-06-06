@@ -18,6 +18,7 @@ class EePosStage:
   name = "ee_pos"
   produces: tuple[str, ...] = ("joint_qpos", "ee_pos", "ee_quat", "ee_action")
   requires: tuple[str, ...] = ()
+  lane: str = "producer"
 
   def __init__(self, ctx: RunContext) -> None:
     self.ctx = ctx

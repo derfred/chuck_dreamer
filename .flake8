@@ -9,3 +9,6 @@ exclude = .git,__pycache__,.venv,src/fessel
 extend-ignore = E203, W503, E111, E114, E116, E117, E121, E124, E127, E128, E131, E221, E251, E261, E272
 per-file-ignores =
     src/chuck_dreamer/sim/scene_builder.py:E501
+    # Reuses the ``fake_repo`` pytest fixture imported from test_lerobot_import;
+    # using it as a test-arg reads as an F811 redefinition (expected pattern).
+    tests/test_lerobot_parallel.py:F811

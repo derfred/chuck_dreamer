@@ -15,11 +15,14 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import numpy as np
 
 from ...common import FK_MODEL_PATH
+
+if TYPE_CHECKING:
+  from chuck_dreamer.common.episode import Episode
 
 
 @dataclass(frozen=True)
@@ -46,14 +49,14 @@ class RunContext:
   """Run-level shared state, reused across every episode's pipeline.
 
   Replaces the module-level ``_ensure_*`` caches that used to live in
-  ``pipeline.py``: the FK evaluator, the object-localization runtime
-  config, and the per-episode mask cache (so the object-pose stage can
-  read the masks the segmentation stage produced) all hang off one object
-  with a lifetime of one import run.
+  ``pipeline.py``: the FK evaluator and the object-localization runtime
+  config hang off one object with a lifetime of one import run.
 
   Stages are bound to a context at construction and read these caches via
-  the accessor methods below. The per-episode ``masks`` cache is reset by
-  :class:`Run` each time it builds an episode's stage list.
+  the accessor methods below. Inter-stage *episode* state (e.g. the SAM2 masks
+  handed from segmentation to object-pose) lives on the :class:`Episode`, not
+  here — this context is purely run-scoped, so concurrent producers in the
+  parallel importer can each hold one without colliding.
   """
   source_repo: str
   config: Any = None
@@ -61,8 +64,6 @@ class RunContext:
   _episode_index: int = 0
   _fk: Any | None = None
   _ol_cfg: Any | None = None
-  # per-episode, keyed by segmentation target name -> [mask | None]
-  masks: dict[str, list[Any]] = field(default_factory=dict)
   # this run's selected episode slices, keyed by episode_index; populated
   # by ``Run`` so stages can read an episode's video window / MP4 path
   # without re-opening ``LeRobotDatasetMetadata``.
@@ -80,10 +81,9 @@ class RunContext:
 
   @contextmanager
   def for_episode(self, episode_index: int) -> Iterator[None]:
-    """Context manager for one episode's pipeline: sets the episode index and
-    clears the per-episode mask cache."""
+    """Context manager for one episode's pipeline: sets the episode index for
+    the duration and restores it afterward."""
     self._episode_index = episode_index
-    self.masks.clear()
     try:
       yield
     finally:
@@ -147,10 +147,17 @@ class Stage(Protocol):
   name: str
   produces: tuple[str, ...]
   requires: tuple[str, ...]
+  # Which execution lane this stage belongs to when the importer runs in
+  # parallel. ``"producer"`` stages (decode-adjacent + the GPU SAM2
+  # segmentation) run on the single GPU producer per device; ``"worker"``
+  # stages (the CPU-bound Nelder-Mead object-pose fit) run in the CPU worker
+  # pool downstream of the queue handoff. The serial path ignores this; all
+  # stages just run in dependency order in one process.
+  lane: str
   ctx: RunContext
 
   def requirements(self) -> list[Requirement]: ...
-  def apply(self, episode: dict[str, Any], metadata: dict[str, Any]) -> None: ...
+  def apply(self, episode: "Episode", metadata: dict[str, Any]) -> None: ...
 
 
 def as_uint8_hwc(images: Any) -> np.ndarray:
