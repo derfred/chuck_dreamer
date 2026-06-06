@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import pickle
 from collections import deque
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -374,7 +375,9 @@ class ReplayBuffer:
   # Load sim-collected episodes
   # ---------------------------------------------------------------------
 
-  def add_sim_episode(self, raw: dict[str, Any]) -> None:
+  def add_sim_episode(self, raw: Mapping[str, Any]) -> None:
+    # raw may be a plain dict (live sim collection) or an Episode Mapping
+    # container (replayed recording); the processor reads it without mutating.
     episode = self._sim_processor(raw)
     self.add_episode(episode)
 

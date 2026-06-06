@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -303,7 +304,7 @@ class OnlineEvaluator:
 
   def _extract_probe_record(
     self,
-    raw:     dict[str, Any],
+    raw:     Mapping[str, Any],
     result:  RolloutOutputs,
     burn_in: int,
   ) -> dict[str, np.ndarray] | None:

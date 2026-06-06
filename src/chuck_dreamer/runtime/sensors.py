@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -90,19 +90,19 @@ class SimCameraSensor:
       raise TypeError(
         f"SimCameraSensor needs a MuJoCo-style backend (model/data/physics_lock); "
         f"{type(backend).__name__} does not")
-    self.name = name
-    self._backend = backend
-    self._camera = camera
-    self._height = int(height)
-    self._width = int(width)
-    self._renderer = None
-    self._scratch = None
-    self._started = False
-    self._owner_ident = None   # thread that built the GL context
+    self.name                     = name
+    self._backend                 = backend
+    self._camera                  = camera
+    self._height                  = int(height)
+    self._width                   = int(width)
+    self._renderer: Any           = None
+    self._scratch: Any            = None
+    self._started                 = False
+    self._owner_ident: int | None = None  # thread that built the GL context
 
   @classmethod
   def from_config(cls, cfg, *, backend, **params) -> "SimCameraSensor":
-    render_size = params.pop("render_size", None)
+    render_size   = params.pop("render_size", None)
     height, width = _parse_hw(render_size, default=(240, 320))
     return cls(backend, height=height, width=width, **params)
 
@@ -162,7 +162,7 @@ class WebcamSensor:
     self._height                          = int(height)
     self._width                           = int(width)
     self._period                          = 1.0 / float(poll_rate_hz)
-    self._cap                             = None
+    self._cap: Any                        = None  # cv2.VideoCapture (untyped import)
     self._lock                            = threading.Lock()
     self._latest: np.ndarray | None       = None
     self._stop                            = threading.Event()

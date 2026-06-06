@@ -24,6 +24,8 @@ the previous pose (held as module state, cleared each episode by ``reset``).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from .modalities import IMAGE, OBJECT_UV, OBJECT_XY
@@ -65,10 +67,10 @@ class ObjectLocalizerModule:
     ol = init_from_config(cfg)
     # Strict load — raises CalibrationMissingError if intrinsics/extrinsics are
     # not cached (calibration is the M4 deliverable; surface that here).
-    calibration = CameraCalibration.load(ol.cache_dir, str(dataset_id))
+    calibration = CameraCalibration.load(Path(ol.cache_dir), str(dataset_id))
     estimator = ObjectPoseEstimator(
       calibration=calibration,
-      mesh_path=ol.mesh_path,
+      mesh_path=Path(ol.mesh_path),
       config={
         "sam2_checkpoint": ol.sam2_checkpoint,
         "use_sam2": ol.use_sam2,

@@ -271,7 +271,7 @@ def import_dataset_parallel(
   workers: list[mp.process.BaseProcess] = []
   if has_worker_stages:
     for _ in range(jobs):
-      p = mp_ctx.Process(
+      p: mp.process.BaseProcess = mp_ctx.Process(
         target=_worker_main,
         args=(run.ctx.config, run.dataset_id, output_dir, format,
               worker_stage_names, task_q, result_q),

@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -99,7 +100,7 @@ def _serialize_metadata_config(metadata: dict[str, Any] | None) -> str | None:
     return json.dumps(cfg if isinstance(cfg, dict) else asdict(cfg))  # type: ignore[arg-type]
 
 
-def _collect_actions(episode: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+def _collect_actions(episode: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Return ``{kind: array}`` for whichever of joint_action / ee_action are present.
 
     Recordings may carry both: the file is action-space-agnostic and the

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -56,7 +57,9 @@ class EvalEpisode:
   the directory the episode came from, for multi-source eval logging.
   """
 
-  raw:        dict[str, Any]
+  # `raw` may be a plain arrays dict or an Episode Mapping container (from the
+  # dataset loader's `.data`); read-only here, so Mapping accepts both.
+  raw:        Mapping[str, Any]
   processed:  dict[str, Any]
   stem:       str
   source_dir: str

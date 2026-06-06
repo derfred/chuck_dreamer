@@ -31,7 +31,8 @@ from typing import Any, Protocol
 
 from omegaconf import OmegaConf
 
-from .episode_collector import EpisodeCollector, RawEpisode
+from ..common.episode import Episode
+from .episode_collector import EpisodeCollector
 from .scene_config import SceneConfig
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ class CollectResult:
   reset that crashed immediately). ``scene`` is included so the trainer
   can call ``maybe_log_collect_episode`` without re-deriving it.
   """
-  episode:   RawEpisode | None
+  episode:   Episode | None
   outcome:   str
   scene:     SceneConfig | None
   worker_id: int = 0

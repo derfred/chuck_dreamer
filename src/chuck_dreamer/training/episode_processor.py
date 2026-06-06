@@ -13,6 +13,7 @@ of raw recorded fields.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Callable, Protocol
 
 import numpy as np
@@ -30,8 +31,13 @@ from .observation import (
 )
 
 
-RawEpisode = dict[str, Any]
-Episode = dict[str, Any]
+# Input is read-only and may be a plain dict (sim collection) OR an Episode
+# Mapping container (the dataset loader, common.episode.Episode) — both are
+# read via Mapping ops (raw[...], raw.get, "x" in raw), never mutated. Mapping
+# accepts both. The OUTPUT alias below stays a dict: the processor builds + returns
+# a plain buffer dict (not the Episode container).
+RawEpisode = Mapping[str, Any]
+Episode    = dict[str, Any]
 
 
 _STEP_INFO_KEYS = ("object_xy", "ee_pos", "ee_quat")
