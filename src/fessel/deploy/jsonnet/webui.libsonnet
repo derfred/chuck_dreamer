@@ -8,6 +8,18 @@ function(cfg)
   // Minted WHEP URL base: public media host in nodeport mode, in-cluster
   // mediamtx Service in podip mode.
   local mediaBase = if nodeport then 'https://' + cfg.hosts.media else 'http://mediamtx:8889';
+  // When a throwaway MinIO is deployed (integration env), point the backend's
+  // RecordingsStore at it (same FESSEL_MINIO_* env the uploader uses) so
+  // /api/recordings lists the uploaded object (available_remote) + presigns it,
+  // proving the recording E2E (X4.3). Unset otherwise -> NoRecordingsStore.
+  local minioEnv =
+    if cfg.includeMinio then [
+      { name: 'FESSEL_MINIO_ENDPOINT', value: 'minio:9000' },
+      { name: 'FESSEL_MINIO_ACCESS_KEY', value: 'fesseltest' },
+      { name: 'FESSEL_MINIO_SECRET_KEY', value: 'fesseltestsecret' },
+      { name: 'FESSEL_MINIO_BUCKET', value: 'fessel' },
+      { name: 'FESSEL_MINIO_SECURE', value: 'false' },
+    ] else [];
 
   {
   secret: {
@@ -34,7 +46,7 @@ function(cfg)
               { name: 'FESSEL_WHEP_SECRET', valueFrom: { secretKeyRef: { name: 'fessel-whep-secret', key: 'secret' } } },
               { name: 'FESSEL_MEDIA_BASE', value: mediaBase },
               { name: 'FESSEL_WHEP_TTL_S', value: if nodeport then '300' else '60' },
-            ],
+            ] + minioEnv,
             ports: [{ containerPort: 8000 }],
             readinessProbe: {
               httpGet: { path: '/healthz', port: 8000 },

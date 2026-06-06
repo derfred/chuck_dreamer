@@ -208,6 +208,48 @@ def wait_api_state(predicate, what: str, timeout: float = 15.0) -> dict:
   raise AssertionError(f"timed out waiting for {what}; last /api/state={last}")
 
 
+# ---------- Slice 4 recording + upload (X4.3, recording E2E to MinIO) ----------
+
+
+def webui_post_json(path: str, body: dict | None = None) -> tuple[int, dict]:
+  import json
+
+  data = json.dumps(body).encode() if body is not None else None
+  req = urllib.request.Request(  # noqa: S310
+    f"{WEBUI}{path}",
+    data=data,
+    method="POST",
+    headers={**AUTH, "Content-Type": "application/json"},
+  )
+  try:
+    with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
+      return r.status, json.loads(r.read() or b"{}")
+  except urllib.error.HTTPError as e:
+    body = e.read()
+    try:
+      return e.code, json.loads(body)
+    except ValueError:
+      return e.code, {"detail": body.decode(errors="replace")}
+
+
+def list_recordings() -> list[dict]:
+  return http_get_json(f"{WEBUI}/api/recordings", headers=AUTH)
+
+
+def wait_recordings(predicate, what: str, timeout: float = 60.0) -> list[dict]:
+  deadline = time.time() + timeout
+  last: list[dict] = []
+  while time.time() < deadline:
+    last = list_recordings()
+    try:
+      if predicate(last):
+        return last
+    except (KeyError, TypeError):
+      pass
+    time.sleep(1.0)
+  raise AssertionError(f"timed out waiting for {what}; last /api/recordings={last}")
+
+
 def whep_post(signed_url: str, offer_sdp: str) -> tuple[int, str]:
   """POST the WHEP offer from Python (the browser's about:blank origin
   can't fetch cross-origin). Returns (status, answer_sdp_or_error)."""
@@ -421,6 +463,57 @@ def main() -> int:
       st, _ = control_post("pause", headers={})
       assert st == 401, f"expected 401 without identity, got {st}"
 
+    # --- X4.3 recording end-to-end to a real (in-cluster) MinIO ---
+    # Drives the whole Slice-4 path against the deployed system with the
+    # uploader's REAL minio driver (the integration env wires the test-Pi +
+    # backend to a throwaway in-namespace MinIO): start a recording -> the ring
+    # is always on, so segments exist -> stop -> flag-for-upload -> the uploader
+    # ships it to MinIO -> /api/recordings shows it available_remote (uploaded).
+    def t_recording_e2e_to_minio():
+      # Start an explicit recording at the test mode.
+      st, body = webui_post_json("/api/recording/start", {"mode": MODE})
+      assert st == 200, f"recording/start -> {st}: {body}"
+      rid = body.get("recording_id")
+      assert rid, f"no recording_id from start: {body}"
+      # Wait until video reports it recording (via /api/state), then record a bit.
+      wait_api_state(
+        lambda s: (s.get("recording") or {}).get("state") == "recording",
+        "recording active",
+        timeout=30,
+      )
+      time.sleep(5)  # capture a few segments
+      st, _ = webui_post_json("/api/recording/stop")
+      assert st == 200, f"recording/stop -> {st}"
+      # Once finalised (idle), it must appear locally in the listing.
+      wait_recordings(
+        lambda recs: any(r["recording_id"] == rid for r in recs),
+        f"recording {rid} listed",
+        timeout=30,
+      )
+      # Flag it for upload; the uploader (real minio driver) ships it to MinIO.
+      st, body = webui_post_json("/api/recording/flag-upload", {"recording_id": rid})
+      assert st == 200, f"flag-upload -> {st}: {body}"
+      # Poll until the backend's merged listing shows it uploaded to MinIO.
+      recs = wait_recordings(
+        lambda rs: any(
+          r["recording_id"] == rid and r.get("available_remote") for r in rs
+        ),
+        f"recording {rid} available_remote (uploaded to MinIO)",
+        timeout=90,
+      )
+      row = next(r for r in recs if r["recording_id"] == rid)
+      assert row.get("upload_state") in ("uploaded", "uploading", "queued"), row
+      # Playback resolves: the backend hands out a MinIO presigned URL (302,
+      # which urlopen follows) or proxies the local copy (200) — either is a pass.
+      req = urllib.request.Request(  # noqa: S310
+        f"{WEBUI}/api/recordings/{rid}/playlist", headers=AUTH, method="GET"
+      )
+      try:
+        with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
+          assert r.status in (200, 302), f"playlist status {r.status}"
+      except urllib.error.HTTPError as e:
+        assert e.code in (200, 302), f"playlist failed: {e.code}"
+
     # NOTE: there is intentionally NO automated data-plane (video bytes in
     # the browser) assertion. Headless Chrome cannot complete WebRTC ICE
     # in-cluster, so such a test could never pass here. The streaming chain
@@ -438,6 +531,8 @@ def main() -> int:
     suite.run("control_power_cycle_verified", t_power_cycle_verified)
     suite.run("control_verify_failure_surfaces", t_verify_failure_surfaces)
     suite.run("control_requires_auth", t_control_requires_auth)
+    # Slice 4 recording end-to-end to a real (in-cluster) MinIO (X4.3).
+    suite.run("recording_e2e_to_minio", t_recording_e2e_to_minio)
 
     browser.close()
 

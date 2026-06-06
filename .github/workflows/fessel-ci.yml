@@ -1,28 +1,25 @@
-# I0.5 — Fessel CI. Build, lint, and test each sub-project on push.
-# Packaging targets (dpkg, Docker, Tanka) are present as skipped
-# placeholders so the pipeline shape exists ahead of the packaging slice.
+# Fessel unit/lint/types CI (I0.5 + Slice 1.5 T1.10 job-1). Runs on every PR
+# touching src/fessel/**: per-subproject pytest + ruff, the video suite (system
+# GStreamer/OpenCV), the frontend (lint + vitest), the generated-types sync
+# guard, and the dpkg N-1 -> N upgrade test (T1.8). This is the unit/build check
+# that runs ALONGSIDE the separate `fessel integration` check.
 #
-# NOTE: place/symlink this under the host repo's .github/workflows/ to
-# activate it, or reference it from the host CI. Path filter limits runs to
-# changes under src/fessel/.
+# Lives at the repo root (NOT src/fessel/.github/) so GitHub actually runs it —
+# Actions only discovers workflows in the root .github/workflows/.
 name: fessel-ci
 
 on:
   push:
-    paths: ["src/fessel/**"]
+    paths: ["src/fessel/**", ".github/workflows/fessel-ci.yml"]
   pull_request:
-    paths: ["src/fessel/**"]
-
-defaults:
-  run:
-    working-directory: src/fessel
+    paths: ["src/fessel/**", ".github/workflows/fessel-ci.yml"]
 
 jobs:
   python:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        project: [schemas, pi/shared, pi/supervisor, webui/backend]
+        project: [schemas, pi/shared, pi/supervisor, pi/uploader, webui/backend]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -34,16 +31,18 @@ jobs:
         working-directory: src/fessel/${{ matrix.project }}
 
   video:
-    # video needs system GStreamer/PyGObject in the runner image.
+    # video needs system GStreamer/PyGObject + numpy/OpenCV (the Slice-5 vision
+    # branch) in the runner image; its venv is --system-site-packages.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install system GStreamer + PyGObject
+      - name: Install system GStreamer + PyGObject + OpenCV
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-gi gir1.2-gst-plugins-bad-1.0 \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad gstreamer1.0-tools v4l-utils
+            gstreamer1.0-plugins-bad gstreamer1.0-tools v4l-utils \
+            python3-numpy python3-opencv
       - name: Create system-site-packages venv and test
         run: |
           python3 -m venv --system-site-packages .venv
@@ -78,14 +77,23 @@ jobs:
         with:
           node-version: "20"
       - run: make check-types
+        working-directory: src/fessel
 
-  packaging:
+  # T1.8 install/upgrade assertion: build N-1 and N packages from the tree,
+  # install N-1, edit /etc/fessel config, upgrade to N, assert the edits
+  # survived + binaries updated. Hermetic (debian:trixie container, no prior
+  # release artifact needed). Guards the config-clobber regression.
+  dpkg-upgrade:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: dpkg (placeholder)
-        run: echo "skipped — arrives in a later slice"
-      - name: docker image (placeholder)
-        run: echo "skipped — arrives in a later slice"
-      - name: tanka (placeholder)
-        run: echo "skipped — arrives in a later slice"
+      - name: dpkg N-1 -> N upgrade test (config preservation)
+        run: |
+          docker run --rm -v "$PWD/src/fessel":/src -w /src debian:trixie bash -c '
+            set -e
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends \
+              dpkg-dev python3 python3-pydantic python3-paho-mqtt python3-yaml \
+              python3-fastapi python3-uvicorn python3-httpx ca-certificates
+            pi/deploy/dpkg/test-upgrade.sh
+          '

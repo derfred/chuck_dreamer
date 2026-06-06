@@ -1,9 +1,10 @@
 """Recording state-machine tests — no GStreamer (fake RecordingPipelineHandle).
 
 Verifies the V4.3 properties: serialised transitions, one recording at a time
-(a start while recording is rejected synchronously), finalisation writes
-metadata only on a clean stop, a start timeout returns to idle WITHOUT
-finalising (partial output stays on disk), and a queued start after stop runs.
+(a start while recording OR stopping is rejected synchronously), finalisation
+writes metadata only on a clean stop, a start timeout returns to idle WITHOUT
+finalising (partial output stays on disk), and that a start retried once idle
+runs (the plan's `stopping|start->queue` was simplified to reject).
 """
 
 import time
@@ -16,10 +17,13 @@ MODE = ModeTriplet(resolution="1920x1080", fps=30, bitrate_bps=8_000_000)
 
 
 class FakeRec(RecordingPipelineHandle):
-  def __init__(self, registry, sm_box):
+  def __init__(self, registry, sm_box, defer_exit=False):
     self.started = False
     self.stopped = False
     self._sm_box = sm_box
+    # When defer_exit is set, stop() does NOT emit EXITED — the test drives it
+    # via emit_exit(), so the `stopping` state is deterministically observable.
+    self._defer_exit = defer_exit
     registry.append(self)
 
   def start(self):
@@ -27,17 +31,21 @@ class FakeRec(RecordingPipelineHandle):
 
   def stop(self):
     self.stopped = True
+    if not self._defer_exit:
+      self._sm_box[0].on_exited()
+
+  def emit_exit(self):
     self._sm_box[0].on_exited()
 
 
-def make_sm(start_timeout_s=0.3):
+def make_sm(start_timeout_s=0.3, defer_exit=False):
   live = []
   sm_box = [None]
   states = []
   finals = []
 
   def factory(rid, mode):
-    return FakeRec(live, sm_box)
+    return FakeRec(live, sm_box, defer_exit=defer_exit)
 
   def publish(state, rid, started):
     states.append((state, rid))
@@ -89,7 +97,9 @@ def test_only_one_recording_at_a_time():
   sm, _, _, _ = make_sm()
   sm.start()
   assert sm.request_start("r1", MODE, None) is True
-  assert wait_until(lambda: sm.state is RecordingStateValue.recording or sm.state is RecordingStateValue.starting)
+  assert wait_until(
+    lambda: sm.state is RecordingStateValue.recording or sm.state is RecordingStateValue.starting
+  )
   sm.on_segment()
   assert wait_until(lambda: sm.state is RecordingStateValue.recording)
   # A start while recording is rejected SYNCHRONOUSLY (so the HTTP layer 409s).
@@ -121,20 +131,31 @@ def test_failed_start_returns_idle_without_finalise():
   sm.shutdown()
 
 
-def test_queued_start_after_stop_runs():
-  sm, live, _, finals = make_sm()
+def test_start_during_stopping_is_rejected_then_runs_once_idle():
+  # V4.3 (simplified): a start in ANY non-idle state — including `stopping` —
+  # is rejected synchronously (the plan's `stopping|start->queue` was dropped,
+  # see recording_state_machine docstring). Once the prior recording finalises
+  # to idle, a fresh start proceeds. So the operator gesture is "retry after
+  # stop", not "queued across teardown".
+  # defer_exit keeps the SM in `stopping` until we drive emit_exit(), so the
+  # reject-during-stopping window is deterministically observable.
+  sm, live, _, finals = make_sm(defer_exit=True)
   sm.start()
   sm.request_start("r1", MODE, None)
   assert wait_until(lambda: sm.state is RecordingStateValue.starting)
   sm.on_segment()
   assert wait_until(lambda: sm.state is RecordingStateValue.recording)
-  # Begin stop, then queue a new start during stopping. After the prior exits,
-  # the new recording starts.
   sm.request_stop()
+  assert wait_until(lambda: sm.state is RecordingStateValue.stopping)
+  # A start arriving WHILE stopping is rejected (not queued).
+  assert sm.request_start("r2", MODE, None) is False
+  # Now let the prior recording finalise cleanly.
+  live[0].emit_exit()
   assert wait_until(lambda: len(finals) == 1)  # r1 finalised
-  # A start arriving while stopping is queued and runs after exit.
-  # (request_start is rejected unless idle; once idle the new one proceeds.)
   assert wait_until(lambda: sm.state is RecordingStateValue.idle)
+  # Once idle, the retried start proceeds (reaching `recording` needs only the
+  # first segment; the deferred fake's stop-without-exit is harmless on
+  # shutdown's bounded join).
   assert sm.request_start("r2", MODE, None) is True
   assert wait_until(lambda: sm.state is RecordingStateValue.starting)
   sm.on_segment()

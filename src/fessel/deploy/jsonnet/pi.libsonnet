@@ -5,6 +5,21 @@
 function(cfg) {
   local ns = cfg.namespace,
 
+  // When a throwaway MinIO is deployed (integration env, includeMinio), point
+  // the test-Pi's uploader at it via env (FESSEL_MINIO_*), flipping it from the
+  // baked-in `fake` store to the real minio driver so the recording E2E test
+  // (X4.3) ships a flagged recording to actual object storage. `secure: false`
+  // (plain HTTP, in-cluster). Empty otherwise (uploader stays `fake`).
+  local minioEnv =
+    if cfg.includeMinio then [
+      { name: 'FESSEL_MINIO_DRIVER', value: 'minio' },
+      { name: 'FESSEL_MINIO_ENDPOINT', value: 'minio:9000' },
+      { name: 'FESSEL_MINIO_ACCESS_KEY', value: 'fesseltest' },
+      { name: 'FESSEL_MINIO_SECRET_KEY', value: 'fesseltestsecret' },
+      { name: 'FESSEL_MINIO_BUCKET', value: 'fessel' },
+      { name: 'FESSEL_MINIO_SECURE', value: 'false' },
+    ] else [],
+
   deployment: {
     apiVersion: 'apps/v1',
     kind: 'Deployment',
@@ -19,6 +34,7 @@ function(cfg) {
             name: 'pi',
             image: cfg.images.testPi,
             ports: [{ name: 'control', containerPort: 8443, protocol: 'TCP' }],
+            [if cfg.includeMinio then 'env']: minioEnv,
             readinessProbe: {
               httpGet: { path: '/healthz', port: 8443 },
               initialDelaySeconds: 5,
@@ -70,7 +86,8 @@ function(cfg) {
         spec: {
           containers: [{
             name: 'jetson-mock',
-            image: 'python:3-slim',
+            // Pinned (not floating python:3-slim) for a deterministic test image.
+            image: 'python:3.13-slim',
             command: ['python3', '/app/jetson_mock.py'],
             ports: [{ name: 'http', containerPort: 8080, protocol: 'TCP' }],
             readinessProbe: {

@@ -20,10 +20,18 @@ Transition table:
 | recording | stop                   | stopping  | EOS the recording branch; await finalisation |
 | recording | start(new id)          | recording | REJECT (only one active recording)           |
 | stopping  | branch exited cleanly  | idle      | finalise playlist; write metadata; publish   |
-| stopping  | start                  | starting  | queue; transition after exit                 |
+| stopping  | start                  | stopping  | REJECT (one recording at a time)             |
 
 A start that is rejected (already recording) is reported back to the caller via
 `request_start`'s return value, so supervisor can surface a 409 (V4.3, S4.1).
+
+> Note: the V4.3 plan's transition table had `stopping | start -> starting
+> (queue)`. We deliberately simplified that to a synchronous REJECT: a start in
+> ANY non-idle state (starting / recording / stopping) returns False from
+> `request_start` so supervisor 409s immediately, consistent with the
+> one-recording-at-a-time contract. Queuing a start across a teardown added a
+> code path with no operator benefit (an explicit manual gesture should just be
+> retried after the stop completes), so it was removed.
 """
 
 from __future__ import annotations
@@ -111,7 +119,6 @@ class RecordingStateMachine:
     self._cur_mode: ModeTriplet | None = None
     self._cur_operator: str | None = None
     self._started_at: str | None = None
-    self._queued_start: _Event | None = None
     self._start_deadline: float | None = None
 
   # --- public API (thread-safe) ----------------------------------------------
@@ -223,12 +230,8 @@ class RecordingStateMachine:
       self._finalise_current()
       self._reset_current()
       self._set_state(RecordingStateValue.idle)
-      if self._queued_start is not None:
-        q = self._queued_start
-        self._queued_start = None
-        self._spawn(q.recording_id, q.mode, q.operator)
-    elif ev.kind is _EventKind.START:
-      self._queued_start = ev
+    # A START never reaches here: request_start rejects any non-idle state
+    # synchronously (-> supervisor 409), so there is no start to queue.
 
   # --- helpers ---------------------------------------------------------------
 

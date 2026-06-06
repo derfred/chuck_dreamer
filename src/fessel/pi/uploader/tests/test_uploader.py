@@ -124,6 +124,41 @@ def test_gate_honoring(tmp_path):
   assert app._allowed() is True
 
 
+def test_minio_config_env_overrides(monkeypatch):
+  # The integration env points the test-Pi's uploader at a real in-cluster
+  # MinIO via env (the baked fessel.test.yaml defaults to driver: fake), per
+  # the architecture's "config injected via env". Env overlays the file block.
+  from uploader.main import _minio_config_with_env
+
+  monkeypatch.setenv("FESSEL_MINIO_DRIVER", "minio")
+  monkeypatch.setenv("FESSEL_MINIO_ENDPOINT", "minio:9000")
+  monkeypatch.setenv("FESSEL_MINIO_ACCESS_KEY", "ak")
+  monkeypatch.setenv("FESSEL_MINIO_SECRET_KEY", "sk")
+  monkeypatch.setenv("FESSEL_MINIO_BUCKET", "fessel")
+  monkeypatch.setenv("FESSEL_MINIO_SECURE", "false")
+  out = _minio_config_with_env({"driver": "fake", "bucket": "old"})
+  assert out["driver"] == "minio"
+  assert out["endpoint"] == "minio:9000"
+  assert out["access_key"] == "ak" and out["secret_key"] == "sk"
+  assert out["bucket"] == "fessel"
+  assert out["secure"] is False
+
+
+def test_minio_config_no_env_is_passthrough(monkeypatch):
+  from uploader.main import _minio_config_with_env
+
+  for k in (
+    "FESSEL_MINIO_DRIVER",
+    "FESSEL_MINIO_ENDPOINT",
+    "FESSEL_MINIO_ACCESS_KEY",
+    "FESSEL_MINIO_SECRET_KEY",
+    "FESSEL_MINIO_BUCKET",
+    "FESSEL_MINIO_SECURE",
+  ):
+    monkeypatch.delenv(k, raising=False)
+  assert _minio_config_with_env({"driver": "fake"}) == {"driver": "fake"}
+
+
 def test_reload_applies_upload_tunables(tmp_path):
   # §2.13: SIGHUP reload updates poll/backlog intervals + retry backoff.
   import pytest

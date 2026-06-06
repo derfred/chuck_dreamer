@@ -53,9 +53,9 @@ from .analysis import AnalysisCoordinator
 from .anomaly_recording import AnomalyRecorder, AnomalyWindow
 from .audio import AudioAnalyzer, audio_config_from_dict
 from .capabilities import probe
+from .gst_capture import GstCapturePipeline
 from .gst_pipeline_handle import GstLivePipeline
 from .gst_recording_handle import GstRecordingPipeline
-from .gst_ring_handle import GstRingPipeline
 from .recording_state_machine import RecordingStateMachine
 from .state_machine import LiveStateMachine
 from .vision import VisionAnalyzer, vision_config_from_dict
@@ -129,7 +129,11 @@ class VideoApp:
     self._storage = Storage(storage_cfg.get("ssd_path", "/mnt/ssd"))
     self._ring_cfg = {**DEFAULT_RING, **(config.get("ring") or {})}
     self._rec_cfg = {**DEFAULT_RECORDING, **(config.get("recording") or {})}
-    self._ring: GstRingPipeline | None = None
+    # The single always-on capture pipeline (§2.2): one camera/mic open, fanned
+    # out via tee to the ring + vision + audio-level branches, with live +
+    # recording added on demand. Built + started in run().
+    self._capture: GstCapturePipeline | None = None
+    self._audio_device = (config.get("audio") or {}).get("device", "default")
     # Boot snapshots of the restart-only sections, so a SIGHUP reload (§2.13)
     # can warn about a change to something it cannot hot-apply.
     self._boot_srt = srt_cfg or None
@@ -177,14 +181,16 @@ class VideoApp:
     self._gst_audio = None  # GstAudioPipeline
 
   def _make_pipeline(self, mode: ModeTriplet, path: str) -> GstLivePipeline:
+    # The live branch attaches to the shared capture pipeline's tee_v (§2.2),
+    # not a standalone pipeline. The capture pipeline must be up.
+    assert self._capture is not None, "capture pipeline not started"
     return GstLivePipeline(
       sm=self._sm,
+      capture=self._capture,
       mode=mode,
       path=path,
       srt_host=self._srt_host,
       srt_port=self._srt_port,
-      device=self._device,
-      use_test_source=self._use_test_source,
       allow_software_encoder=self._allow_software_encoder,
     )
 
@@ -280,9 +286,7 @@ class VideoApp:
       log.warning(
         '{"event":"config_reload","note":"mqtt/storage changed; restart required to apply"}'
       )
-    log.info(
-      '{"event":"config_reload","note":"ring/recording values applied on next spawn"}'
-    )
+    log.info('{"event":"config_reload","note":"ring/recording values applied on next spawn"}')
 
   def _ring_mode(self) -> ModeTriplet:
     """The ring's camera operating point — its own resolution/fps/bitrate
@@ -293,27 +297,31 @@ class VideoApp:
       bitrate_bps=int(self._ring_cfg["bitrate_bps"]),
     )
 
-  def _start_ring(self) -> None:
-    """Spawn the always-on ring buffer (V4.1). Best-effort: a ring failure is
-    a degraded condition, not fatal to supervision, so it is logged and the
-    process continues (recordings + live still work)."""
-    try:
-      self._ring = GstRingPipeline(
-        mode=self._ring_mode(),
-        ring_dir=str(self._storage.ring_dir),
-        bitrate_bps=int(self._ring_cfg["bitrate_bps"]),
-        segment_seconds=int(self._ring_cfg["segment_seconds"]),
-        playlist_length=int(self._ring_cfg["playlist_length"]),
-        max_files=int(self._ring_cfg["max_files"]),
-        device=self._device,
-        use_test_source=self._use_test_source,
-        allow_software_encoder=self._allow_software_encoder,
-      )
-      self._ring.start()
-      log.info("ring buffer started at %s", self._storage.ring_dir)
-    except Exception:  # noqa: BLE001
-      log.exception("ring buffer failed to start (continuing without it)")
-      self._ring = None
+  def _start_capture(self) -> None:
+    """Build + start the single always-on capture pipeline (§2.2): one camera
+    open fanned out via tee to the ring (V4.1), vision (V5.1), and audio-level
+    (V5.6) branches. The live + recording branches attach to its tee on demand.
+
+    NOT best-effort like the old standalone ring: this pipeline IS the camera,
+    so if it fails the whole video plane is down — fail loud so the operator
+    notices (a crashlooping video process is a clear signal), rather than
+    silently running with no capture."""
+    audio_level_hz = float(self._audio_cfg.get("publish_level_hz", 2.0))
+    self._capture = GstCapturePipeline(
+      mode=self._ring_mode(),
+      ring_dir=str(self._storage.ring_dir),
+      ring_bitrate_bps=int(self._ring_cfg["bitrate_bps"]),
+      ring_segment_seconds=int(self._ring_cfg["segment_seconds"]),
+      ring_playlist_length=int(self._ring_cfg["playlist_length"]),
+      ring_max_files=int(self._ring_cfg["max_files"]),
+      device=self._device,
+      audio_device=str(self._audio_device or "default"),
+      use_test_source=self._use_test_source,
+      allow_software_encoder=self._allow_software_encoder,
+      audio_level_interval_ns=int(1e9 / max(0.1, audio_level_hz)),
+    )
+    self._capture.start()
+    log.info("capture pipeline started (ring at %s)", self._storage.ring_dir)
 
   # --- Slice 5: vision + audio analysis (V5.1–V5.7) --------------------------
 
@@ -322,19 +330,20 @@ class VideoApp:
     self._mqtt.publish(topic, payload, qos=qos, retain=retain)
 
   def _make_forward_capture(self, rec_dir, after_seconds, on_closed):  # noqa: ANN001, ANN202
-    """Factory for the anomaly forward-capture branch (V5.7). Lazily imports the
+    """Factory for the anomaly forward-capture branch (V5.7). The forward
+    capture is a recording branch on the shared capture tee (§2.2) — it needs
+    camera frames, which only the shared pipeline has. Lazily imports the
     GStreamer handle so the analysis core stays testable without gi."""
     from .gst_anomaly_handle import GstAnomalyForwardCapture
 
     return GstAnomalyForwardCapture(
+      capture=self._capture,
       rec_dir=rec_dir,
       after_seconds=after_seconds,
       on_closed=on_closed,
       mode=self._ring_mode(),
       bitrate_bps=int(self._rec_cfg["bitrate_bps"]),
       segment_seconds=int(self._rec_cfg["segment_seconds"]),
-      device=self._device,
-      use_test_source=self._use_test_source,
       allow_software_encoder=self._allow_software_encoder,
     )
 
@@ -380,12 +389,10 @@ class VideoApp:
       bg = self._vision_cfg.get("background_subtractor") or {}
       self._gst_vision = GstVisionPipeline(
         analyzer=self._vision_analyzer,
-        mode=self._ring_mode(),
+        capture=self._capture,
         ring_dir=str(self._storage.ring_dir),
         on_summary=self._analysis.on_vision_summary,
         on_events=self._analysis.on_vision_events,
-        device=self._device,
-        use_test_source=self._use_test_source,
         bg_algorithm=str(bg.get("algorithm", "MOG2")),
         bg_history=int(bg.get("history", 500)),
         bg_var_threshold=float(bg.get("var_threshold", 16)),
@@ -400,15 +407,11 @@ class VideoApp:
     try:
       from .gst_audio_handle import GstAudioPipeline
 
-      level_hz = float(self._audio_cfg.get("publish_level_hz", 2.0))
-      interval_ns = int(1e9 / max(0.1, level_hz))
       self._gst_audio = GstAudioPipeline(
         analyzer=self._audio_analyzer,
+        capture=self._capture,
         on_level=self._analysis.on_audio_level,
         on_events=self._analysis.on_audio_events,
-        device=str((self._audio_cfg.get("device") or "default")),
-        use_test_source=self._use_test_source,
-        level_interval_ns=interval_ns,
       )
       self._gst_audio.start()
       log.info("audio analysis started")
@@ -449,9 +452,7 @@ class VideoApp:
   def _publish_recording_state(
     self, state: RecordingStateValue, recording_id: str | None, started_at: str | None
   ) -> None:
-    payload = RecordingState(
-      state=state, active_recording_id=recording_id, started_at=started_at
-    )
+    payload = RecordingState(state=state, active_recording_id=recording_id, started_at=started_at)
     self._mqtt.publish(
       topics.STATE_RECORDING,
       payload.model_dump(),
@@ -555,13 +556,14 @@ class VideoApp:
     self._mqtt.subscribe(
       f"{topics.SITE_PREFIX}/jetson/events/+", self._on_jetson_event, qos=topics.QOS_STATE
     )
-    self._mqtt.subscribe(
-      topics.STATE_SUPERVISOR, self._on_supervisor_state, qos=topics.QOS_STATE
-    )
+    self._mqtt.subscribe(topics.STATE_SUPERVISOR, self._on_supervisor_state, qos=topics.QOS_STATE)
     self._mqtt.loop_start()
     self._sm.start()
     self._rec_sm.start()
-    self._start_ring()
+    # The capture pipeline (camera open + tee + ring) must be up BEFORE vision/
+    # audio attach to its appsink/level elements and before live/recording can
+    # add branches onto its tee.
+    self._start_capture()
     self._start_vision_audio()
     self._publish_capabilities()
 
@@ -595,12 +597,14 @@ class VideoApp:
     self._sm.shutdown()
     self._rec_sm.shutdown()
     self._recorder.shutdown()
+    # Detach the analysis consumers, then tear down the one capture pipeline
+    # (camera + tee + ring + appsink/level) last.
     if self._gst_vision is not None:
       self._gst_vision.stop()
     if self._gst_audio is not None:
       self._gst_audio.stop()
-    if self._ring is not None:
-      self._ring.stop()
+    if self._capture is not None:
+      self._capture.stop()
     self._mqtt.loop_stop()
     self._mqtt.disconnect()
 

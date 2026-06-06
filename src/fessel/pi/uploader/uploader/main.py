@@ -42,6 +42,34 @@ DEFAULT_POLL_INTERVAL_S = 10.0
 DEFAULT_BACKLOG_INTERVAL_S = 30.0
 
 
+def _minio_config_with_env(cfg: dict) -> dict:
+  """Overlay env-var overrides on the `minio` config block. The architecture
+  (§5.5) calls for credentials/endpoint to be injected via environment in the
+  cluster (from a k8s Secret); this lets a deploy retarget the object store
+  without editing the baked-in fessel.yaml — used by the integration env to
+  point the test-Pi's uploader at a real in-cluster MinIO (driver `minio`)
+  rather than the `fake` in-memory store its fessel.test.yaml defaults to.
+
+  Env keys (all optional): FESSEL_MINIO_{DRIVER,ENDPOINT,ACCESS_KEY,SECRET_KEY,
+  BUCKET,SECURE}. SECURE is parsed as a bool ("true"/"1"/"yes")."""
+  out = dict(cfg)
+  env = os.environ
+  for key, env_name in (
+    ("driver", "FESSEL_MINIO_DRIVER"),
+    ("endpoint", "FESSEL_MINIO_ENDPOINT"),
+    ("access_key", "FESSEL_MINIO_ACCESS_KEY"),
+    ("secret_key", "FESSEL_MINIO_SECRET_KEY"),
+    ("bucket", "FESSEL_MINIO_BUCKET"),
+  ):
+    val = env.get(env_name)
+    if val is not None:
+      out[key] = val
+  secure = env.get("FESSEL_MINIO_SECURE")
+  if secure is not None:
+    out["secure"] = secure.lower() in ("true", "1", "yes")
+  return out
+
+
 class UploaderApp:
   def __init__(self, config: dict) -> None:
     mqtt_cfg = config.get("mqtt", {})
@@ -56,7 +84,7 @@ class UploaderApp:
     # (and warn about) a change to something it cannot hot-apply (§2.13).
     self._boot_mqtt = config.get("mqtt")
     self._boot_storage = storage_cfg or None
-    self._boot_minio = config.get("minio")
+    # _boot_minio is set below from the env-resolved minio config.
 
     upload_cfg = config.get("upload", {})
     self._poll_interval = float(upload_cfg.get("poll_interval_s", DEFAULT_POLL_INTERVAL_S))
@@ -64,7 +92,9 @@ class UploaderApp:
       upload_cfg.get("backlog_interval_s", DEFAULT_BACKLOG_INTERVAL_S)
     )
 
-    store = build_object_store(config.get("minio", {}))
+    minio_cfg = _minio_config_with_env(config.get("minio", {}))
+    self._boot_minio = minio_cfg
+    store = build_object_store(minio_cfg)
     self._uploader = Uploader(
       storage=self._storage,
       store=store,

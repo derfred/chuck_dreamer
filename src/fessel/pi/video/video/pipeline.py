@@ -112,7 +112,7 @@ def _encoder_chain(
     # v4l2h264enc: bitrate + GOP via the control string.
     enc = (
       f'{prof.element} name={name} extra-controls="controls,'
-      f"video_bitrate={bitrate_bps},h264_i_frame_period={gop}\""
+      f'video_bitrate={bitrate_bps},h264_i_frame_period={gop}"'
     )
   elif prof.is_software:
     # x264enc (test-only): bitrate in kbit/s; key-int-max gives the short
@@ -131,6 +131,138 @@ def _encoder_chain(
   return f"{enc} ! {prof.output_caps} ! h264parse config-interval=1"
 
 
+# --- shared tee names (architecture §2.2) ------------------------------------
+# The single capture pipeline opens each device ONCE and fans out via a tee:
+# tee_v feeds the always-on ring + vision branches and the on-demand live +
+# recording branches (added/removed at runtime); tee_a feeds the audio level
+# branch. A V4L2 USB camera cannot be opened by multiple v4l2src at once, so
+# everything that needs frames must hang off this one tee, not its own source.
+VIDEO_TEE_NAME = "tee_v"
+AUDIO_TEE_NAME = "tee_a"
+
+
+def _live_sink_chain(*, path: str, srt_host: str, srt_port: int) -> str:
+  srt_uri = f"srt://{srt_host}:{srt_port}?streamid=publish:{path}&pkt_size={SRT_PKT_SIZE}"
+  return f'mpegtsmux ! srtsink uri="{srt_uri}" wait-for-connection=false'
+
+
+def live_branch_chain(
+  *,
+  mode: ModeTriplet,
+  path: str,
+  srt_host: str,
+  srt_port: int = 8890,
+  allow_software_encoder: bool = False,
+) -> str:
+  """The live branch as a SOURCELESS element chain (queue -> encode -> srtsink),
+  to be linked onto a tee_v request pad at runtime (§2.2 dynamic branch).
+
+  The tee fans out raw I420, so each branch encodes independently — the live
+  branch keeps its own short-GOP encoder (fast WHEP start) regardless of the
+  ring's profile. `name=LIVE_ENCODER_NAME` so the handle can force an IDR.
+  """
+  prof = encoder_profile(allow_software=allow_software_encoder)
+  gop = max(1, mode.fps)  # ~1s keyframe interval -> short GOP for fast WHEP start.
+  encoder = _encoder_chain(prof, mode.bitrate_bps, gop, name=LIVE_ENCODER_NAME)
+  sink = _live_sink_chain(path=path, srt_host=srt_host, srt_port=srt_port)
+  return f"queue ! {encoder} ! {sink}"
+
+
+def recording_branch_chain(
+  *,
+  mode: ModeTriplet,
+  recording_dir: str,
+  bitrate_bps: int,
+  segment_seconds: int,
+  hls_name: str = RECORDING_HLS_NAME,
+  segment_template: str = "seg-%05d.ts",
+  allow_software_encoder: bool = False,
+) -> str:
+  """The explicit-recording branch as a SOURCELESS element chain, to be linked
+  onto a tee_v request pad at runtime. Finite HLS (playlist-length=0,
+  max-files=0). `hls_name`/`segment_template` are overridable for the anomaly
+  forward-capture, which writes into a shared dir with a high segment base."""
+  prof = encoder_profile(allow_software=allow_software_encoder)
+  gop = _hls_gop(mode.fps, segment_seconds)
+  encoder = _encoder_chain(prof, bitrate_bps, gop, name=hls_name + "_enc")
+  sink = (
+    f"hlssink2 name={hls_name} "
+    f"playlist-location={recording_dir}/index.m3u8 "
+    f"location={recording_dir}/{segment_template} "
+    f"target-duration={segment_seconds} "
+    f"playlist-length=0 "
+    f"max-files=0"
+  )
+  return f"queue ! {encoder} ! {sink}"
+
+
+def build_capture_launch(
+  *,
+  mode: ModeTriplet,
+  ring_dir: str,
+  ring_bitrate_bps: int,
+  ring_segment_seconds: int,
+  ring_playlist_length: int,
+  ring_max_files: int,
+  device: str = "/dev/video0",
+  audio_device: str = "default",
+  use_test_source: bool = False,
+  allow_software_encoder: bool = False,
+  audio_level_interval_ns: int = 500_000_000,
+) -> str:
+  """The single always-on capture pipeline (architecture §2.2).
+
+  Opens the camera (and mic) ONCE and fans frames out via a tee. Linked at
+  build time: the ring-buffer HLS branch and the vision appsink branch off
+  `tee_v`, and the audio `level` branch off `tee_a`. The on-demand live and
+  recording branches are NOT here — they are added onto `tee_v`'s request pads
+  at runtime by the state machines (so activating live never disturbs the
+  always-on ring/vision).
+
+  Pure string builder (no gi), so it is unit-testable; build_pipeline() turns
+  it into a Gst.Pipeline.
+  """
+  prof = encoder_profile(allow_software=allow_software_encoder)
+  width, height = _resolution_wh(mode)
+  video_source = _source_chain(device, width, height, mode.fps, use_test_source)
+
+  # tee_v: raw I420 fan-out. queue per consumer so a slow branch (e.g. disk on
+  # the ring) can't back-pressure the others or the source.
+  ring_gop = _hls_gop(mode.fps, ring_segment_seconds)
+  ring_enc = _encoder_chain(prof, ring_bitrate_bps, ring_gop, name=RING_HLS_NAME + "_enc")
+  ring_branch = (
+    f"{VIDEO_TEE_NAME}. ! queue ! {ring_enc} ! "
+    f"hlssink2 name={RING_HLS_NAME} "
+    f"playlist-location={ring_dir}/index.m3u8 "
+    f"location={ring_dir}/seg-%05d.ts "
+    f"target-duration={ring_segment_seconds} "
+    f"playlist-length={ring_playlist_length} "
+    f"max-files={ring_max_files}"
+  )
+  vision_branch = (
+    f"{VIDEO_TEE_NAME}. ! queue ! videoscale ! "
+    f"video/x-raw,width={VISION_WIDTH},height={VISION_HEIGHT},format=I420 ! "
+    f"appsink name={VISION_APPSINK_NAME} emit-signals=true max-buffers=1 drop=true sync=false"
+  )
+
+  if use_test_source:
+    audio_source = "audiotestsrc is-live=true wave=silence"
+  else:
+    audio_source = f"alsasrc device={audio_device}"
+  audio_branch = (
+    f"{AUDIO_TEE_NAME}. ! queue ! "
+    f"level name={AUDIO_LEVEL_NAME} interval={audio_level_interval_ns} post-messages=true ! "
+    f"fakesink sync=false"
+  )
+
+  return (
+    f"{video_source} ! tee name={VIDEO_TEE_NAME} "
+    f"{ring_branch} {vision_branch} "
+    f"{audio_source} ! audioconvert ! audioresample ! tee name={AUDIO_TEE_NAME} "
+    f"{audio_branch}"
+  )
+
+
 def build_live_launch(
   *,
   mode: ModeTriplet,
@@ -141,13 +273,11 @@ def build_live_launch(
   use_test_source: bool = False,
   allow_software_encoder: bool = False,
 ) -> str:
-  """Return the gst-parse launch string for the live SRT-push branch.
+  """Standalone live SRT-push pipeline (source + live branch).
 
-  Kept as a pure string builder so it is unit-testable without a running
-  pipeline; build_pipeline() turns it into a Gst.Pipeline.
-
-  `allow_software_encoder` is the test-only seam (x264enc); it defaults
-  False so production keeps fail-loud hardware-only behaviour.
+  Retained for the unit tests and as a self-contained reference; the running
+  system uses `live_branch_chain` linked onto the shared capture pipeline's
+  tee (§2.2) rather than this standalone form.
   """
   prof = encoder_profile(allow_software=allow_software_encoder)
   width, height = _resolution_wh(mode)
@@ -155,12 +285,9 @@ def build_live_launch(
 
   source = _source_chain(device, width, height, mode.fps, use_test_source)
   encoder = _encoder_chain(prof, mode.bitrate_bps, gop, name=LIVE_ENCODER_NAME)
-  srt_uri = (
-    f"srt://{srt_host}:{srt_port}?streamid=publish:{path}&pkt_size={SRT_PKT_SIZE}"
-  )
-  sink = f'srtsink uri="{srt_uri}" wait-for-connection=false'
+  sink = _live_sink_chain(path=path, srt_host=srt_host, srt_port=srt_port)
 
-  return f"{source} ! {encoder} ! mpegtsmux ! {sink}"
+  return f"{source} ! {encoder} ! {sink}"
 
 
 def _hls_gop(fps: int, segment_seconds: int) -> int:
@@ -264,13 +391,8 @@ def build_vision_launch(
   the detectors operate in.
   """
   source = _source_chain(device, *_resolution_wh(mode), mode.fps, use_test_source)
-  scale = (
-    f"videoscale ! video/x-raw,width={VISION_WIDTH},height={VISION_HEIGHT},format=I420"
-  )
-  sink = (
-    f"appsink name={VISION_APPSINK_NAME} emit-signals=true "
-    f"max-buffers=1 drop=true sync=false"
-  )
+  scale = f"videoscale ! video/x-raw,width={VISION_WIDTH},height={VISION_HEIGHT},format=I420"
+  sink = f"appsink name={VISION_APPSINK_NAME} emit-signals=true max-buffers=1 drop=true sync=false"
   return f"{source} ! {scale} ! {sink}"
 
 

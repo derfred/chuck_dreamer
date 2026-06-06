@@ -1,9 +1,9 @@
 """GStreamer + OpenCV wiring for the vision-analysis branch (V5.1).
 
-Thin handle around the appsink pipeline (build_vision_launch): it owns the
-GLib MainLoop thread, pulls downscaled frames in the appsink `new-sample`
-callback, runs the OpenCV background subtractor to produce a foreground mask,
-and hands the mask to the pure `VisionAnalyzer` (vision.py). The analyzer's
+The vision appsink lives inside the shared capture pipeline (§2.2, one camera
+open fanned via tee_v). This handle connects to that appsink's `new-sample`
+signal, runs the OpenCV background subtractor to produce a foreground mask, and
+hands the mask to the pure `VisionAnalyzer` (vision.py). The analyzer's
 FrameResult events + summary are forwarded to the supplied callbacks, which the
 video app turns into MQTT publishes and anomaly-recording triggers.
 
@@ -27,7 +27,7 @@ from collections.abc import Callable
 from fessel_schemas import SafeBox
 
 from .anomaly_recording import latest_ring_segment
-from .pipeline import VISION_APPSINK_NAME, build_pipeline, build_vision_launch
+from .pipeline import VISION_APPSINK_NAME
 from .vision import FrameResult, Mask, VisionAnalyzer
 
 log = logging.getLogger(__name__)
@@ -75,24 +75,30 @@ EventsCallback = Callable[[list], None]
 
 
 class GstVisionPipeline:
-  """Owns the vision appsink pipeline + background subtractor + analyzer."""
+  """Vision analysis attached to the shared capture pipeline's appsink (§2.2).
+
+  The vision appsink lives INSIDE the always-on capture pipeline (one camera
+  open, fanned out via tee_v). This handle does NOT own a pipeline; it connects
+  the background subtractor + analyzer to that appsink's `new-sample` signal.
+  `start()`/`stop()` attach/detach the signal handler — the capture pipeline's
+  own lifecycle drives PLAYING/NULL.
+  """
 
   def __init__(
     self,
     *,
     analyzer: VisionAnalyzer,
-    mode,  # noqa: ANN001 — ModeTriplet
+    capture,  # noqa: ANN001 — GstCapturePipeline
     ring_dir: str,
     on_summary: SummaryCallback,
     on_events: EventsCallback,
-    device: str = "/dev/video0",
-    use_test_source: bool = False,
     bg_algorithm: str = "MOG2",
     bg_history: int = 500,
     bg_var_threshold: float = 16.0,
     morph_kernel: int = 3,
   ) -> None:
     self._analyzer = analyzer
+    self._capture = capture
     self._ring_dir = ring_dir
     self._on_summary = on_summary
     self._on_events = on_events
@@ -101,16 +107,6 @@ class GstVisionPipeline:
     self._bg_var_threshold = bg_var_threshold
     self._morph_kernel = max(1, morph_kernel)
 
-    launch = build_vision_launch(mode=mode, device=device, use_test_source=use_test_source)
-    self._pipeline = build_pipeline(launch)
-
-    import gi
-
-    gi.require_version("GLib", "2.0")
-    from gi.repository import GLib
-
-    self._loop = GLib.MainLoop()
-    self._thread = threading.Thread(target=self._loop.run, name="vision-loop", daemon=True)
     self._subtractor = self._make_subtractor()
     self._kernel = self._make_kernel()
 
@@ -119,9 +115,8 @@ class GstVisionPipeline:
     self.frames_dropped = 0
     self.last_frame_at: float | None = None
     self._stopping = False
-
-    appsink = self._pipeline.get_by_name(VISION_APPSINK_NAME)
-    appsink.connect("new-sample", self._on_sample)
+    self._handler_id: int | None = None
+    self._appsink = self._capture.get_by_name(VISION_APPSINK_NAME)
 
   def _make_subtractor(self):  # noqa: ANN202
     import cv2
@@ -139,24 +134,19 @@ class GstVisionPipeline:
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
 
   def start(self) -> None:
-    import gi
-
-    gi.require_version("Gst", "1.0")
-    from gi.repository import Gst
-
-    self._thread.start()
-    self._pipeline.set_state(Gst.State.PLAYING)
-    log.info("vision pipeline started")
+    # Attach to the (already-running) capture pipeline's appsink. The capture
+    # pipeline owns PLAYING/NULL; we just consume samples.
+    if self._appsink is None:
+      log.error("vision appsink %r not found in capture pipeline", VISION_APPSINK_NAME)
+      return
+    self._handler_id = self._appsink.connect("new-sample", self._on_sample)
+    log.info("vision analysis attached to capture appsink")
 
   def stop(self) -> None:
-    import gi
-
-    gi.require_version("Gst", "1.0")
-    from gi.repository import Gst
-
     self._stopping = True
-    self._pipeline.set_state(Gst.State.NULL)
-    self._loop.quit()
+    if self._appsink is not None and self._handler_id is not None:
+      self._appsink.disconnect(self._handler_id)
+      self._handler_id = None
 
   # --- counters for the heartbeat (V5.1) -------------------------------------
 

@@ -61,4 +61,11 @@
 
   // Whether to render the Tailscale ingress/egress Services (production).
   includeTailscale: false,
+
+  // Whether to render a throwaway in-namespace MinIO (integration env only),
+  // so the uploader's REAL minio driver ships a flagged recording end-to-end
+  // (X4.3). When true: the test-Pi's uploader + the webui backend are wired to
+  // this MinIO via env. Never set in production (real MinIO exists) or
+  // live-preview.
+  includeMinio: false,
 }

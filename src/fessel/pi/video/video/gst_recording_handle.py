@@ -1,14 +1,11 @@
-"""GStreamer-backed RecordingPipelineHandle for the explicit-recording branch.
+"""GStreamer-backed RecordingPipelineHandle — a dynamic branch on the shared
+capture pipeline (architecture §2.2), not a standalone pipeline.
 
-Mirrors gst_pipeline_handle.py (the live branch): runs the recording pipeline
-on a GLib MainLoop in a dedicated thread, watches the bus for EOS/ERROR, and
-reports back to the RecordingStateMachine via callbacks.
-
-The "first segment written" signal (starting -> recording) is inferred from the
-pipeline reaching PLAYING: at that point hlssink2 is producing segments to disk.
-That is the same heuristic the live handle uses for "connected" (PLAYING ->
-on_connected). On EOS (graceful stop) the playlist is finalised by hlssink2 and
-the SM is told EXITED; on ERROR the SM is told FAILED then EXITED.
+`start()` attaches a recording branch (queue ! encode ! hlssink2) onto the
+capture pipeline's `tee_v`; `stop()` detaches it (EOS finalises the hlssink2
+playlist). The state-machine callback contract is unchanged: branch-reaches-
+PLAYING -> on_segment (hlssink2 producing segments), branch-removed -> on_exited,
+branch error -> on_failed (if no segment yet) / on_exited (if it was recording).
 """
 
 from __future__ import annotations
@@ -16,15 +13,11 @@ from __future__ import annotations
 import logging
 import threading
 
-import gi
+from fessel_schemas import ModeTriplet
 
-gi.require_version("Gst", "1.0")
-from gi.repository import GLib, Gst  # noqa: E402
-
-from fessel_schemas import ModeTriplet  # noqa: E402
-
-from .pipeline import build_pipeline, build_recording_launch  # noqa: E402
-from .recording_state_machine import RecordingPipelineHandle, RecordingStateMachine  # noqa: E402
+from .gst_capture import GstCapturePipeline, VideoBranch
+from .pipeline import recording_branch_chain
+from .recording_state_machine import RecordingPipelineHandle, RecordingStateMachine
 
 log = logging.getLogger(__name__)
 
@@ -34,77 +27,60 @@ class GstRecordingPipeline(RecordingPipelineHandle):
     self,
     *,
     sm: RecordingStateMachine,
+    capture: GstCapturePipeline,
     mode: ModeTriplet,
     recording_dir: str,
     bitrate_bps: int,
     segment_seconds: int,
-    device: str,
-    use_test_source: bool,
     allow_software_encoder: bool = False,
   ) -> None:
     self._sm = sm
-    launch = build_recording_launch(
+    self._capture = capture
+    self._chain = recording_branch_chain(
       mode=mode,
       recording_dir=recording_dir,
       bitrate_bps=bitrate_bps,
       segment_seconds=segment_seconds,
-      device=device,
-      use_test_source=use_test_source,
       allow_software_encoder=allow_software_encoder,
     )
-    log.info("recording launch: %s", launch)
-    self._pipeline = build_pipeline(launch)  # fails loud if encoder missing
-    self._loop = GLib.MainLoop()
-    self._thread = threading.Thread(target=self._loop.run, name="gst-rec-loop", daemon=True)
+    self._branch: VideoBranch | None = None
     self._segment_reported = False
-    self._errored = False
-    bus = self._pipeline.get_bus()
-    bus.add_signal_watch()
-    bus.connect("message", self._on_message)
+    self._lock = threading.Lock()
 
   def start(self) -> None:
-    self._thread.start()
-    self._pipeline.set_state(Gst.State.PLAYING)
+    log.info("recording branch chain: %s", self._chain)
+    self._branch = self._capture.add_video_branch(
+      self._chain,
+      on_playing=self._on_playing,
+      on_error=self._on_error,
+      on_removed=self._on_removed,
+    )
 
   def stop(self) -> None:
-    # Graceful: EOS the recording branch so hlssink2 finalises its playlist;
-    # the bus EOS handler then tears down and reports EXITED.
-    self._pipeline.send_event(Gst.Event.new_eos())
-    GLib.timeout_add_seconds(5, self._force_exit)
+    if self._branch is not None:
+      self._capture.remove_video_branch(self._branch)
+    else:
+      self._sm.on_exited()
 
-  def _force_exit(self) -> bool:
-    self._teardown_and_report()
-    return False  # one-shot
+  # --- branch lifecycle callbacks (from the capture pipeline's bus) ----------
 
-  def _on_message(self, bus: Gst.Bus, msg: Gst.Message) -> None:  # noqa: ARG002
-    t = msg.type
-    if t == Gst.MessageType.STATE_CHANGED:
-      if msg.src is self._pipeline:
-        _old, new, _pending = msg.parse_state_changed()
-        if new == Gst.State.PLAYING and not self._segment_reported:
-          # hlssink2 is producing segments to disk -> recording is live.
-          self._segment_reported = True
-          self._sm.on_segment()
-    elif t == Gst.MessageType.EOS:
-      self._teardown_and_report()
-    elif t == Gst.MessageType.ERROR:
-      err, _debug = msg.parse_error()
-      log.error("gst recording error: %s", err)
-      if not self._errored:
-        self._errored = True
-        self._teardown()
-        # If we never reached recording, this is a start failure (-> idle);
-        # if we were recording, the EXITED path finalises whatever is on disk.
-        if not self._segment_reported:
-          self._sm.on_failed()
-        else:
-          self._sm.on_exited()
+  def _on_playing(self) -> None:
+    with self._lock:
+      if self._segment_reported:
+        return
+      self._segment_reported = True
+    # hlssink2 is producing segments to disk -> recording is live.
+    self._sm.on_segment()
 
-  def _teardown(self) -> None:
-    self._pipeline.set_state(Gst.State.NULL)
-    if self._loop.is_running():
-      self._loop.quit()
+  def _on_error(self, _had_segment: bool) -> None:
+    if self._branch is not None:
+      self._capture.remove_video_branch(self._branch)
+    # If we never reached recording, this is a start failure (-> idle); if we
+    # were recording, EXITED finalises whatever is on disk.
+    if not self._segment_reported:
+      self._sm.on_failed()
+    else:
+      self._sm.on_exited()
 
-  def _teardown_and_report(self) -> None:
-    self._teardown()
+  def _on_removed(self) -> None:
     self._sm.on_exited()

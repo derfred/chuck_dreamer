@@ -64,6 +64,10 @@ jobs:
           push: true
           tags: ${{ env.REGISTRY }}/fessel-test-driver:${{ env.IMAGE_TAG }}
 
+  # NOTE: unit tests, lint, the generated-types sync guard, and the dpkg
+  # upgrade test (T1.8) run in the separate `fessel-ci.yml` workflow (the
+  # unit/build check). This workflow is the in-cluster integration check.
+
   integration:
     needs: build-and-push
     runs-on: bugzoo

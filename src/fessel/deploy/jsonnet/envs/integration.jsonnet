@@ -13,6 +13,7 @@ local cfg = fessel.config + {
   webrtc+: { mode: 'podip' },
   includeTestPi: true,
   includeControlMocks: true,  // jetson-mock pod; WiZ is the in-process fake bulb
+  includeMinio: true,  // throwaway MinIO so the recording E2E (X4.3) ships for real
   includeTailscale: false,
 };
 

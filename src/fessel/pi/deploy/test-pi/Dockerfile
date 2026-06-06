@@ -29,7 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-gi \
       python3-pydantic python3-paho-mqtt python3-yaml \
       python3-fastapi python3-uvicorn python3-uvloop python3-httptools \
-      python3-websockets python3-watchfiles \
+      python3-websockets python3-watchfiles python3-httpx \
+      python3-numpy python3-opencv \
       gir1.2-gst-plugins-bad-1.0 \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-tools \

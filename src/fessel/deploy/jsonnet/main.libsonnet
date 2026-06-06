@@ -18,6 +18,7 @@ local mediamtxLib = import 'mediamtx.libsonnet';
 local webuiLib = import 'webui.libsonnet';
 local piLib = import 'pi.libsonnet';
 local tailscaleLib = import 'tailscale.libsonnet';
+local minioLib = import 'minio.libsonnet';
 
 {
   config:: import 'config.libsonnet',
@@ -69,6 +70,7 @@ local tailscaleLib = import 'tailscale.libsonnet';
     local web = webuiLib(cfg);
     local pi = piLib(cfg);
     local ts = tailscaleLib(cfg);
+    local minio = minioLib(cfg);
     (if withNamespace then [$.namespace(cfg)] else [])
     + [web.secret]
     + [mtx.configMap, mtx.deployment, mtx.service, mtx.srtService]
@@ -82,6 +84,7 @@ local tailscaleLib = import 'tailscale.libsonnet';
       then [pi.jetsonMockConfigMap, pi.jetsonMockDeployment, pi.jetsonMockService]
       else []
     )
+    + (if cfg.includeMinio then [minio.deployment, minio.service, minio.bucketJob] else [])
     + (if cfg.includeTailscale then [ts.srtIngress, ts.supervisorEgress] else [])
     + (if withTestJob then [$.testJob(cfg)] else []),
 }

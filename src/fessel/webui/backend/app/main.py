@@ -242,6 +242,15 @@ def create_app(
       )
     )
 
+  def _reject_unauthenticated(action: str, request: Request) -> None:
+    """B3.3: a control/recording attempt with no operator identity is REJECTED
+    (401) AND audited as `auth_missing`, so the trail records who-tried-what even
+    when the attempt is refused. Read endpoints keep the plain `require_identity`
+    dependency (no audit); only state-changing actions log a rejection."""
+    if headers.read(request) is None:
+      _audit(action, "unknown", "auth_missing", time.monotonic())
+      raise HTTPException(status_code=401, detail="authentication required")
+
   def _forward_control(action: str, identity: Identity) -> JSONResponse:
     t0     = time.monotonic()
     result = supervisor.post(CONTROL_ACTIONS[action])
@@ -254,8 +263,11 @@ def create_app(
 
   def _make_control_endpoint(action: str):
     # Bind `action` per-route (closure over the loop variable would alias).
-    def endpoint(identity: Identity = Depends(require_identity)) -> JSONResponse:
-      return _forward_control(action, identity)
+    # Read identity in-handler (not via Depends) so a missing-auth rejection is
+    # audited as `auth_missing` (B3.3) before the 401.
+    def endpoint(request: Request) -> JSONResponse:
+      _reject_unauthenticated(action, request)
+      return _forward_control(action, headers.read(request))
 
     return endpoint
 
@@ -288,29 +300,40 @@ def create_app(
   # records who started the recording, and emit a B3.3-style audit line.
 
   @app.post("/api/recording/start")
-  async def recording_start(
-    request: Request, identity: Identity = Depends(require_identity)
-  ) -> JSONResponse:
-    return await _forward_recording(request, identity, "recording/start", "/recording/start")
+  async def recording_start(request: Request) -> JSONResponse:
+    return await _forward_recording(request, "recording/start", "/recording/start")
 
   @app.post("/api/recording/stop")
-  async def recording_stop(
-    request: Request, identity: Identity = Depends(require_identity)
-  ) -> JSONResponse:
-    return await _forward_recording(request, identity, "recording/stop", "/recording/stop")
+  async def recording_stop(request: Request) -> JSONResponse:
+    return await _forward_recording(request, "recording/stop", "/recording/stop")
 
   @app.post("/api/recording/flag-upload")
-  async def recording_flag_upload(
-    request: Request, identity: Identity = Depends(require_identity)
-  ) -> JSONResponse:
-    return await _forward_recording(
-      request, identity, "recording/flag-upload", "/recording/flag-upload"
+  async def recording_flag_upload(request: Request) -> JSONResponse:
+    return await _forward_recording(request, "recording/flag-upload", "/recording/flag-upload")
+
+  def _audit_recording(action: str, operator: str, outcome: str, rec_id, t0: float) -> None:
+    log.info(
+      json.dumps(
+        {
+          "event": "recording",
+          "action": action,
+          "operator": operator,
+          "recording_id": rec_id,
+          "outcome": outcome,
+          "latency_ms": int((time.monotonic() - t0) * 1000),
+          "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+      )
     )
 
-  async def _forward_recording(
-    request: Request, identity: Identity, action: str, sup_path: str
-  ) -> JSONResponse:
+  async def _forward_recording(request: Request, action: str, sup_path: str) -> JSONResponse:
     t0 = time.monotonic()
+    # B3.3: a recording control attempt with no operator identity is rejected
+    # AND audited as `auth_missing` (read identity in-handler, not via Depends).
+    identity = headers.read(request)
+    if identity is None:
+      _audit_recording(action, "unknown", "auth_missing", None, t0)
+      raise HTTPException(status_code=401, detail="authentication required")
     body = await _safe_json_body(request)
     # Fold the trusted operator identity into start (so V4.4 records it). stop
     # carries no body; flag-upload carries the recording_id from the client.
@@ -321,19 +344,7 @@ def create_app(
     rec_id = (
       result.body.get("recording_id") if isinstance(result.body, dict) else None
     ) or body.get("recording_id")
-    log.info(
-      json.dumps(
-        {
-          "event": "recording",
-          "action": action,
-          "operator": identity.user,
-          "recording_id": rec_id,
-          "outcome": outcome,
-          "latency_ms": int((time.monotonic() - t0) * 1000),
-          "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-      )
-    )
+    _audit_recording(action, identity.user, outcome, rec_id, t0)
     return JSONResponse(status_code=result.status_code, content=result.body)
 
   @app.get("/api/recordings")

@@ -1,26 +1,24 @@
 """GStreamer wiring for the audio-analysis branch (V5.6).
 
-Thin handle around the audio pipeline (build_audio_launch). The `level` element
-posts a message on the GStreamer bus every `interval`; this handle reads the
-per-channel RMS + peak dBFS off those messages and feeds the pure
-`AudioAnalyzer` (audio.py). Level readings and spike edge events are forwarded
-to callbacks the video app turns into MQTT publishes (the retained level meter)
-and anomaly-recording triggers.
+The `level` element lives inside the shared capture pipeline (§2.2, one mic open
+fanned via tee_a) and posts a message on that pipeline's bus every `interval`;
+this handle reads the per-channel RMS + peak dBFS off those messages and feeds
+the pure `AudioAnalyzer` (audio.py). Level readings and spike edge events are
+forwarded to callbacks the video app turns into MQTT publishes (the retained
+level meter) and anomaly-recording triggers.
 
-Like the other handles, GStreamer (`gi`) is imported lazily so the pure analyzer
-and the pipeline builder stay testable; this module runs on the Pi / in the
-integration harness.
+The pure analyzer and the pipeline builder stay testable; this module runs on
+the Pi / in the integration harness.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from collections.abc import Callable
 
 from .audio import AudioAnalyzer
-from .pipeline import AUDIO_LEVEL_NAME, build_audio_launch, build_pipeline
+from .pipeline import AUDIO_LEVEL_NAME
 
 log = logging.getLogger(__name__)
 
@@ -31,57 +29,41 @@ EventsCallback = Callable[[list], None]
 
 
 class GstAudioPipeline:
+  """Audio analysis attached to the shared capture pipeline's `level` element (§2.2).
+
+  The `level` element lives INSIDE the always-on capture pipeline (one mic open,
+  fanned via tee_a). This handle does NOT own a pipeline; it watches the capture
+  pipeline's bus for the level element's `message::element` and feeds the pure
+  AudioAnalyzer. `start()`/`stop()` attach/detach the bus handler.
+  """
+
   def __init__(
     self,
     *,
     analyzer: AudioAnalyzer,
+    capture,  # noqa: ANN001 — GstCapturePipeline
     on_level: LevelCallback,
     on_events: EventsCallback,
-    device: str = "default",
-    use_test_source: bool = False,
-    level_interval_ns: int = 500_000_000,
   ) -> None:
     self._analyzer = analyzer
+    self._capture = capture
     self._on_level = on_level
     self._on_events = on_events
-
-    launch = build_audio_launch(
-      device=device, use_test_source=use_test_source, level_interval_ns=level_interval_ns
-    )
-    self._pipeline = build_pipeline(launch)
-
-    import gi
-
-    gi.require_version("GLib", "2.0")
-    from gi.repository import GLib
-
-    self._loop = GLib.MainLoop()
-    self._thread = threading.Thread(target=self._loop.run, name="audio-loop", daemon=True)
     self._stopping = False
-
-    bus = self._pipeline.get_bus()
-    bus.add_signal_watch()
-    bus.connect("message::element", self._on_element_message)
+    self._handler_id: int | None = None
 
   def start(self) -> None:
-    import gi
-
-    gi.require_version("Gst", "1.0")
-    from gi.repository import Gst
-
-    self._thread.start()
-    self._pipeline.set_state(Gst.State.PLAYING)
-    log.info("audio pipeline started")
+    # The capture pipeline already add_signal_watch()'d its bus; connect a
+    # second handler for the level element's messages.
+    bus = self._capture.bus()
+    self._handler_id = bus.connect("message::element", self._on_element_message)
+    log.info("audio analysis attached to capture level element")
 
   def stop(self) -> None:
-    import gi
-
-    gi.require_version("Gst", "1.0")
-    from gi.repository import Gst
-
     self._stopping = True
-    self._pipeline.set_state(Gst.State.NULL)
-    self._loop.quit()
+    if self._handler_id is not None:
+      self._capture.bus().disconnect(self._handler_id)
+      self._handler_id = None
 
   def _on_element_message(self, _bus, message) -> None:  # noqa: ANN001
     src = message.src
