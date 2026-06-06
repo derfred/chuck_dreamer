@@ -1,6 +1,6 @@
 [project]
 name = "fessel-schemas"
-version = "0.1.0"
+version = "0.3.0"
 description = "Fessel canonical wire schemas (single source of truth)"
 requires-python = ">=3.12"
 dependencies = [
