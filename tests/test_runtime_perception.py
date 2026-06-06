@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from chuck_dreamer.runtime.modalities import EE, IMAGE, OBJECT_XY
+from chuck_dreamer.runtime.modalities import EE, OBJECT_XY
 from chuck_dreamer.runtime.perception import EePoseModule, PerceptionPipeline
 
 
