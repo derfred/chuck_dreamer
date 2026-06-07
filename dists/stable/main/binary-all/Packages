@@ -42,3 +42,27 @@ Description: Fessel robot-arm monitoring (Pi side)
  import is lazy so the package installs and the 'fake' driver runs without it.
  Configuration lives in /etc/fessel and is preserved across upgrades.
 
+Package: fessel-monitor
+Architecture: all
+Version: 0.3.1
+Priority: optional
+Section: misc
+Maintainer: Fessel <noreply@example.com>
+Depends: python3 (>= 3.11), python3-pydantic, python3-paho-mqtt, python3-yaml, python3-fastapi, python3-uvicorn, python3-uvloop, python3-httptools, python3-websockets, python3-watchfiles, python3-httpx, python3-gi, python3-numpy, python3-opencv, gir1.2-gst-plugins-bad-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-tools, mosquitto, v4l-utils
+Recommends: python3-minio
+Filename: pool/main/f/fessel-monitor/fessel-monitor_0.3.1_all.deb
+Size: 74944
+MD5sum: 3c9f38ffd4b8ee5f6cc41d38c8ce8a72
+SHA1: 407f970df9272761bbdcf02d0801e17ed95ef45f
+SHA256: 6cba94fff79e1cde112fc35b3317f2ea740cde06ec365eeefdf567f67c0004eb
+SHA512: e7c0e915007fd17692f5031a873f324d9bdf637992e7173168f6d67e2be9d4eb3ece8d51c60898b06beaff22214dfe636d06a4d1707e5d5ad261dcb285da2df6
+Description: Fessel robot-arm monitoring (Pi side)
+ supervisor (safety/control plane + MQTT relay), video (GStreamer pipeline +
+ live state machine + ring buffer + explicit recordings), and uploader (ships
+ flagged recordings to MinIO), shipped as system-integrated Python modules
+ under /opt/fessel/lib relying on Debian python3-* packages (no venv), with
+ launcher wrappers in /usr/bin and their systemd units. The uploader's MinIO
+ driver needs python3-minio (Recommends) for the production 'minio' driver; the
+ import is lazy so the package installs and the 'fake' driver runs without it.
+ Configuration lives in /etc/fessel and is preserved across upgrades.
+

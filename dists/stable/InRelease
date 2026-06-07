@@ -4,31 +4,31 @@ Hash: SHA512
 Architectures: all
 Codename: stable
 Components: main
-Date: Sat, 06 Jun 2026 17:17:53 +0000
+Date: Sun, 07 Jun 2026 18:45:58 +0000
 Description: Fessel Pi monitoring packages
 Label: Fessel
 Origin: Fessel
 Suite: stable
 MD5Sum:
- 8ccdba359fad06413486acf992315289              177 Release
- 33a5ffca3818f1b191776a0c8f859c4a             2848 main/binary-all/Packages
- 7f5f9859b47be1e282fb65b14e34e0cf             1183 main/binary-all/Packages.gz
+ 83044aefb9f7f3e7fcf02aff29166970              177 Release
+ 821eab16afa0e53fae4e31d1e6ab8bf5             4440 main/binary-all/Packages
+ 3e3490d4165f1aa4f51b4b54a9f3a5f4             1390 main/binary-all/Packages.gz
 SHA1:
- 1ffb73129f529b7913a091ee570943f1520e5970              177 Release
- 79a99070bcd6ee1218bff6904ff8c0a9090539c3             2848 main/binary-all/Packages
- 3e3707321d37d0f5edfe6e37c60ce9779f8171fc             1183 main/binary-all/Packages.gz
+ be400d1e04e3eba93d814d61ddc4693c3e4a1236              177 Release
+ 76503c03692f13db7d95b22878905cd6c1af8fc0             4440 main/binary-all/Packages
+ 06dbb163c499df4c3ce67729de9bd6518ec5efc0             1390 main/binary-all/Packages.gz
 SHA256:
- ecae4ffbe822faa40843b9e2ac44954681a2753ff37be8261cdb1de3d6e289bb              177 Release
- aa440051b1419d2fbce4fa352badfdfd95a5a2204eb32760db80e1d1eea2ba2b             2848 main/binary-all/Packages
- ae4d2abf557fa9facaeeb8b85b0cc3de4eeae3bfe7539ac4ab421750230a89c8             1183 main/binary-all/Packages.gz
+ 74a493f2a3d6c25fdcd746f107ebf0416522cabee694945bece5fd5a925d8992              177 Release
+ e50bb8705aef1cdbe99b5764744fae7a469aff5ba64747680fd26f2f38ae155e             4440 main/binary-all/Packages
+ fd5e76305c19d23f908cfde8d015f01e21e7e77767af37921a1e238dc62763db             1390 main/binary-all/Packages.gz
 SHA512:
- 533058f0b0beccea07f604d09a9fbce0950e54d068a26aca8bbb25358026d11f6c61caa623392a7fb0035c018ea062cd30eebe14ec47d4ca899abe0fcfff09e8              177 Release
- d6e215a615ba771b9c91fe684654e7629226ae925e8260d183addb6987976854309ae6f4bebd001de5fdd20e2edcbca11acc4f1ff7c85d9312c89caf0b162646             2848 main/binary-all/Packages
- a4e20f69a0ee05c6c919a513c9d9c7c0a53c16a1f920f7b4bf3d12dc1a2bdab245b220e8cac9ef28817893a835b0efd9f571e462ba3ebcb0b2f003a895d3a656             1183 main/binary-all/Packages.gz
+ 47393a83f3ee3531916051c7916405cdfee4d025ce3745f022243bb545bdd648acf076e5097871ad3be131e02fd8f3a8cd2968728a29cbe715ade58213d4efa5              177 Release
+ ba0129119ecbb1f51fab1af6ab89ceb436f5362d4b7a6f24ee5cad72c7b226f9447a1616ba21036f0d222c013b9a0e679afa169af35692fcf596a8fbf70af9f1             4440 main/binary-all/Packages
+ d90cf754c96fc3a5dd80ddf12401c45cedb858da79705d6b156e6f777c1817ebb0a0a76823bc40c57d93dd9267c596175af6c89a96321997b02d92a3e5996302             1390 main/binary-all/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQT8/D1gcIrgMWJqpIxRefGEH2fMhwUCaiRWQQAKCRBRefGEH2fM
-h5NmAP91qCSMWrcssXRVpeiKsJKbWvr0zyrRywBA1niQKaJh+QEAvWBVhM+7SWYl
-3fDyIH9IsClCqrPOuE69aIDkoRX1/AY=
-=TlAA
+iHUEARYKAB0WIQT8/D1gcIrgMWJqpIxRefGEH2fMhwUCaiW8ZwAKCRBRefGEH2fM
+h+ATAQDCcBQ2KHJXDvn5ikpqCF5+uJpOvLOUW0gy2klNgrD/CAEA+g6XOsMAlimx
+lz7D0/Oo3rlYvEsG0QIA22MyAqELJwQ=
+=e6Re
 -----END PGP SIGNATURE-----
