@@ -10,9 +10,19 @@
 {
   namespace: 'fessel',
 
+  // Canonical release version, kept in sync with schemas/pyproject.toml by
+  // src/fessel/release.sh. Committed (not generated at deploy time) because
+  // `tk eval` renders this tree on every PR (integration / live-preview), and a
+  // missing importstr target fails the render. importstr keeps the trailing
+  // newline -> strip it.
+  version: std.rstripChars(importstr 'VERSION', '\n'),
+
   images: {
     registry: 'ghcr.io/derfred',
-    tag: 'latest',
+    // Default tag tracks the release version so production (which inherits these
+    // defaults from bugzoo-infrastructure) pulls the released image. The test
+    // envs still override images.tag via std.extVar('image_tag').
+    tag: $.version,
     webui: $.images.registry + '/fessel-webui:' + $.images.tag,
     // test-pi image is only used by the test/live-preview envs.
     testPi: $.images.registry + '/fessel-test-pi:' + $.images.tag,
