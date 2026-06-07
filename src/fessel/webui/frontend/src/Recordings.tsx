@@ -15,7 +15,7 @@ import {
   fetchRecordings,
   flagForUpload,
   recordingPlaylistUrl,
-  redirectToLogin,
+  reauthenticate,
   type RecordingItem,
 } from "./api";
 import { config } from "./config";
@@ -36,7 +36,7 @@ export function Recordings() {
       })
       .catch((e) => {
         if (e instanceof AuthError) {
-          redirectToLogin();
+          reauthenticate();
           return;
         }
         setError(String(e));
@@ -71,7 +71,7 @@ export function Recordings() {
         })
         .catch((e) => {
           if (e instanceof AuthError) {
-            redirectToLogin();
+            reauthenticate();
             return;
           }
           // Revert the optimistic change.

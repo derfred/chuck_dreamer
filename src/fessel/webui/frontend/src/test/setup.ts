@@ -19,13 +19,16 @@ Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
   },
 });
 
-// jsdom throws "Not implemented: navigation" on a real location assignment.
-// redirectToLogin() sets window.location.href; capture it instead so the
-// re-auth test can assert where it tried to go.
+// jsdom throws "Not implemented: navigation" on a real location assignment or
+// reload(). The app is auth-mechanism agnostic: on a 401 it re-navigates via
+// window.location.reload() so the auth proxy can re-authenticate (it names no
+// login endpoint). Capture reload() (and href, still used elsewhere) so the
+// re-auth test can assert the app tried to re-navigate.
 declare global {
   // `var` is required here: global augmentation only works with `var`, not
   // let/const. (tseslint's no-var doesn't flag declare-global, so no disable.)
   var __lastNavigation: string | undefined;
+  var __reloadCount: number;
 }
 const INITIAL_HREF = "https://webui.example.com/live";
 let _href = INITIAL_HREF;
@@ -40,6 +43,9 @@ Object.defineProperty(window, "location", {
       _href = v;
       globalThis.__lastNavigation = v;
     },
+    reload() {
+      globalThis.__reloadCount = (globalThis.__reloadCount ?? 0) + 1;
+    },
   },
 });
 
@@ -47,7 +53,11 @@ installFakeRtc();
 
 afterEach(() => {
   globalThis.__lastNavigation = undefined;
+  globalThis.__reloadCount = 0;
   _href = INITIAL_HREF;
+  // The re-auth loop guard lives in sessionStorage; clear it between tests so
+  // one test's reauthenticate() doesn't trip the next test's guard.
+  sessionStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   // Re-install the RTC fake: a test that stubbed globals via vi may have

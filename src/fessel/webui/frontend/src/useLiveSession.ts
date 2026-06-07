@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ModeTriplet } from "../../shared/schemas";
 import { config } from "./config";
-import { AuthError, fetchWhepUrl, redirectToLogin } from "./api";
+import { AuthError, fetchWhepUrl, reauthenticate } from "./api";
 import { startWhep } from "./whep";
 
 export type LiveState =
@@ -96,13 +96,15 @@ export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): Liv
     samplesRef.current = [];
   }, [clearTimers, closePc]);
 
-  // Escalate to the proxy login. Tear down cleanly first so an already-issued
+  // Escalate re-authentication. Tear down cleanly first so an already-issued
   // token's in-flight media isn't left dangling against a closed door (F2.5;
-  // satisfies architecture §4.5 rule 6 — we don't hammer, we tear down).
+  // satisfies architecture §4.5 rule 6 — we don't hammer, we tear down). The
+  // app re-navigates so the auth proxy can re-authenticate; it names no login
+  // mechanism (auth is infra's concern).
   const escalateReauth = useCallback(() => {
     teardown();
-    setLiveState("Error", "Authentication required — redirecting to sign in…");
-    redirectToLogin();
+    setLiveState("Error", "Authentication required — re-authenticating…");
+    reauthenticate();
   }, [teardown, setLiveState]);
 
   // Sample inboundRtp.bytesReceived + <video>.currentTime. Stall = BOTH

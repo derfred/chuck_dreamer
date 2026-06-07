@@ -12,7 +12,7 @@
 // deferred (Slice 7). The live-to-now sparkline is sufficient for Slice 5.
 
 import { useEffect, useRef, useState } from "react";
-import { AuthError, fetchState, RING_PLAYLIST_URL, redirectToLogin } from "./api";
+import { AuthError, fetchState, RING_PLAYLIST_URL, reauthenticate } from "./api";
 import { config } from "./config";
 import { Sparkline } from "./Sparkline";
 import { useHls } from "./useHls";
@@ -36,7 +36,7 @@ export function Ring() {
           }
         })
         .catch((e) => {
-          if (e instanceof AuthError) redirectToLogin();
+          if (e instanceof AuthError) reauthenticate();
           // Other errors: keep the last-known history (informational overlay).
         });
     };

@@ -1,11 +1,17 @@
 // Backend API client + the re-auth escalation primitive (F2.1, F2.5).
 //
-// All /api/... endpoints sit behind oauth2-proxy. A 401 means the proxy is
-// no longer forwarding authenticated requests (session expired/revoked). The
-// frontend must NOT loop on 401 — it escalates to the proxy's login flow.
+// The app is AUTH-MECHANISM AGNOSTIC. An auth proxy (oauth2-proxy today, but
+// the app neither knows nor cares which) guards the webui and settles the flat
+// in/out access decision upstream; the backend only trusts the identity it
+// injects. A 401 reaching the app means a request slipped past the proxy
+// without authenticated identity — almost always an expired session caught on
+// a background XHR rather than a navigation. The app does NOT know any login
+// endpoint: it simply re-navigates (reload) so the proxy can re-authenticate
+// the navigation and either restore the session or serve its own denial page.
+// The app must NOT loop on 401; a one-shot guard (reauthenticate) backs off to
+// a terminal error if a reload still comes back unauthenticated.
 
 import type { ZodType } from "zod";
-import { config } from "./config";
 import type {
   AnomalyLogEntry,
   Capabilities,
@@ -15,7 +21,7 @@ import type {
 import { CapabilitiesSchema, StateResponseSchema } from "./generated/validators";
 
 // Thrown on a 401 from any backend call. Callers treat this as terminal for
-// the current session and hand off to redirectToLogin() rather than retrying.
+// the current session and hand off to reauthenticate() rather than retrying.
 export class AuthError extends Error {
   constructor() {
     super("authentication required");
@@ -29,11 +35,33 @@ export interface Identity {
   groups: string[];
 }
 
-// Redirect the browser to oauth2-proxy's login start, asking it to return to
-// the current URL after a successful GitHub OIDC login (F2.5).
-export function redirectToLogin(): void {
-  const rd = encodeURIComponent(window.location.href);
-  window.location.href = `${config.oauthStartPath}?rd=${rd}`;
+// sessionStorage key for the one-shot re-auth guard (see reauthenticate).
+const REAUTH_GUARD_KEY = "fessel-reauth-attempted";
+
+// Re-trigger authentication after a 401, without naming any auth mechanism
+// (F2.5). The app re-navigates to the current URL; the auth proxy in front of
+// the webui intercepts that navigation and runs whatever login/denial flow it
+// is configured for (the app is agnostic to which). A loop guard makes this
+// safe: if we already reloaded once for auth and the very next load still
+// 401s — a misconfigured or absent proxy that lets unauthenticated navigations
+// through — we stop reloading and let the caller surface a terminal error
+// instead of bouncing forever. The guard is cleared by clearReauthGuard() once
+// an authenticated request succeeds.
+export function reauthenticate(): boolean {
+  if (sessionStorage.getItem(REAUTH_GUARD_KEY)) {
+    // Already bounced once and still unauthenticated — don't loop.
+    return false;
+  }
+  sessionStorage.setItem(REAUTH_GUARD_KEY, "1");
+  // Re-request the current URL so the auth proxy can re-authenticate it.
+  window.location.reload();
+  return true;
+}
+
+// Clear the re-auth loop guard. Called after any authenticated request
+// succeeds, so a later genuine session expiry can reload again.
+export function clearReauthGuard(): void {
+  sessionStorage.removeItem(REAUTH_GUARD_KEY);
 }
 
 // Thrown when a 2xx response body fails its runtime schema validation. The
@@ -55,6 +83,9 @@ export class SchemaError extends Error {
 async function getJson<T>(url: string, validate?: ZodType<T>): Promise<T> {
   const res = await fetch(url);
   if (res.status === 401) throw new AuthError();
+  // A non-401 response proves auth is working — reset the re-auth loop guard so
+  // a later genuine session expiry can reload again.
+  clearReauthGuard();
   if (!res.ok) throw new Error(`${url} failed: ${res.status}`);
   const body = await res.json();
   if (!validate) return body as T;
@@ -91,6 +122,7 @@ export async function fetchWhepUrl(path: string, mode: ModeTriplet): Promise<str
   const params = new URLSearchParams({ path, mode: modeToCanonical(mode) });
   const res = await fetch(`/api/auth/whep-url?${params.toString()}`);
   if (res.status === 401) throw new AuthError();
+  clearReauthGuard();
   if (!res.ok) throw new Error(`whep-url failed: ${res.status}`);
   const body = (await res.json()) as { url: string };
   return body.url;
@@ -233,6 +265,7 @@ async function diagnostic(res: Response): Promise<string> {
 export async function postControl(action: ControlAction): Promise<void> {
   const res = await fetch(`/api/control/${action}`, { method: "POST" });
   if (res.status === 401) throw new AuthError();
+  clearReauthGuard();
   if (res.ok) return;
   throw new ControlError(await diagnostic(res), res.status);
 }

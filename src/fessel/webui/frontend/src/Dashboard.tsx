@@ -25,7 +25,7 @@ import {
   fetchState,
   modeToCanonical,
   postControl,
-  redirectToLogin,
+  reauthenticate,
   startRecording,
   stopRecording,
   type ControlAction,
@@ -111,7 +111,7 @@ export function Dashboard() {
           if (cancelled) return;
           // 401 -> session lapsed; hand off to the proxy login (do NOT loop).
           if (e instanceof AuthError) {
-            redirectToLogin();
+            reauthenticate();
             return;
           }
           // 5xx/network -> transient banner; keep the last-known state on screen.
@@ -138,7 +138,7 @@ export function Dashboard() {
         })
         .catch((e) => {
           if (e instanceof AuthError) {
-            redirectToLogin();
+            reauthenticate();
             return;
           }
           const message = e instanceof ControlError ? e.message : String(e);
@@ -231,7 +231,7 @@ function RecordingControls({ recording }: { recording: StateResponse["recording"
     fetchCapabilities()
       .then((c: Capabilities) => setModes(c.modes))
       .catch((e) => {
-        if (e instanceof AuthError) redirectToLogin();
+        if (e instanceof AuthError) reauthenticate();
       });
   }, []);
 
@@ -246,7 +246,7 @@ function RecordingControls({ recording }: { recording: StateResponse["recording"
       .then(() => setBusy(false))
       .catch((e) => {
         if (e instanceof AuthError) {
-          redirectToLogin();
+          reauthenticate();
           return;
         }
         setBusy(false);
@@ -261,7 +261,7 @@ function RecordingControls({ recording }: { recording: StateResponse["recording"
       .then(() => setBusy(false))
       .catch((e) => {
         if (e instanceof AuthError) {
-          redirectToLogin();
+          reauthenticate();
           return;
         }
         setBusy(false);
@@ -464,7 +464,7 @@ function RecentAnomaliesPanel() {
           if (!cancelled) setAnomalies(a);
         })
         .catch((e) => {
-          if (e instanceof AuthError) redirectToLogin();
+          if (e instanceof AuthError) reauthenticate();
           // Other errors: keep the last-known list silently (informational panel).
         });
     };

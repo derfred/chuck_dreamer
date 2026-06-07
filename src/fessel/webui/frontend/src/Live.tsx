@@ -5,7 +5,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ModeTriplet } from "../../shared/schemas";
-import { AuthError, fetchCapabilities, modeToCanonical, redirectToLogin } from "./api";
+import { AuthError, fetchCapabilities, modeToCanonical, reauthenticate } from "./api";
 import { useLiveSession } from "./useLiveSession";
 
 // Per-state display: spinner/banner copy + whether the video element shows.
@@ -28,7 +28,7 @@ export function Live() {
     fetchCapabilities()
       .then((c) => setModes(c.modes))
       .catch((e) => {
-        if (e instanceof AuthError) redirectToLogin();
+        if (e instanceof AuthError) reauthenticate();
         else setCapsError(String(e));
       });
   }, []);

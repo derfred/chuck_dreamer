@@ -31,9 +31,6 @@ export const config = {
   reconnectBackoffMs: [1000, 2000, 4000, 8000, 8000, 8000],
   // Give up reconnecting (-> Error) after this many failed attempts.
   reconnectMaxAttempts: num("VITE_RECONNECT_MAX_ATTEMPTS", 6),
-  // oauth2-proxy login start path; the proxy bounces the browser to GitHub.
-  // Exact path depends on the proxy config, hence a knob.
-  oauthStartPath: str("VITE_OAUTH_START_PATH", "/oauth2/start"),
   // Dashboard /api/state poll interval (F3.4). Short, because state can change
   // from outside the UI (direct supervisor calls, or the Slice 6 safety state
   // machine acting on its own) and the dashboard must reflect that.

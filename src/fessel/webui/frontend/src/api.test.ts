@@ -2,13 +2,16 @@
 //   - a 401 from any /api call throws AuthError (so callers escalate to
 //     re-auth instead of looping — F2.4/F2.5), while other failures throw a
 //     plain Error;
-//   - redirectToLogin() points at the proxy's start path with rd=<current-url>;
+//   - reauthenticate() re-navigates (reload) so the auth proxy can re-auth,
+//     naming no login endpoint — the app is auth-mechanism agnostic — and a
+//     one-shot guard prevents a reload loop;
 //   - modeToCanonical() matches the Python serialiser EXACTLY, since the signer
 //     (backend) and the URL query must agree on the string.
 
 import { describe, expect, it, vi } from "vitest";
 import {
   AuthError,
+  clearReauthGuard,
   ControlError,
   fetchCapabilities,
   fetchMe,
@@ -16,7 +19,7 @@ import {
   fetchWhepUrl,
   modeToCanonical,
   postControl,
-  redirectToLogin,
+  reauthenticate,
   SchemaError,
 } from "./api";
 import type { ModeTriplet } from "../../shared/schemas";
@@ -44,12 +47,29 @@ describe("modeToCanonical", () => {
   });
 });
 
-describe("redirectToLogin", () => {
-  it("navigates to the proxy start path with rd=<current href>", () => {
-    redirectToLogin();
-    const dest = new URL(globalThis.__lastNavigation as string, "https://webui.example.com");
-    expect(dest.pathname).toBe("/oauth2/start");
-    expect(dest.searchParams.get("rd")).toBe("https://webui.example.com/live");
+describe("reauthenticate", () => {
+  it("re-navigates (reload) so the auth proxy can re-auth, naming no login endpoint", () => {
+    const ok = reauthenticate();
+    expect(ok).toBe(true);
+    expect(globalThis.__reloadCount).toBe(1);
+    // Auth-mechanism agnostic: it must NOT navigate to any named auth path.
+    expect(globalThis.__lastNavigation).toBeUndefined();
+  });
+
+  it("does not loop: a second call before re-auth succeeds is a no-op", () => {
+    expect(reauthenticate()).toBe(true);
+    expect(globalThis.__reloadCount).toBe(1);
+    // Still unauthenticated after the first reload (guard set) -> don't reload.
+    expect(reauthenticate()).toBe(false);
+    expect(globalThis.__reloadCount).toBe(1);
+  });
+
+  it("re-arms after a successful authenticated request clears the guard", () => {
+    expect(reauthenticate()).toBe(true);
+    expect(reauthenticate()).toBe(false); // guard tripped
+    clearReauthGuard(); // a later non-401 response resets it
+    expect(reauthenticate()).toBe(true);
+    expect(globalThis.__reloadCount).toBe(2);
   });
 });
 

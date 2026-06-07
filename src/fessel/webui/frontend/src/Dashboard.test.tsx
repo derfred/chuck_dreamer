@@ -167,12 +167,12 @@ describe("action failure (F3.2)", () => {
 const EMPTY_CAPS = { modes: [] };
 
 describe("re-auth escalation (F3.4)", () => {
-  it("redirects to login on a 401 from the state poll", async () => {
+  it("re-authenticates (reload) on a 401 from the state poll", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((url: string) => {
         // capabilities may 401 too; either way the state poll's 401 drives the
-        // redirect. Answer both with 401 to exercise the escalation.
+        // re-auth. Answer both with 401 to exercise the escalation.
         void url;
         return Promise.resolve({ ok: false, status: 401, json: async () => ({}) });
       }),
@@ -181,7 +181,10 @@ describe("re-auth escalation (F3.4)", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(globalThis.__lastNavigation).toContain("/oauth2/start");
+    // Auth-mechanism agnostic: the app re-navigates (reload) so the proxy can
+    // re-auth; it must NOT navigate to any named login endpoint.
+    expect(globalThis.__reloadCount).toBeGreaterThanOrEqual(1);
+    expect(globalThis.__lastNavigation).toBeUndefined();
   });
 });
 

@@ -18,14 +18,38 @@ routes differently.
 - `/api/me`, `/api/capabilities`, `/api/auth/whep-url` (and the rest of
   the `/api/...` surface in later slices)
 
-oauth2-proxy runs the GitHub OIDC flow in front of the webui hostname and
-forwards authenticated requests with identity headers
+An auth proxy (oauth2-proxy with GitHub OIDC today) runs in front of the
+webui hostname and forwards authenticated requests with identity headers
 (`X-Auth-Request-User`, `X-Auth-Request-Email`, optionally
 `X-Auth-Request-Groups`). The backend trusts these headers when present
-and 401s when absent (`require_identity`). **oauth2-proxy itself is out of
-scope for this slice** — it is assumed already deployed and configured to
-guard the webui hostname. The header names are backend config
-(`FESSEL_AUTH_*_HEADER`); they must match what the proxy emits.
+and 401s when absent (`require_identity`). **The auth proxy itself is out
+of scope for this library** — it is assumed already deployed and
+configured to guard the webui hostname. The header names are backend
+config (`FESSEL_AUTH_*_HEADER`); they must match what the proxy emits.
+
+### The app is auth-mechanism agnostic
+
+Authentication and the flat in/out access decision are **infrastructure
+concerns**; neither the frontend nor the backend knows or names a specific
+auth mechanism:
+
+- **Backend:** trusts infra-injected identity headers (names are config),
+  401s without them. It runs no OIDC code. Any proxy that can inject the
+  configured headers works — oauth2-proxy, a different forward-auth, a
+  gateway — with no app change.
+- **Frontend:** on a 401 it does **not** redirect to any login endpoint.
+  It re-navigates (`window.location.reload()`, see `api.ts`
+  `reauthenticate()`) so the proxy can re-authenticate the navigation and
+  either restore the session or serve its own denial page. A one-shot
+  guard prevents a reload loop if the proxy is misconfigured/absent.
+
+What infra must therefore provide (the implicit contract): the proxy
+**intercepts unauthenticated navigations** to the webui host and runs its
+login (and in/out denial) flow itself. Because the app re-navigates rather
+than calling a login URL, there is **no requirement that any `/oauth2/*`
+path be reachable** — that was the old app-aware coupling and it is gone.
+A proxy that returns its own 302/login on an unauthenticated navigation is
+all that's needed.
 
 ### Bypass oauth2-proxy (machine-to-machine)
 

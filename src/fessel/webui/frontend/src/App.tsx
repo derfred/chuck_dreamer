@@ -8,7 +8,7 @@
 // it hands off to the proxy's login flow rather than rendering a broken shell.
 
 import { useEffect, useState } from "react";
-import { AuthError, fetchMe, redirectToLogin, type Identity } from "./api";
+import { AuthError, fetchMe, reauthenticate, type Identity } from "./api";
 import { Dashboard } from "./Dashboard";
 import { Live } from "./Live";
 import { Recordings } from "./Recordings";
@@ -39,7 +39,7 @@ export function App() {
       .catch((e) => {
         // A 401 on the shell's own identity probe means the proxy session is
         // gone; bounce to login rather than render an unauthenticated shell.
-        if (e instanceof AuthError) redirectToLogin();
+        if (e instanceof AuthError) reauthenticate();
       });
   }, []);
 

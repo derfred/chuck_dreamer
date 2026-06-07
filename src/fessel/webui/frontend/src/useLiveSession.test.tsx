@@ -219,15 +219,17 @@ describe("media liveness (F2.3) + auto-reconnect (F2.4)", () => {
 });
 
 describe("re-auth escalation (F2.5)", () => {
-  it("a 401 on the WHEP mint redirects to login and does NOT retry", async () => {
+  it("a 401 on the WHEP mint re-authenticates (reload) and does NOT retry", async () => {
     mockWhep401();
     const h = mountSession();
     act(() => h.result.current.start(MODE));
     await tick(0);
 
-    // Escalation is immediate: Error state + a redirect to the proxy start path.
+    // Escalation is immediate: Error state + a re-navigation (reload) so the
+    // auth proxy can re-auth. Auth-mechanism agnostic: no named login endpoint.
     expect(h.result.current.state).toBe("Error");
-    expect(globalThis.__lastNavigation ?? "").toContain("/oauth2/start");
+    expect(globalThis.__reloadCount).toBeGreaterThanOrEqual(1);
+    expect(globalThis.__lastNavigation).toBeUndefined();
     expect(h.result.current.detail).toContain("Authentication");
 
     // No reconnect was scheduled (no looping on a closed door): advancing time
