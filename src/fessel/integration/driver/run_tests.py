@@ -241,14 +241,18 @@ def webui_get_bytes(
 ) -> tuple[int, bytes, dict]:
   """GET a binary resource through the backend (playlist/segment). Returns
   (status, body bytes, response headers). Follows the 302 the MinIO backend
-  would emit (urlopen does) — for the disk backend it's a direct 200/206."""
+  would emit (urlopen does) — for the disk backend it's a direct 200/206.
+
+  Headers are the http.client.HTTPMessage (NOT dict(...)): ASGI/uvicorn emits
+  header names lowercase (e.g. `content-range`), and HTTPMessage.get() is
+  case-insensitive, whereas dict(headers).get("Content-Range") would miss it."""
   headers = {**AUTH, **(extra_headers or {})}
   req = urllib.request.Request(f"{WEBUI}{path}", headers=headers, method="GET")  # noqa: S310
   try:
     with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
-      return r.status, r.read(), dict(r.headers)
+      return r.status, r.read(), r.headers
   except urllib.error.HTTPError as e:
-    return e.code, e.read(), dict(e.headers)
+    return e.code, e.read(), e.headers
 
 
 def http_put(url: str, body: bytes, headers: dict | None = None) -> tuple[int, bytes]:

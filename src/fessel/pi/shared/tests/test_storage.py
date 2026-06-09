@@ -6,7 +6,7 @@ from fessel_schemas import (
   RecordingMetadata,
   UploadStateValue,
 )
-from fessel_shared import Storage
+from fessel_shared import Storage, assemble_recording_playlist
 
 
 def _meta(rid: str, started: str, **kw) -> RecordingMetadata:
@@ -26,11 +26,14 @@ def test_ensure_layout_creates_dirs(tmp_path):
   assert s.explicit_dir.is_dir()
   assert s.anomaly_dir.is_dir()
   assert s.upload_queue_dir.is_dir()
+  assert s.rec_staging_dir.is_dir()
   # The documented architecture paths.
   assert s.ring_dir == tmp_path / "ring"
   assert s.explicit_dir == tmp_path / "recordings" / "explicit"
   assert s.anomaly_dir == tmp_path / "recordings" / "anomaly"
   assert s.upload_queue_dir == tmp_path / "upload_queue"
+  # rec_staging is a top-level sibling of recordings/ (never walked by listing).
+  assert s.rec_staging_dir == tmp_path / "rec_staging"
 
 
 def test_write_then_read_metadata_roundtrip(tmp_path):
@@ -132,3 +135,54 @@ def test_upload_marker_lifecycle(tmp_path):
   # .failed markers are NOT in the pending work list.
   s.upload_failed_path("r2").write_text("")
   assert [p.name for p in s.list_upload_markers()] == ["r1.upload"]
+
+
+def test_assemble_recording_playlist_renames_and_builds_coherent_vod(tmp_path):
+  # The valve-gated recording sink writes raw-*.ts (numbering may be
+  # non-contiguous after a live location retarget) plus its own throwaway
+  # playlist. Assembly must: rename to contiguous seg-*.ts, drop the throwaway
+  # (else the uploader PUTs it), and write a VOD index.m3u8 whose entries all
+  # exist on disk (the integration test's playback invariant).
+  d = tmp_path / "recordings" / "explicit" / "rec-1"
+  d.mkdir(parents=True)
+  (d / "raw-00000.ts").write_bytes(b"a")
+  (d / "raw-00002.ts").write_bytes(b"bb")  # gap: 00001 was never written
+  (d / "throwaway.m3u8").write_text("#EXTM3U\nseg-00000.ts\n")  # hlssink2's (wrong) playlist
+
+  n = assemble_recording_playlist(d, segment_seconds=2)
+  assert n == 2
+
+  names = sorted(p.name for p in d.iterdir())
+  # raw-*.ts renamed contiguously; throwaway gone; only clean HLS files remain.
+  assert names == ["index.m3u8", "seg-00000.ts", "seg-00001.ts"]
+  assert not list(d.glob("raw-*.ts"))
+  assert not (d / "throwaway.m3u8").exists()
+
+  pl = (d / "index.m3u8").read_text()
+  assert pl.startswith("#EXTM3U")
+  assert "#EXT-X-VERSION:3" in pl
+  assert "#EXT-X-MEDIA-SEQUENCE:0" in pl
+  assert "#EXT-X-TARGETDURATION:2" in pl
+  assert "#EXT-X-PLAYLIST-TYPE:VOD" in pl
+  assert pl.count("#EXTINF:") == 2
+  assert pl.rstrip().endswith("#EXT-X-ENDLIST")
+  # Every segment the playlist references exists on disk (no playlist/file skew).
+  for line in pl.splitlines():
+    if line.endswith(".ts"):
+      assert (d / line).exists()
+
+  # count_segments (metadata.segments source) sees the contiguous seg-*.ts.
+  s = Storage(str(tmp_path))
+  assert s.count_segments("rec-1") == 2
+
+
+def test_assemble_recording_playlist_empty_dir_is_safe(tmp_path):
+  # A recording that produced no fragments (start failed early): assembly must
+  # not crash and yields an empty-but-valid playlist.
+  d = tmp_path / "rec-empty"
+  d.mkdir()
+  (d / "throwaway.m3u8").write_text("#EXTM3U\n")
+  assert assemble_recording_playlist(d, segment_seconds=2) == 0
+  assert not (d / "throwaway.m3u8").exists()
+  pl = (d / "index.m3u8").read_text()
+  assert pl.startswith("#EXTM3U") and pl.rstrip().endswith("#EXT-X-ENDLIST")

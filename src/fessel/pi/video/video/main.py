@@ -307,6 +307,8 @@ class VideoApp:
     notices (a crashlooping video process is a clear signal), rather than
     silently running with no capture."""
     audio_level_hz = float(self._audio_cfg.get("publish_level_hz", 2.0))
+    # run() calls self._storage.ensure_layout() before this, so rec_staging_dir
+    # (where the cold recording sink writes until a recording retargets it) exists.
     self._capture = GstCapturePipeline(
       mode=self._ring_mode(),
       ring_dir=str(self._storage.ring_dir),
@@ -314,6 +316,7 @@ class VideoApp:
       ring_segment_seconds=int(self._ring_cfg["segment_seconds"]),
       ring_playlist_length=int(self._ring_cfg["playlist_length"]),
       ring_max_files=int(self._ring_cfg["max_files"]),
+      rec_staging_dir=str(self._storage.rec_staging_dir),
       device=self._device,
       audio_device=str(self._audio_device or "default"),
       use_test_source=self._use_test_source,
@@ -436,16 +439,19 @@ class VideoApp:
   # --- Slice 4: explicit recording (V4.2/V4.3/V4.5) --------------------------
 
   def _make_recording_pipeline(self, recording_id: str, mode: ModeTriplet) -> GstRecordingPipeline:
+    # The recording branch attaches to the shared capture pipeline's tee_v
+    # (§2.2), not a standalone pipeline — the capture owns the source, so the
+    # device/test-source live there, not here. The capture pipeline must be up.
+    assert self._capture is not None, "capture pipeline not started"
     recording_dir = str(self._storage.recording_dir(recording_id))
     self._storage.recording_dir(recording_id).mkdir(parents=True, exist_ok=True)
     return GstRecordingPipeline(
       sm=self._rec_sm,
+      capture=self._capture,
       mode=mode,
       recording_dir=recording_dir,
       bitrate_bps=int(self._rec_cfg["bitrate_bps"]),
       segment_seconds=int(self._rec_cfg["segment_seconds"]),
-      device=self._device,
-      use_test_source=self._use_test_source,
       allow_software_encoder=self._allow_software_encoder,
     )
 

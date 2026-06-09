@@ -35,7 +35,14 @@ gi.require_version("Gst", "1.0")
 gi.require_version("GstVideo", "1.0")
 from gi.repository import GLib, Gst, GstVideo  # noqa: E402
 
-from .pipeline import VIDEO_TEE_NAME, build_capture_launch, build_pipeline  # noqa: E402
+from .pipeline import (  # noqa: E402
+  RECORDING_H264_TEE_NAME,
+  RECORDING_HLS_NAME,
+  RECORDING_VALVE_NAME,
+  VIDEO_TEE_NAME,
+  build_capture_launch,
+  build_pipeline,
+)
 
 log = logging.getLogger(__name__)
 
@@ -131,6 +138,7 @@ class GstCapturePipeline:
     ring_segment_seconds: int,
     ring_playlist_length: int,
     ring_max_files: int,
+    rec_staging_dir: str,
     device: str = "/dev/video0",
     audio_device: str = "default",
     use_test_source: bool = False,
@@ -144,6 +152,7 @@ class GstCapturePipeline:
       ring_segment_seconds=ring_segment_seconds,
       ring_playlist_length=ring_playlist_length,
       ring_max_files=ring_max_files,
+      rec_staging_dir=rec_staging_dir,
       device=device,
       audio_device=audio_device,
       use_test_source=use_test_source,
@@ -153,6 +162,13 @@ class GstCapturePipeline:
     log.info("capture launch: %s", launch)
     self._pipeline = build_pipeline(launch)  # fails loud if encoder missing
     self._tee = self._pipeline.get_by_name(VIDEO_TEE_NAME)
+    # The cold valve-gated recording branch (§2.2): the valve gates the shared
+    # ring-encoder H.264 into the recording hlssink2; the rec-sm drives it via
+    # recording_open/close(). Resolved once here so those calls are cheap.
+    self._rec_valve = self._pipeline.get_by_name(RECORDING_VALVE_NAME)
+    self._rec_hls = self._pipeline.get_by_name(RECORDING_HLS_NAME)
+    self._rec_h264_tee = self._pipeline.get_by_name(RECORDING_H264_TEE_NAME)
+    self._rec_lock = threading.Lock()
     self._loop = GLib.MainLoop()
     self._thread = threading.Thread(target=self._loop.run, name="capture-loop", daemon=True)
     self._branches: dict[Gst.Bin, VideoBranch] = {}
@@ -167,6 +183,16 @@ class GstCapturePipeline:
   def start(self) -> None:
     self._thread.start()
     self._pipeline.set_state(Gst.State.PLAYING)
+    # Close the recording valve ONCE the pipeline is actually PLAYING. The valve
+    # is built open (drop=false) because a dropping valve starves the recording
+    # sink at cold start so the pipeline never prerolls and get_state() hangs.
+    # Wait for the PLAYING edge with a bounded timeout, then gate recording off
+    # until a recording_open() opens it.
+    ret, _state, _pending = self._pipeline.get_state(10 * Gst.SECOND)
+    if ret == Gst.StateChangeReturn.FAILURE:
+      log.error("capture pipeline failed to reach PLAYING")
+    if self._rec_valve is not None:
+      self._rec_valve.set_property("drop", True)
     log.info("capture pipeline started")
 
   def stop(self) -> None:
@@ -174,6 +200,12 @@ class GstCapturePipeline:
     self._pipeline.set_state(Gst.State.NULL)
     if self._loop.is_running():
       self._loop.quit()
+
+  def loop_is_running(self) -> bool:
+    """Whether the capture GLib loop is live. The recording handle schedules its
+    deferred finalise on this loop, and falls back to a synchronous finalise when
+    it is down (capture stopped) so the state machine's EXITED is never lost."""
+    return self._loop.is_running() and not self._stopping
 
   def get_by_name(self, name: str):  # noqa: ANN201 — Gst.Element | None
     return self._pipeline.get_by_name(name)
@@ -241,6 +273,54 @@ class GstCapturePipeline:
     with self._lock:
       self._branches.pop(branch.bin, None)
     branch.remove()
+
+  # --- explicit recording (cold valve-gated branch, §2.2) --------------------
+  # The recording hlssink2 is built into the capture pipeline (it cannot be added
+  # live — splitmuxsink fails its muxer→sink link against a running pipeline), so
+  # the recording state machine drives it through the valve instead of add/remove
+  # of a branch. These are serialised by _rec_lock against each other.
+
+  def recording_open(self, recording_dir: str) -> None:
+    """Begin an explicit recording: retarget the recording hlssink2 at
+    `recording_dir/raw-%05d.ts`, force a keyframe so the first fragment opens on
+    an IDR, then open the valve so the shared encoder's H.264 flows into it.
+
+    hlssink2's own playlist is ignored (its fragment counter desyncs from
+    splitmuxsink after a live `location` retarget) — the handle rebuilds the real
+    index.m3u8 from the raw-*.ts on stop via assemble_recording_playlist()."""
+    if self._rec_hls is None or self._rec_valve is None:
+      log.error("recording_open: recording sink/valve not present")
+      return
+    with self._rec_lock:
+      self._rec_hls.set_property("location", f"{recording_dir}/raw-%05d.ts")
+      self.force_rec_idr()
+      self._rec_valve.set_property("drop", False)
+
+  def recording_close(self) -> None:
+    """End an explicit recording: close the valve so no further fragments are
+    written. Idempotent (safe after a failed/never-opened start). The in-flight
+    fragment finalises on the next segment boundary; the handle waits one segment
+    duration before assembling the playlist."""
+    if self._rec_valve is None:
+      return
+    with self._rec_lock:
+      self._rec_valve.set_property("drop", True)
+
+  def force_rec_idr(self) -> None:
+    """Best-effort force-key-unit toward the shared ring/recording encoder so the
+    next fragment starts on a keyframe. An upstream force-key-unit must be sent on
+    a pad DOWNSTREAM of the encoder so it propagates up into it — the H.264 tee's
+    sink pad (fed by the encoder) is exactly that point."""
+    if self._rec_h264_tee is None:
+      return
+    pad = self._rec_h264_tee.get_static_pad("sink")
+    if pad is None:
+      return
+    event = GstVideo.video_event_new_upstream_force_key_unit(
+      Gst.CLOCK_TIME_NONE, all_headers=True, count=0
+    )
+    if not pad.send_event(event):
+      log.info("force_rec_idr: encoder did not accept force-key-unit (ignored)")
 
   # --- bus -------------------------------------------------------------------
 
