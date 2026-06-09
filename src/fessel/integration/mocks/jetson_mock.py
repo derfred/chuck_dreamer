@@ -17,7 +17,14 @@ Contract (mirrors J3.1 exactly, including the resume-when-not-paused 409):
   GET  /state           -> 200 {"state": <current>, "home": true}
 
 In-memory state; a single replica (the mock is stateful per the test run, like
-the real device). Listens on :8080 by default (JETSON_MOCK_PORT to override).
+the real device). Listens on :8080 by default (JETSON_MOCK_LISTEN_PORT to
+override).
+
+NB: the override env var is deliberately *not* JETSON_MOCK_PORT. Kubernetes
+injects legacy service-discovery vars named `<SERVICE>_PORT` into every pod in
+the namespace, so the `jetson-mock` Service makes K8s set
+`JETSON_MOCK_PORT=tcp://<clusterIP>:8080` — which int() can't parse and would
+crash this mock. Reading a differently-named var sidesteps that collision.
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-PORT = int(os.environ.get("JETSON_MOCK_PORT", "8080"))
+PORT = int(os.environ.get("JETSON_MOCK_LISTEN_PORT", "8080"))
 
 # Module-level state: the mock is a single replica, so one in-memory value is
 # the whole "device". Starts active (the real Jetson is running when the test
