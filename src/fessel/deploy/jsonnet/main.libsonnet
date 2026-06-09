@@ -46,6 +46,8 @@ local minioLib = import 'minio.libsonnet';
             image: cfg.images.registry + '/fessel-test-driver:' + cfg.images.tag,
             env: [
               { name: 'WEBUI', value: 'http://webui:8000' },
+              // The backend's tailnet-only ingest listener (T5.5.3 bypass test).
+              { name: 'WEBUI_INGEST', value: 'http://webui:' + std.toString(cfg.ingestPort) },
               { name: 'MEDIA', value: 'http://mediamtx:8889' },
               { name: 'SUPERVISOR', value: 'http://supervisor:8443' },
               { name: 'FESSEL_PATH', value: 'pi' },
@@ -76,6 +78,7 @@ local minioLib = import 'minio.libsonnet';
     + [mtx.configMap, mtx.deployment, mtx.service, mtx.srtService]
     + (if std.objectHas(mtx, 'webrtcService') then [mtx.webrtcService] else [])
     + (if std.objectHas(mtx, 'ingress') then [mtx.ingress] else [])
+    + (if std.objectHas(web, 'recordingsPvc') then [web.recordingsPvc] else [])
     + [web.deployment, web.service]
     + (if std.objectHas(web, 'ingress') then [web.ingress] else [])
     + (if cfg.includeTestPi then [pi.deployment, pi.service] else [])
@@ -85,6 +88,6 @@ local minioLib = import 'minio.libsonnet';
       else []
     )
     + (if cfg.includeMinio then [minio.deployment, minio.service, minio.bucketJob] else [])
-    + (if cfg.includeTailscale then [ts.srtIngress, ts.supervisorEgress] else [])
+    + (if cfg.includeTailscale then [ts.srtIngress, ts.recordingIngress, ts.supervisorEgress] else [])
     + (if withTestJob then [$.testJob(cfg)] else []),
 }

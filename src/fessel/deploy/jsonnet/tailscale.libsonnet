@@ -26,6 +26,30 @@ function(cfg) {
     },
   },
 
+  // Pi -> cluster: recording uploads exposed to the tailnet (I5.5.2). A SECOND,
+  // distinct ingress in front of webui-backend's tailnet-only ingest listener
+  // (cfg.ingestPort) — separate hostname from the public HTTPS ingress, same
+  // Deployment selector, different target port. The Pi PUTs flagged recordings
+  // to <ingestHostname>.<tailnet>.ts.net:8443. Auth is by Tailscale identity;
+  // tailnet ACLs (architecture §5.1) admit the Pi and deny cluster-side
+  // identities (which use the in-cluster Service DNS for the same backend).
+  recordingIngress: {
+    apiVersion: 'v1',
+    kind: 'Service',
+    metadata: {
+      name: 'webui-recording-ingest',
+      namespace: ns,
+      annotations: {
+        'tailscale.com/expose': 'true',
+        'tailscale.com/hostname': cfg.ingestHostname,
+      },
+    },
+    spec: {
+      selector: { app: 'webui' },
+      ports: [{ port: 8443, targetPort: cfg.ingestPort, protocol: 'TCP' }],
+    },
+  },
+
   // cluster -> Pi: supervisor control plane reached over the tailnet.
   // ExternalName + tailnet-fqdn: the Tailscale OPERATOR owns spec.externalName
   // (it provisions an egress proxy and fills the field with the proxy's

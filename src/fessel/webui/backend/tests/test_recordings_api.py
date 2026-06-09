@@ -1,32 +1,46 @@
-"""Backend Slice-4 recordings API tests (B4.1–B4.6).
+"""Backend recordings API tests (B4.1–B4.6 + Slice 5.5 B5.5.4/B5.5.5).
 
 Load-bearing behaviours:
   - recording control forwarders require auth and fold the operator identity
     into the start request body (so V4.4 records who started it);
-  - /api/recordings merges supervisor (Pi-local) + MinIO (uploaded) and tags
-    available_local / available_remote;
-  - playlist/segment serve a MinIO presigned redirect when uploaded, else proxy
-    from supervisor (with Range passthrough for HLS scrubbing);
-  - the ring is always proxied (no MinIO path);
+  - /api/recordings merges supervisor (Pi-local) + the storage backend
+    (uploaded) and tags available_local / available_remote;
+  - playlist/segment serve a MinIO presigned redirect (302) when the backend is
+    MinIO-like, or a disk-served byte range (200/206) when the backend serves
+    locally, or proxy from supervisor when the recording is Pi-only;
+  - the ring is always proxied (no backend path);
   - upload progress is a read-only proxy of supervisor's cache.
 """
+
+import json
 
 import httpx
 from fastapi.testclient import TestClient
 
-from app.recordings_store import FakeRecordingsStore
+from app.storage import FakeStorageBackend
 from app.supervisor_client import SupervisorClient
 
 USER_HEADER = "X-Auth-Request-User"
 AUTHED = {USER_HEADER: "octocat"}
 
+METADATA = json.dumps({"started_at": "2026-06-04T02:00:00+00:00", "type": "explicit"}).encode()
 
-def make_client(handler, *, store=None):
+
+def make_client(handler, *, storage=None):
   http = httpx.Client(base_url="http://supervisor:8443", transport=httpx.MockTransport(handler))
   sup = SupervisorClient(base_url="http://supervisor:8443", client=http)
   import app.main as appmod
 
-  return TestClient(appmod.create_app(supervisor=sup, recordings_store=store or FakeRecordingsStore()))
+  return TestClient(
+    appmod.create_app(supervisor=sup, storage=storage if storage is not None else FakeStorageBackend())
+  )
+
+
+def _seed(storage: FakeStorageBackend, rid: str, *, with_metadata=True, segment=b"TSDATA"):
+  storage.store(rid, "index.m3u8", [b"#EXTM3U\nseg-00000.ts\n"])
+  storage.store(rid, "seg-00000.ts", [segment])
+  if with_metadata:
+    storage.store(rid, "metadata.json", [METADATA])
 
 
 # --- B4.1 control forwarders -------------------------------------------------
@@ -47,8 +61,6 @@ def test_recording_start_folds_operator_into_body():
   client = make_client(handler)
   r = client.post("/api/recording/start", headers=AUTHED, json={"mode": "1920x1080@30@8000000"})
   assert r.status_code == 200 and r.json()["recording_id"] == "sup-id"
-  import json
-
   path, body = calls[-1]
   assert path == "/recording/start"
   assert json.loads(body)["operator"] == "octocat"
@@ -79,7 +91,7 @@ def test_flag_upload_passes_through_404():
   assert r.status_code == 404
 
 
-# --- B4.2 merged recordings list ---------------------------------------------
+# --- B5.5.5 merged recordings list -------------------------------------------
 
 
 def test_recordings_list_merges_local_and_remote():
@@ -106,24 +118,34 @@ def test_recordings_list_merges_local_and_remote():
       ],
     )
 
-  store = FakeRecordingsStore(
-    recordings={"r-both": ["index.m3u8"], "r-remote-only": ["index.m3u8"]}
-  )
-  client = make_client(handler, store=store)
+  storage = FakeStorageBackend()
+  _seed(storage, "r-both")
+  _seed(storage, "r-remote-only")
+  client = make_client(handler, storage=storage)
   recs = client.get("/api/recordings", headers=AUTHED).json()
   by = {r["recording_id"]: r for r in recs}
   assert by["r-local"]["available_local"] and not by["r-local"]["available_remote"]
   assert by["r-both"]["available_local"] and by["r-both"]["available_remote"]
   assert by["r-remote-only"]["available_remote"] and not by["r-remote-only"]["available_local"]
-  # Sorted newest-first by started_at; the remote-only (no started_at) sorts last.
-  assert [r["recording_id"] for r in recs][:2] == ["r-both", "r-local"]
-  # Slice 5: a `type` is always present (defaults to "explicit").
+  # Sorted newest-first by started_at; the remote-only entry carries its
+  # backend metadata.started_at (2026-06-04T02), so it sorts with r-both.
   assert by["r-local"]["type"] == "explicit"
+  assert by["r-remote-only"]["upload_state"] == "uploaded"
+
+
+def test_remote_only_without_metadata_is_in_progress():
+  # metadata.json is the uploader's LAST file (V5.5.1); a backend recording
+  # missing it is still uploading, surfaced as upload_state="uploading".
+  storage = FakeStorageBackend()
+  _seed(storage, "r-partial", with_metadata=False)
+  client = make_client(lambda r: httpx.Response(200, json=[]), storage=storage)
+  recs = client.get("/api/recordings", headers=AUTHED).json()
+  row = next(r for r in recs if r["recording_id"] == "r-partial")
+  assert row["available_remote"] is True
+  assert row["upload_state"] == "uploading"
 
 
 def test_recordings_list_carries_anomaly_type():
-  # S5.4/B5.3: supervisor tags anomaly recordings with type="anomaly"; the
-  # backend carries the field through the merge.
   def handler(req: httpx.Request) -> httpx.Response:
     return httpx.Response(
       200,
@@ -149,17 +171,43 @@ def test_recordings_list_requires_auth():
   assert client.get("/api/recordings").status_code == 401
 
 
-# --- B4.3/B4.4 playback: presigned redirect vs proxy -------------------------
+# --- B5.5.4 playback: presigned redirect (MinIO) vs disk byte range ----------
 
 
-def test_uploaded_playlist_redirects_to_minio():
-  store = FakeRecordingsStore(recordings={"r1": ["index.m3u8", "seg-00000.ts"]})
-  client = make_client(lambda r: httpx.Response(404), store=store)
+def test_uploaded_playlist_redirects_for_minio_backend():
+  # presigned=True makes the fake backend behave like MinIO: playback_url
+  # returns a PresignedURL, so the handler 302-redirects.
+  storage = FakeStorageBackend(presigned=True)
+  _seed(storage, "r1")
+  client = make_client(lambda r: httpx.Response(404), storage=storage)
   r = client.get("/api/recordings/r1/playlist", headers=AUTHED, follow_redirects=False)
   assert r.status_code == 302
   assert "X-Amz-Signature" in r.headers["location"]
   seg = client.get("/api/recordings/r1/segment/seg-00000.ts", headers=AUTHED, follow_redirects=False)
   assert seg.status_code == 302
+
+
+def test_uploaded_playlist_served_by_disk_backend():
+  storage = FakeStorageBackend()  # serves locally (disk-like)
+  _seed(storage, "r1")
+  client = make_client(lambda r: httpx.Response(404), storage=storage)
+  r = client.get("/api/recordings/r1/playlist", headers=AUTHED)
+  assert r.status_code == 200
+  assert r.content.startswith(b"#EXTM3U")
+  assert r.headers["content-type"] == "application/vnd.apple.mpegurl"
+
+
+def test_disk_backend_segment_range_returns_206():
+  storage = FakeStorageBackend()
+  _seed(storage, "r1", segment=b"0123456789ABCDEF")
+  client = make_client(lambda r: httpx.Response(404), storage=storage)
+  r = client.get(
+    "/api/recordings/r1/segment/seg-00000.ts", headers={**AUTHED, "Range": "bytes=0-3"}
+  )
+  assert r.status_code == 206
+  assert r.content == b"0123"
+  assert r.headers["content-range"] == "bytes 0-3/16"
+  assert r.headers["content-type"] == "video/mp2t"
 
 
 def test_local_only_playlist_proxied_from_supervisor():
@@ -169,7 +217,7 @@ def test_local_only_playlist_proxied_from_supervisor():
       200, content=b"#EXTM3U-local", headers={"content-type": "application/vnd.apple.mpegurl"}
     )
 
-  client = make_client(handler)  # empty store -> no remote -> proxy
+  client = make_client(handler)  # empty backend -> no remote -> proxy
   r = client.get("/api/recordings/r-local/playlist", headers=AUTHED)
   assert r.status_code == 200 and r.content == b"#EXTM3U-local"
 

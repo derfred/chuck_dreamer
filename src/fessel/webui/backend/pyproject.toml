@@ -13,7 +13,9 @@ dependencies = [
 ]
 
 [project.scripts]
-fessel-backend = "app.main:app"
+# Binds BOTH listeners (public :8000 + tailnet-only ingest :8001) in one
+# process (Slice 5.5, B5.5.7). The container CMD invokes this.
+fessel-backend = "app.main:serve_both"
 
 [build-system]
 requires = ["hatchling"]

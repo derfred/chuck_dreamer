@@ -1,21 +1,23 @@
-"""uploader process entrypoint (V4.7).
+"""uploader process entrypoint (V4.7 / V5.5.1).
 
 A sibling of `video` (the spec leaves the process boundary open; a separate
-process keeps the MinIO SDK out of video's gi venv and isolates upload failures
-from the capture pipeline). It watches the SSD upload_queue, ships flagged
-recordings to MinIO with bounded retries/backoff, updates each recording's
-metadata.json + publishes per-recording progress and periodic backlog gauges to
-the Pi-internal MQTT bus (which supervisor bridges to Prometheus in Slice 7).
+process isolates upload failures from the capture pipeline). It watches the SSD
+upload_queue, ships flagged recordings to webui-backend's tailnet-only
+recording-ingest endpoint over HTTPS with bounded retries/backoff, updates each
+recording's metadata.json + publishes per-recording progress and periodic
+backlog gauges to the Pi-internal MQTT bus (which supervisor bridges to
+Prometheus in Slice 7).
+
+Slice 5.5: the Pi holds NO cluster-store credentials. Auth to the ingest
+endpoint is by Tailscale identity at the network layer; the uploader is an
+HTTPS client only (no MinIO SDK, no S3 keys).
 
 Config — the `uploader:` subtree of the single fessel.yaml (Requirements §6),
 plus the shared `mqtt`/`storage` sections, flattened by load_component_config:
-  mqtt:    {host, port}              # shared
-  storage: {ssd_path}               # shared; default /mnt/ssd (same mount as video)
-  minio:   {driver, endpoint, access_key, secret_key, bucket, secure}
-  upload:  {key_prefix, backoff_s: [..], poll_interval_s, backlog_interval_s}
-
-Credentials come from config for now (V4.7); the packaging slice wires them
-from a k8s Secret via env.
+  mqtt:     {host, port}             # shared
+  storage:  {ssd_path}               # shared; default /mnt/ssd (same mount as video)
+  uploader: {driver, ingest_url_base, timeout_s, verify_tls}
+  upload:   {backoff_s: [..], poll_interval_s, backlog_interval_s}
 """
 
 from __future__ import annotations
@@ -30,8 +32,8 @@ from fessel_schemas import UploadGate
 from fessel_shared import ConfigReloader, MqttClient, Storage, load_component_config
 from fessel_shared import topics
 
-from .core import DEFAULT_BACKOFF_S, DEFAULT_KEY_PREFIX, Uploader
-from .objectstore import build_object_store
+from .core import DEFAULT_BACKOFF_S, Uploader
+from .ingest import build_ingest_client
 
 log = logging.getLogger(__name__)
 
@@ -42,31 +44,27 @@ DEFAULT_POLL_INTERVAL_S = 10.0
 DEFAULT_BACKLOG_INTERVAL_S = 30.0
 
 
-def _minio_config_with_env(cfg: dict) -> dict:
-  """Overlay env-var overrides on the `minio` config block. The architecture
-  (§5.5) calls for credentials/endpoint to be injected via environment in the
-  cluster (from a k8s Secret); this lets a deploy retarget the object store
-  without editing the baked-in fessel.yaml — used by the integration env to
-  point the test-Pi's uploader at a real in-cluster MinIO (driver `minio`)
-  rather than the `fake` in-memory store its fessel.test.yaml defaults to.
+def _ingest_config_with_env(cfg: dict) -> dict:
+  """Overlay env-var overrides on the `uploader` ingest config block. The
+  architecture (§5.5) injects deploy-specific values via environment; this lets
+  the integration env point the test-Pi's uploader at the in-cluster webui
+  Service (plain HTTP) and the `http` driver, rather than the baked-in `fake`
+  the fessel.test.yaml defaults to.
 
-  Env keys (all optional): FESSEL_MINIO_{DRIVER,ENDPOINT,ACCESS_KEY,SECRET_KEY,
-  BUCKET,SECURE}. SECURE is parsed as a bool ("true"/"1"/"yes")."""
+  Env keys (all optional): FESSEL_INGEST_{DRIVER,URL_BASE,VERIFY_TLS}.
+  VERIFY_TLS is parsed as a bool ("true"/"1"/"yes")."""
   out = dict(cfg)
   env = os.environ
   for key, env_name in (
-    ("driver", "FESSEL_MINIO_DRIVER"),
-    ("endpoint", "FESSEL_MINIO_ENDPOINT"),
-    ("access_key", "FESSEL_MINIO_ACCESS_KEY"),
-    ("secret_key", "FESSEL_MINIO_SECRET_KEY"),
-    ("bucket", "FESSEL_MINIO_BUCKET"),
+    ("driver", "FESSEL_INGEST_DRIVER"),
+    ("ingest_url_base", "FESSEL_INGEST_URL_BASE"),
   ):
     val = env.get(env_name)
     if val is not None:
       out[key] = val
-  secure = env.get("FESSEL_MINIO_SECURE")
-  if secure is not None:
-    out["secure"] = secure.lower() in ("true", "1", "yes")
+  verify = env.get("FESSEL_INGEST_VERIFY_TLS")
+  if verify is not None:
+    out["verify_tls"] = verify.lower() in ("true", "1", "yes")
   return out
 
 
@@ -84,7 +82,7 @@ class UploaderApp:
     # (and warn about) a change to something it cannot hot-apply (§2.13).
     self._boot_mqtt = config.get("mqtt")
     self._boot_storage = storage_cfg or None
-    # _boot_minio is set below from the env-resolved minio config.
+    # _boot_ingest is set below from the env-resolved uploader config.
 
     upload_cfg = config.get("upload", {})
     self._poll_interval = float(upload_cfg.get("poll_interval_s", DEFAULT_POLL_INTERVAL_S))
@@ -92,14 +90,13 @@ class UploaderApp:
       upload_cfg.get("backlog_interval_s", DEFAULT_BACKLOG_INTERVAL_S)
     )
 
-    minio_cfg = _minio_config_with_env(config.get("minio", {}))
-    self._boot_minio = minio_cfg
-    store = build_object_store(minio_cfg)
+    ingest_cfg = _ingest_config_with_env(config.get("uploader", {}))
+    self._boot_ingest = ingest_cfg
+    client = build_ingest_client(ingest_cfg)
     self._uploader = Uploader(
       storage=self._storage,
-      store=store,
+      client=client,
       publish=self._mqtt.publish,
-      key_prefix=upload_cfg.get("key_prefix", DEFAULT_KEY_PREFIX),
       backoff_s=upload_cfg.get("backoff_s") or DEFAULT_BACKOFF_S,
     )
     self._stop = threading.Event()
@@ -142,8 +139,8 @@ class UploaderApp:
   def apply_config(self, cfg: dict) -> None:
     """Apply the hot-reloadable subset (§2.13 conservative scope): the `upload`
     poll/backlog intervals (read live at the loop top) and the retry backoff.
-    Restart-only keys (mqtt, storage.ssd_path, minio.*) are NOT applied here; a
-    change to them is logged so the operator knows a restart is needed."""
+    Restart-only keys (mqtt, storage.ssd_path, uploader.*) are NOT applied here;
+    a change to them is logged so the operator knows a restart is needed."""
     up = cfg.get("upload", {})
     self._poll_interval = float(up.get("poll_interval_s", DEFAULT_POLL_INTERVAL_S))
     self._backlog_interval = float(up.get("backlog_interval_s", DEFAULT_BACKLOG_INTERVAL_S))
@@ -153,9 +150,9 @@ class UploaderApp:
       log.warning(
         '{"event":"config_reload","note":"mqtt/storage changed; restart required to apply"}'
       )
-    if cfg.get("minio") != self._boot_minio:
+    if _ingest_config_with_env(cfg.get("uploader", {})) != self._boot_ingest:
       log.warning(
-        '{"event":"config_reload","note":"minio changed; restart required to apply"}'
+        '{"event":"config_reload","note":"uploader ingest config changed; restart required to apply"}'
       )
 
   def run(self) -> None:

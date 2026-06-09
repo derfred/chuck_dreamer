@@ -20,7 +20,8 @@ FESSEL_YAML = textwrap.dedent(
     http: {port: 8443}
     control: {wiz: {driver: fake}}
   uploader:
-    minio: {driver: minio, bucket: fessel}
+    driver: http
+    ingest_url_base: "https://fessel-ingest.tailnet.ts.net:8443"
     upload: {poll_interval_s: 10}
   """
 )
@@ -49,7 +50,8 @@ def test_component_subtree_flattened_to_top_level(tmp_path):
   assert sup["http"] == {"port": 8443}
   assert sup["control"]["wiz"]["driver"] == "fake"
   up = load_component_config(p, "uploader")
-  assert up["minio"]["bucket"] == "fessel"
+  assert up["driver"] == "http"
+  assert up["ingest_url_base"].endswith(":8443")
   assert up["upload"]["poll_interval_s"] == 10
 
 
@@ -57,7 +59,7 @@ def test_no_cross_component_leakage(tmp_path):
   p = _write(tmp_path, FESSEL_YAML)
   video = load_component_config(p, "video")
   # video must not see supervisor/uploader keys (or the raw subtree names).
-  for absent in ("control", "http", "minio", "upload", "video", "supervisor", "uploader"):
+  for absent in ("control", "http", "ingest_url_base", "upload", "video", "supervisor", "uploader"):
     assert absent not in video, absent
 
 
@@ -96,13 +98,13 @@ def test_flat_legacy_file_falls_back_to_top_level_keys(tmp_path):
       """
       mqtt: {host: 127.0.0.1}
       storage: {ssd_path: /tmp/ssd}
-      minio: {driver: fake}
+      driver: fake
       upload: {poll_interval_s: 2}
       """
     ),
   )
   up = load_component_config(p, "uploader")
-  assert up["minio"] == {"driver": "fake"}
+  assert up["driver"] == "fake"
   assert up["upload"] == {"poll_interval_s": 2}
   assert up["storage"]["ssd_path"] == "/tmp/ssd"
 
@@ -129,8 +131,9 @@ def test_shipped_example_loads_per_component():
   assert video["mqtt"]["port"] == 1883
   assert video["storage"]["ssd_path"] == "/mnt/ssd"
   assert video["ring"]["fps"] == 30 and video["recording"]["bitrate_bps"] == 8_000_000
-  assert "control" not in video and "minio" not in video
+  assert "control" not in video and "ingest_url_base" not in video
   sup = load_component_config(example, "supervisor")
   assert sup["http"]["port"] == 8443 and sup["control"]["plugs"]["arm"]["address"]
   up = load_component_config(example, "uploader")
-  assert up["minio"]["bucket"] == "fessel" and up["upload"]["poll_interval_s"] == 10.0
+  assert up["driver"] == "http" and up["ingest_url_base"].endswith(":8443")
+  assert up["upload"]["poll_interval_s"] == 10.0

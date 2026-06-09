@@ -31,9 +31,25 @@ The backend is a pass-through: supervisor's status code and structured body
 flow to the frontend verbatim (a 5xx actuator failure stays a 5xx). Every
 action emits a B3.3 audit log line (operator, action, outcome, latency).
 
+Slice 5.5 fronts the recording store: the Pi-side uploader PUTs each recording
+file to a tailnet-only recording-ingest endpoint, and the backend persists it
+via a configured storage backend (MinIO or disk). Playback is served the same
+way to the frontend regardless of backend — a 302 redirect to a MinIO presigned
+URL, or a backend-served byte range for disk.
+
+Two listeners (B5.5.7, settled by the deploy decision):
+  - PUBLIC app  (this module's `app`)        -> browser surface behind
+    oauth2-proxy + the in-cluster /jwks fetch. ALL Pi->webui traffic is kept
+    OFF this listener.
+  - INGEST app  (`ingest_app`, create_ingest_app) -> tailnet-only. Serves
+    `/recording-ingest/...` (and any future Pi->webui endpoint). The public
+    Ingress never routes to the ingest port, so it is structurally impossible
+    to reach the ingest endpoint through the public ingress.
+
 Endpoint classes (see webui/deploy/README.md):
   - Behind oauth2-proxy (interactive): /, /live, /api/...  -> require identity.
-  - Bypass oauth2-proxy (machine-to-machine): /jwks         -> reject identity.
+  - Bypass oauth2-proxy, in-cluster (machine-to-machine): /jwks -> reject identity.
+  - Tailnet-only, separate listener (Pi -> backend): /recording-ingest/...
 
 Env config:
   FESSEL_WHEP_SECRET       shared HMAC/JWT secret (also held by mediamtx)
@@ -46,6 +62,10 @@ Env config:
                            set, /jwks 404s for requests arriving on it (the JWK
                            is the signing secret and must stay in-cluster only).
                            Unset -> no host gate (the in-cluster default).
+  FESSEL_RECORDINGS_BACKEND  "minio" | "disk" (recordings_storage.backend)
+  FESSEL_RECORDINGS_DISK_PATH  mounted PVC path (disk backend)
+  FESSEL_MINIO_*           endpoint/bucket/keys (minio backend)
+  FESSEL_INGEST_PORT       ingest listener port (default 8001; bound by serve_both)
 """
 
 from __future__ import annotations
@@ -56,14 +76,15 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from tempfile import SpooledTemporaryFile
 from urllib.parse import quote, urlencode
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fessel_schemas import fessel_version, mode_from_canonical
 
 from .auth import AuthHeaders, Identity
-from .recordings_store import RecordingsStore, build_recordings_store
+from .storage import PresignedURL, ServeLocally, StorageBackend, build_storage_backend
 from .supervisor_client import SupervisorClient
 from .token import WHEP_KID, mint_whep_token
 
@@ -116,7 +137,7 @@ async def _safe_json_body(request: Request) -> dict:
 
 def create_app(
   supervisor: SupervisorClient | None = None,
-  recordings_store: RecordingsStore | None = None,
+  storage: StorageBackend | None = None,
 ) -> FastAPI:
   app        = FastAPI(title="fessel-webui-backend")
   media_base = os.environ.get("FESSEL_MEDIA_BASE", "http://localhost:8889").rstrip("/")
@@ -127,7 +148,17 @@ def create_app(
   public_webui_host = os.environ.get("FESSEL_PUBLIC_WEBUI_HOST", "").split(":")[0].lower()
   headers    = AuthHeaders()
   supervisor = supervisor if supervisor is not None else SupervisorClient()
-  store      = recordings_store if recordings_store is not None else build_recordings_store()
+  # The storage backend (Slice 5.5): listing + playback for uploaded recordings
+  # come from here. Built lazily so a test that only exercises control/live
+  # endpoints needn't configure a backend; the recordings endpoints build one
+  # on first use via _get_storage().
+  _storage = storage
+
+  def _get_storage() -> StorageBackend:
+    nonlocal _storage
+    if _storage is None:
+      _storage = build_storage_backend()
+    return _storage
 
   def require_identity(request: Request) -> Identity:
     """Dependency for proxied endpoints: 401 unless oauth2-proxy forwarded identity."""
@@ -376,11 +407,14 @@ def create_app(
 
   @app.get("/api/recordings")
   def api_recordings(identity: Identity = Depends(require_identity)) -> JSONResponse:
-    # B4.2: unified list from supervisor (Pi-local) + MinIO (uploaded),
-    # deduplicated by recording_id, each tagged available_local/available_remote.
+    # B5.5.5: unified list from supervisor (Pi-local) + the storage backend
+    # (uploaded, via the new ingest path), deduplicated by recording_id, each
+    # tagged available_local/available_remote. The "remote" half now comes from
+    # the configured backend's list() (MinIO listing or disk walk) rather than a
+    # hardcoded MinIO listing — the backend choice is invisible here.
     sup = supervisor.get("/recordings")
     local: list[dict] = sup.body if isinstance(sup.body, list) else []
-    remote = {r.recording_id: r for r in store.list_recordings()}
+    remote = {v.recording_id: v for v in _get_storage().list()}
 
     merged: dict[str, dict] = {}
     for item in local:
@@ -400,22 +434,27 @@ def create_app(
         "available_local": True,
         "available_remote": rid in remote,
       }
-    # Recordings present only in MinIO (Pi-side copy removed — out of Slice 4
-    # scope, but the shape must not assume Pi-only).
-    for rid in remote:
-      if rid not in merged:
-        merged[rid] = {
-          "recording_id": rid,
-          "type": "explicit",
-          "started_at": None,
-          "ended_at": None,
-          "duration_seconds": None,
-          "operator": None,
-          "flagged_for_upload": True,
-          "upload_state": "uploaded",
-          "available_local": False,
-          "available_remote": True,
-        }
+    # Recordings present only in the backend (Pi-side copy removed — out of
+    # scope, but the shape must not assume Pi-only). metadata.json is the
+    # uploader's last file, so a recording missing it is still "in progress":
+    # surface upload_state accordingly so the frontend can show that.
+    for rid, view in remote.items():
+      if rid in merged:
+        continue
+      meta = view.metadata or {}
+      complete = view.metadata is not None
+      merged[rid] = {
+        "recording_id": rid,
+        "type": view.rec_type,
+        "started_at": meta.get("started_at"),
+        "ended_at": meta.get("ended_at"),
+        "duration_seconds": meta.get("duration_seconds"),
+        "operator": meta.get("operator"),
+        "flagged_for_upload": True,
+        "upload_state": "uploaded" if complete else "uploading",
+        "available_local": False,
+        "available_remote": True,
+      }
     out = sorted(merged.values(), key=lambda r: r.get("started_at") or "", reverse=True)
     return JSONResponse(content=out)
 
@@ -432,18 +471,53 @@ def create_app(
     return _serve_recording_file(recording_id, name, request)
 
   def _serve_recording_file(recording_id: str, filename: str, request: Request) -> Response:
-    # B4.3/B4.4 two-path model: an uploaded recording is served straight from
-    # MinIO via a presigned redirect (offloads Pi bandwidth); a local-only one
-    # is proxied from supervisor. Prefer remote when available.
-    url = store.presigned_url(recording_id, filename)
-    if url is not None:
-      return RedirectResponse(url=url, status_code=302)
+    # B5.5.4 uniform front, backend-specific behaviour. Prefer the storage
+    # backend (an uploaded recording):
+    #   - MinIO backend -> PresignedURL -> 302 redirect (browser fetches the
+    #     bytes straight from MinIO; the backend never touches them).
+    #   - disk backend  -> ServeLocally -> 200/206 byte stream from read()
+    #     (Range honoured end-to-end; hls.js issues ranged GETs).
+    # A recording present only on the Pi (not yet uploaded) is proxied from
+    # supervisor, as before.
+    try:
+      target = _get_storage().playback_url(recording_id, filename)
+    except ValueError:
+      # Backend rejected the id/name (path-safety on the disk backend).
+      raise HTTPException(status_code=400, detail="invalid recording path") from None
+    if isinstance(target, PresignedURL):
+      return RedirectResponse(url=target.url, status_code=302)
+    if isinstance(target, ServeLocally):
+      return _serve_from_disk_backend(recording_id, filename, request)
     sup_path = (
       f"/recordings/{recording_id}/{filename}"
       if filename != "index.m3u8"
       else f"/recordings/{recording_id}/index.m3u8"
     )
     return _proxy_binary(sup_path, request)
+
+  def _serve_from_disk_backend(recording_id: str, filename: str, request: Request) -> Response:
+    # Stream the file from the disk backend, honouring an HTTP Range header so
+    # hls.js can walk segments (an explicit test asserts Range -> 206).
+    rng = request.headers.get("range")
+    try:
+      result = _get_storage().read(recording_id, filename, rng)
+    except ValueError:
+      # Malformed / unsatisfiable Range -> 416 (parse_byte_range raised).
+      return Response(status_code=416, headers={"Accept-Ranges": "bytes"})
+    if result is None:
+      raise HTTPException(status_code=404, detail="not found")
+    base_headers = {
+      "Content-Type": result.content_type,
+      "Content-Length": str(result.content_length),
+      "Accept-Ranges": "bytes",
+    }
+    if result.byte_range is not None:
+      r = result.byte_range
+      base_headers["Content-Range"] = f"bytes {r.start}-{r.end}/{r.total}"
+      status = 206
+    else:
+      status = 200
+    return StreamingResponse(result.chunks, status_code=status, headers=base_headers)
 
   @app.get("/api/ring/playlist")
   def api_ring_playlist(
@@ -494,4 +568,148 @@ def create_app(
   return app
 
 
-app = create_app()
+# --- ingest listener (B5.5.6/B5.5.7) -----------------------------------------
+# A SEPARATE ASGI app bound to a SEPARATE port (FESSEL_INGEST_PORT). The
+# `webui-recording-ingest` Tailscale Service targets this port; the public
+# Ingress never does. Because `/recording-ingest/...` exists ONLY on this app,
+# it is structurally impossible to reach it through the public listener — the
+# two-listener model the deploy chose. ALL Pi->backend traffic lives here.
+#
+# Auth is at the network layer (Tailscale identity); there is no oauth2-proxy
+# in front, no application-layer token. The backend trusts what arrives on the
+# tailnet (B5.5.6): the body is HLS bytes written by `video`, persisted as-is.
+
+
+def create_ingest_app(storage: StorageBackend | None = None) -> FastAPI:
+  ingest = FastAPI(title="fessel-webui-backend-ingest")
+  _storage = storage
+
+  def _get_storage() -> StorageBackend:
+    nonlocal _storage
+    if _storage is None:
+      _storage = build_storage_backend()
+    return _storage
+
+  @ingest.get("/healthz")
+  def healthz() -> dict:
+    return {"status": "ok", "version": fessel_version(), "listener": "ingest"}
+
+  @ingest.put("/recording-ingest/{recording_id}/{file_name}")
+  async def recording_ingest(recording_id: str, file_name: str, request: Request) -> Response:
+    # Two impedance mismatches to bridge: the body is async (Starlette) while the
+    # storage backends are sync, and the only S3 client we have (the `minio` SDK)
+    # is blocking with no async variant — so a write must run in a worker thread
+    # regardless of backend.
+    #
+    # Rather than hand-roll a producer/consumer queue, spool the body to a
+    # SpooledTemporaryFile: it keeps the bytes in memory up to a threshold and
+    # transparently rolls over to a real temp file beyond it, so memory stays
+    # bounded even for a large segment. Then hand the store a sync generator over
+    # that file in ONE `to_thread.run_sync` call. Per-file PUT matches the
+    # uploader's per-file retry: a repeated PUT overwrites cleanly (store() is
+    # idempotent).
+    import anyio
+
+    t0 = time.monotonic()
+    storage = _get_storage()
+
+    with SpooledTemporaryFile(max_size=_INGEST_SPOOL_MAX) as spool:
+      size = 0
+      async for chunk in request.stream():
+        if chunk:
+          spool.write(chunk)
+          size += len(chunk)
+      spool.seek(0)
+      try:
+        await anyio.to_thread.run_sync(
+          storage.store, recording_id, file_name, _file_chunks(spool)
+        )
+      except ValueError as e:
+        # Path-safety / bad id or name -> 400 (malformed request).
+        _ingest_log(recording_id, file_name, size, "rejected", t0)
+        raise HTTPException(status_code=400, detail=str(e)) from e
+      except Exception as e:  # noqa: BLE001 — backend store failure -> 5xx, Pi retries
+        _ingest_log(recording_id, file_name, size, "store_error", t0)
+        raise HTTPException(status_code=502, detail=f"store failed: {type(e).__name__}") from e
+
+    _ingest_log(recording_id, file_name, size, "stored", t0)
+    return Response(status_code=201)
+
+  return ingest
+
+
+# Spool body in memory up to this size, then roll over to a temp file on disk.
+# Sized above a typical HLS segment so the common case stays in memory, while a
+# pathologically large upload still can't exhaust it.
+_INGEST_SPOOL_MAX = 16 * 1024 * 1024
+
+
+def _file_chunks(fh, chunk_size: int = 1024 * 1024):
+  """Yield `fh` in chunk_size pieces — the sync iterable the storage backends'
+  store() consume. Runs inside the worker thread (the file read is blocking)."""
+  while True:
+    data = fh.read(chunk_size)
+    if not data:
+      return
+    yield data
+
+
+def _ingest_log(recording_id: str, file_name: str, size: int, outcome: str, t0: float) -> None:
+  # B5.5.6: one structured line per PUT — the Loki audit trail for uploads.
+  log.info(
+    json.dumps(
+      {
+        "event": "recording_ingest",
+        "recording_id": recording_id,
+        "file": file_name,
+        "size_bytes": size,
+        "outcome": outcome,
+        "latency_ms": int((time.monotonic() - t0) * 1000),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+      }
+    )
+  )
+
+
+# Public listener (browser surface, behind oauth2-proxy) and the tailnet-only
+# ingest listener share one storage backend instance so a uploaded-then-played
+# round trip is consistent within the process. Build it once here (lazily, via
+# the factory) and inject into both apps.
+def _shared_storage() -> StorageBackend | None:
+  # None when no backend is configured (e.g. a control-plane-only dev run): the
+  # apps then build one on first recordings/ingest use and surface the config
+  # error there rather than failing the whole process at import.
+  try:
+    return build_storage_backend()
+  except RuntimeError:
+    return None
+
+
+_shared = _shared_storage()
+app = create_app(storage=_shared)
+ingest_app = create_ingest_app(storage=_shared)
+
+
+def serve_both() -> None:
+  """Run BOTH listeners in one process (the container entrypoint): the public
+  app on :8000 and the ingest app on FESSEL_INGEST_PORT (default 8001).
+
+  uvicorn.Server doesn't multiplex two apps on one process out of the box, so
+  run each server in its own asyncio task. Both share the in-process storage
+  backend built above.
+  """
+  import asyncio
+
+  import uvicorn
+
+  ingest_port = int(os.environ.get("FESSEL_INGEST_PORT", "8001"))
+  public_port = int(os.environ.get("FESSEL_PORT", "8000"))
+
+  async def _run() -> None:
+    public = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=public_port, log_level="info"))
+    ingest = uvicorn.Server(
+      uvicorn.Config(ingest_app, host="0.0.0.0", port=ingest_port, log_level="info")
+    )
+    await asyncio.gather(public.serve(), ingest.serve())
+
+  asyncio.run(_run())

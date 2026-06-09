@@ -1,14 +1,14 @@
 [Unit]
-Description=Fessel uploader (ships flagged recordings to MinIO)
+Description=Fessel uploader (PUTs flagged recordings to webui-backend over the tailnet)
 After=network.target fessel-mosquitto.service
 Wants=fessel-mosquitto.service
 
 [Service]
 Environment=FESSEL_CONFIG=/etc/fessel/fessel.yaml
 # Launcher wrapper (ships in /usr/bin from the dpkg). Runs the system python3
-# directly against /opt/fessel/lib (no venv). The MinIO SDK is imported lazily,
-# so the process starts even where python3-minio is absent (the 'fake' driver
-# needs no SDK); production must provide the SDK for the 'minio' driver.
+# directly against /opt/fessel/lib (no venv). Slice 5.5: the uploader is an
+# HTTPS client (python3-httpx) only — no MinIO SDK, no S3 credentials; auth to
+# the recording-ingest endpoint is by Tailscale identity at the network layer.
 ExecStart=/usr/bin/fessel-uploader
 Restart=on-failure
 RestartSec=5

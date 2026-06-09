@@ -34,6 +34,10 @@ from playwright.sync_api import sync_playwright
 WEBUI = os.environ.get("WEBUI", "http://webui:8000")
 MEDIA = os.environ.get("MEDIA", "http://mediamtx:8889")
 SUPERVISOR = os.environ.get("SUPERVISOR", "http://supervisor:8443")
+# Slice 5.5: the backend's tailnet-only recording-ingest listener (B5.5.7). In
+# the integration env it's exposed on the in-cluster webui Service's `ingest`
+# port (8001). The auth/bypass tests (T5.5.3) PUT here vs. the public listener.
+WEBUI_INGEST = os.environ.get("WEBUI_INGEST", "http://webui:8001")
 PATH = os.environ.get("FESSEL_PATH", "pi")
 MODE = os.environ.get("FESSEL_MODE", "640x480@30@1000000")
 JUNIT_OUT = os.environ.get("JUNIT_OUT", "/results/junit.xml")
@@ -230,6 +234,59 @@ def webui_post_json(path: str, body: dict | None = None) -> tuple[int, dict]:
       return e.code, json.loads(body)
     except ValueError:
       return e.code, {"detail": body.decode(errors="replace")}
+
+
+def webui_get_bytes(
+  path: str, extra_headers: dict | None = None
+) -> tuple[int, bytes, dict]:
+  """GET a binary resource through the backend (playlist/segment). Returns
+  (status, body bytes, response headers). Follows the 302 the MinIO backend
+  would emit (urlopen does) — for the disk backend it's a direct 200/206."""
+  headers = {**AUTH, **(extra_headers or {})}
+  req = urllib.request.Request(f"{WEBUI}{path}", headers=headers, method="GET")  # noqa: S310
+  try:
+    with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
+      return r.status, r.read(), dict(r.headers)
+  except urllib.error.HTTPError as e:
+    return e.code, e.read(), dict(e.headers)
+
+
+def http_put(url: str, body: bytes, headers: dict | None = None) -> tuple[int, bytes]:
+  """Raw PUT (used by the ingest bypass/positive tests). No auth header by
+  default — the ingest endpoint is network-authed, and the bypass test wants to
+  see what the public listener does with an unauthenticated PUT."""
+  req = urllib.request.Request(url, data=body, method="PUT", headers=headers or {})  # noqa: S310
+  try:
+    with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
+      return r.status, r.read()
+  except urllib.error.HTTPError as e:
+    return e.code, e.read()
+
+
+def wait_upload_state(rid: str, targets: tuple[str, ...], timeout: float = 90.0) -> None:
+  """Poll the backend's per-recording upload progress until `state` is one of
+  `targets` (T5.5.2 step 3)."""
+  deadline = time.time() + timeout
+  last = None
+  while time.time() < deadline:
+    try:
+      last = http_get_json(f"{WEBUI}/api/recordings/{rid}/upload", headers=AUTH)
+      if last.get("state") in targets:
+        return
+    except (urllib.error.HTTPError, KeyError, TypeError):
+      pass
+    time.sleep(1.0)
+  raise AssertionError(f"upload state {targets} not reached for {rid}; last={last}")
+
+
+def _first_segment_name(playlist: bytes) -> str | None:
+  """Return the first .ts segment file name referenced by an HLS playlist."""
+  for line in playlist.decode("utf-8", "replace").splitlines():
+    line = line.strip()
+    if line and not line.startswith("#") and line.endswith(".ts"):
+      # The playlist may carry a relative path; we only need the file name.
+      return line.rsplit("/", 1)[-1]
+  return None
 
 
 def list_recordings() -> list[dict]:
@@ -463,19 +520,19 @@ def main() -> int:
       st, _ = control_post("pause", headers={})
       assert st == 401, f"expected 401 without identity, got {st}"
 
-    # --- X4.3 recording end-to-end to a real (in-cluster) MinIO ---
-    # Drives the whole Slice-4 path against the deployed system with the
-    # uploader's REAL minio driver (the integration env wires the test-Pi +
-    # backend to a throwaway in-namespace MinIO): start a recording -> the ring
-    # is always on, so segments exist -> stop -> flag-for-upload -> the uploader
-    # ships it to MinIO -> /api/recordings shows it available_remote (uploaded).
-    def t_recording_e2e_to_minio():
-      # Start an explicit recording at the test mode.
+    # --- T5.5.2 recording round-trip through the new ingest path (disk backend) ---
+    # Drives the whole Slice-5.5 path against the deployed system: the test-Pi's
+    # uploader (real `http` driver, FESSEL_INGEST_URL_BASE=http://webui:8001)
+    # PUTs each file to the backend's recording-ingest listener; the backend's
+    # DISK backend persists them to the PVC and serves playback as byte ranges.
+    # start -> ring is always on so segments exist -> stop -> flag-for-upload ->
+    # uploader PUTs -> /api/recordings shows available_remote -> playback works,
+    # including a Range request returning 206 (B5.5.4, the disk-backend gate).
+    def t_recording_roundtrip_via_ingest():
       st, body = webui_post_json("/api/recording/start", {"mode": MODE})
       assert st == 200, f"recording/start -> {st}: {body}"
       rid = body.get("recording_id")
       assert rid, f"no recording_id from start: {body}"
-      # Wait until video reports it recording (via /api/state), then record a bit.
       wait_api_state(
         lambda s: (s.get("recording") or {}).get("state") == "recording",
         "recording active",
@@ -484,35 +541,71 @@ def main() -> int:
       time.sleep(5)  # capture a few segments
       st, _ = webui_post_json("/api/recording/stop")
       assert st == 200, f"recording/stop -> {st}"
-      # Once finalised (idle), it must appear locally in the listing.
       wait_recordings(
         lambda recs: any(r["recording_id"] == rid for r in recs),
         f"recording {rid} listed",
         timeout=30,
       )
-      # Flag it for upload; the uploader (real minio driver) ships it to MinIO.
+      # Flag for upload; the uploader PUTs each file to the ingest endpoint.
       st, body = webui_post_json("/api/recording/flag-upload", {"recording_id": rid})
       assert st == 200, f"flag-upload -> {st}: {body}"
-      # Poll until the backend's merged listing shows it uploaded to MinIO.
+      # Poll the per-recording upload progress until it reaches `uploaded`
+      # (T5.5.2 step 3), and the merged listing shows available_remote.
+      wait_upload_state(rid, ("uploaded",), timeout=90)
       recs = wait_recordings(
         lambda rs: any(
           r["recording_id"] == rid and r.get("available_remote") for r in rs
         ),
-        f"recording {rid} available_remote (uploaded to MinIO)",
+        f"recording {rid} available_remote (uploaded via ingest)",
         timeout=90,
       )
       row = next(r for r in recs if r["recording_id"] == rid)
-      assert row.get("upload_state") in ("uploaded", "uploading", "queued"), row
-      # Playback resolves: the backend hands out a MinIO presigned URL (302,
-      # which urlopen follows) or proxies the local copy (200) — either is a pass.
-      req = urllib.request.Request(  # noqa: S310
-        f"{WEBUI}/api/recordings/{rid}/playlist", headers=AUTH, method="GET"
+      assert row.get("available_remote") is True, row
+      # Playback: the disk backend serves a 200 with a valid HLS playlist body.
+      st, pl_body, _ = webui_get_bytes(f"/api/recordings/{rid}/playlist")
+      assert st == 200, f"playlist status {st}"
+      assert pl_body.startswith(b"#EXTM3U"), f"not an HLS playlist: {pl_body[:40]!r}"
+      # Pick a segment name from the playlist and fetch it with a Range header;
+      # the disk backend must return 206 Partial Content with the right count.
+      seg = _first_segment_name(pl_body)
+      assert seg, f"no .ts segment in playlist: {pl_body[:200]!r}"
+      st, seg_body, hdrs = webui_get_bytes(
+        f"/api/recordings/{rid}/segment/{seg}", extra_headers={"Range": "bytes=0-1023"}
       )
-      try:
-        with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
-          assert r.status in (200, 302), f"playlist status {r.status}"
-      except urllib.error.HTTPError as e:
-        assert e.code in (200, 302), f"playlist failed: {e.code}"
+      assert st == 206, f"expected 206 for Range, got {st}"
+      assert len(seg_body) == 1024, f"expected 1024 bytes, got {len(seg_body)}"
+      assert hdrs.get("Content-Range", "").startswith("bytes 0-1023/"), hdrs.get("Content-Range")
+
+    # --- T5.5.3 ingest auth + bypass ---
+    def t_ingest_not_reachable_via_public_listener():
+      # A PUT to /recording-ingest/... on the PUBLIC listener (:8000) must not
+      # succeed — the route exists only on the ingest listener (:8001). 404/405
+      # (route absent) or 401/403 are all acceptable "not reachable" outcomes.
+      st, _ = http_put(f"{WEBUI}/recording-ingest/bypass-test/index.m3u8", b"#EXTM3U")
+      assert st in (401, 403, 404, 405), f"ingest reachable via public listener: {st}"
+
+    def t_ingest_listener_accepts_put():
+      # Sanity: the ingest LISTENER (:8001) does accept the PUT (201). This is
+      # the positive control for the bypass test above — proves the negative is
+      # about the listener, not a broken endpoint. Uses a throwaway id.
+      st, _ = http_put(
+        f"{WEBUI_INGEST}/recording-ingest/ingest-probe/index.m3u8", b"#EXTM3U\n"
+      )
+      assert st == 201, f"ingest PUT -> {st}"
+
+    def t_recordings_require_auth():
+      # /api/recordings + playback all 401 without the oauth2-proxy identity.
+      for path in (
+        "/api/recordings",
+        "/api/recordings/x/playlist",
+        "/api/recordings/x/segment/seg-00000.ts",
+      ):
+        try:
+          http_get_json(f"{WEBUI}{path}")
+        except urllib.error.HTTPError as e:
+          assert e.code == 401, f"{path} -> {e.code}, expected 401"
+        else:
+          raise AssertionError(f"{path} did not require auth")
 
     # NOTE: there is intentionally NO automated data-plane (video bytes in
     # the browser) assertion. Headless Chrome cannot complete WebRTC ICE
@@ -531,8 +624,12 @@ def main() -> int:
     suite.run("control_power_cycle_verified", t_power_cycle_verified)
     suite.run("control_verify_failure_surfaces", t_verify_failure_surfaces)
     suite.run("control_requires_auth", t_control_requires_auth)
-    # Slice 4 recording end-to-end to a real (in-cluster) MinIO (X4.3).
-    suite.run("recording_e2e_to_minio", t_recording_e2e_to_minio)
+    # Slice 5.5 recording round-trip through the new ingest path (disk backend,
+    # T5.5.2) + the ingest auth/bypass assertions (T5.5.3).
+    suite.run("recording_roundtrip_via_ingest", t_recording_roundtrip_via_ingest)
+    suite.run("ingest_listener_accepts_put", t_ingest_listener_accepts_put)
+    suite.run("ingest_not_reachable_via_public_listener", t_ingest_not_reachable_via_public_listener)
+    suite.run("recordings_require_auth", t_recordings_require_auth)
 
     browser.close()
 

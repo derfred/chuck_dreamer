@@ -90,12 +90,20 @@ Sizing (ring duration vs. SSD size vs. bitrate) is a deployment choice — see t
 (recent context, not archival); long retention is the upload-to-cluster path's
 job.
 
-### MinIO upload (uploader section)
+### Recording upload (uploader section)
 
-The uploader ships **flagged** recordings to the cluster MinIO over Tailscale.
-Set `uploader.minio.endpoint` / `bucket` / `access_key` / `secret_key` in
-`/etc/fessel/fessel.yaml`. The production driver (`minio`) needs the
-`python3-minio` package — it is in the deb's **Recommends** (installed by default
-with `apt install`, but the import is lazy so the service still starts without
-it; only the `minio` driver requires it). Credentials live in the conffile for
-now; a later packaging slice wires them from a managed secret.
+The uploader PUTs **flagged** recordings to webui-backend's tailnet-only
+recording-ingest endpoint over Tailscale (Slice 5.5). Set
+`uploader.ingest_url_base` in `/etc/fessel/fessel.yaml` to the backend's
+recording-ingest Tailscale ingress (the `webui-recording-ingest` Service's
+magicDNS name + port, e.g. `https://fessel-ingest.<tailnet>.ts.net:8443`). The
+uploader is an **HTTPS client only** (`python3-httpx`, in **Depends**) — it
+holds **no cluster-store credentials**; auth is by Tailscale identity at the
+network layer.
+
+**Upgrade note (from a pre-5.5 install):** delete the obsolete
+`uploader.minio` block (endpoint + `access_key`/`secret_key`) from
+`/etc/fessel/fessel.yaml` — those S3 credentials no longer belong on the Pi.
+`python3-minio` is no longer a dependency; nothing on the Pi imports the MinIO
+SDK. Which store the recordings land in (MinIO or disk) is now a cluster-side
+choice on webui-backend (`recordings_storage.backend`), invisible to the Pi.

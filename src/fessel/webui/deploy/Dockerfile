@@ -31,5 +31,9 @@ ENV FESSEL_STATIC_DIR=/app/static
 ARG FESSEL_VERSION=unknown
 ENV FESSEL_VERSION=${FESSEL_VERSION}
 
-EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Two listeners (Slice 5.5, B5.5.7): the public browser surface on :8000 (behind
+# oauth2-proxy via the public Ingress) and the tailnet-only recording-ingest
+# listener on :8001 (targeted by the webui-recording-ingest Tailscale Service,
+# never by the public Ingress). serve_both binds both in one process.
+EXPOSE 8000 8001
+CMD ["fessel-backend"]

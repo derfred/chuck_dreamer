@@ -13,7 +13,16 @@ local cfg = fessel.config + {
   webrtc+: { mode: 'podip' },
   includeTestPi: true,
   includeControlMocks: true,  // jetson-mock pod; WiZ is the in-process fake bulb
-  includeMinio: true,  // throwaway MinIO so the recording E2E (X4.3) ships for real
+  // Slice 5.5: the per-PR run uses the DISK backend (T5.5.1) — no MinIO needed.
+  // The PVC is provisioned in the test namespace and cleaned up at teardown.
+  // The disk-backed recording round-trip (T5.5.2) is the must-pass assertion.
+  recordingsStorage+: {
+    backend: 'disk',
+    // A small PVC (the test writes a couple of tiny segments); use the cluster
+    // default StorageClass.
+    disk+: { pvc+: { size: '1Gi' } },
+  },
+  includeMinio: false,  // disk backend default; no throwaway MinIO in CI
   includeTailscale: false,
 };
 

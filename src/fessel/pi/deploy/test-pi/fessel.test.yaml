@@ -76,11 +76,12 @@ supervisor:
 # --- uploader ---------------------------------------------------------------
 
 uploader:
-  # The fake object store keeps "uploaded" objects in memory (no real MinIO
-  # dialed), so the upload state machine + marker lifecycle run end-to-end in
-  # the container. A real-MinIO upload assertion is a later harness extension.
-  minio:
-    driver: fake
+  # Defaults to the in-memory `fake` client (no real backend dialed), so the
+  # upload state machine + marker lifecycle run standalone. The integration env
+  # overrides driver -> http and ingest_url_base -> the in-cluster webui ingest
+  # listener (FESSEL_INGEST_* env, pi.libsonnet) so the recording round-trip
+  # (T5.5.2) ships through the real backend + disk store.
+  driver: fake
   upload:
     poll_interval_s: 2.0
     backlog_interval_s: 5.0

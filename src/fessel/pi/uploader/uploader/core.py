@@ -1,5 +1,5 @@
-"""Uploader core: the directory-watch upload pipeline (V4.7), MQTT-free and
-sleep-free so it is unit-testable against a tmp SSD + a FakeObjectStore.
+"""Uploader core: the directory-watch upload pipeline (V4.7 / V5.5.1), MQTT-free
+and sleep-free so it is unit-testable against a tmp SSD + a FakeIngestClient.
 
 Driven by the upload_queue marker contract (V4.6): `flag-upload` (in video)
 writes `/mnt/ssd/upload_queue/<id>.upload`; the uploader watches the directory
@@ -34,7 +34,7 @@ from fessel_schemas import UploadProgress, UploadStateValue
 from fessel_shared import Storage
 from fessel_shared import topics
 
-from .objectstore import ObjectStore, PermanentError, RetryableError
+from .ingest import IngestClient, PermanentError, RetryableError
 
 log = logging.getLogger(__name__)
 
@@ -42,23 +42,27 @@ log = logging.getLogger(__name__)
 # value is the steady-state cap; the uploader never gives up on a retryable.
 DEFAULT_BACKOFF_S = [30, 60, 300, 900, 1800]
 
-# Default key prefix in the bucket (V4.7 / §3.4 MinIO layout):
-#   recordings/explicit/<recording-id>/<file>
-DEFAULT_KEY_PREFIX = "recordings/explicit"
+# The recording's playlist + the metadata file. The completion ordering
+# (V5.5.1) uploads segments first, then the playlist, then metadata.json LAST:
+# metadata.json's presence is the backend's "fully uploaded" marker, so a
+# partially-uploaded recording is never mistaken for complete.
+PLAYLIST_FILENAME = "index.m3u8"
+METADATA_FILENAME = "metadata.json"
 
 
 def _now_iso() -> str:
   return datetime.now(timezone.utc).isoformat()
 
 
-def _content_type(name: str) -> str:
-  if name.endswith(".m3u8"):
-    return "application/vnd.apple.mpegurl"
-  if name.endswith(".ts"):
-    return "video/mp2t"
-  if name.endswith(".json"):
-    return "application/json"
-  return "application/octet-stream"
+def _upload_rank(name: str) -> tuple[int, str]:
+  """Sort key for the completion ordering (V5.5.1): segments (0) before the
+  playlist (1) before metadata.json (2). Within a rank, lexicographic by name
+  (so seg-00000 precedes seg-00001)."""
+  if name == METADATA_FILENAME:
+    return (2, name)
+  if name == PLAYLIST_FILENAME:
+    return (1, name)
+  return (0, name)
 
 
 @dataclass
@@ -74,15 +78,13 @@ class Uploader:
     self,
     *,
     storage: Storage,
-    store: ObjectStore,
+    client: IngestClient,
     publish: Callable[[str, dict, int, bool], None],
-    key_prefix: str = DEFAULT_KEY_PREFIX,
     backoff_s: list[int] | None = None,
   ) -> None:
     self._storage = storage
-    self._store = store
+    self._client = client
     self._publish = publish
-    self._key_prefix = key_prefix.rstrip("/")
     self._backoff = backoff_s or DEFAULT_BACKOFF_S
     # Per-recording attempt counters (in-memory; the marker is the durable
     # state, the count is observability that resets on uploader restart).
@@ -146,16 +148,18 @@ class Uploader:
     return UploadOutcome(recording_id, UploadStateValue.uploaded, attempt)
 
   def _upload_dir(self, recording_id: str, rec_dir: Path) -> None:
-    """Upload every file in the recording directory under the key prefix.
+    """PUT every file of the recording to the backend's ingest endpoint, in the
+    completion order (V5.5.1): segments first, then the playlist, then
+    metadata.json LAST. metadata.json's arrival is the backend's "fully
+    uploaded" marker, so this ordering is what makes `list()` show the recording
+    as complete only once everything is up.
 
-    Order: segments + playlist + metadata. A single retryable failure aborts
-    the whole recording (the next pass re-uploads from the start — object PUTs
-    are idempotent, so re-uploading an already-present object is harmless)."""
-    for f in sorted(rec_dir.iterdir()):
-      if not f.is_file():
-        continue
-      key = f"{self._key_prefix}/{recording_id}/{f.name}"
-      self._store.put_object(key, f, _content_type(f.name))
+    A single retryable failure aborts the whole recording (the next pass
+    re-uploads from the start — per-file PUTs are idempotent on the backend, so
+    re-PUTting an already-stored file is harmless)."""
+    files = [f for f in rec_dir.iterdir() if f.is_file()]
+    for f in sorted(files, key=lambda p: _upload_rank(p.name)):
+      self._client.put_file(recording_id, f.name, f)
 
   def _fail(self, recording_id: str, marker: Path, attempt: int, reason: str) -> UploadOutcome:
     # Rename the marker to <id>.failed and record the failure (V4.6/V4.7).

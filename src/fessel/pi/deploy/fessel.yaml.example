@@ -166,22 +166,21 @@ supervisor:
 # --- uploader ---------------------------------------------------------------
 
 uploader:
-  minio:
-    # 'minio' (prod, S3-compatible) | 'fake' (in-memory, integration only).
-    driver: minio
-    # MinIO reached over Tailscale (host:port, no scheme; `secure` sets TLS).
-    endpoint: minio.tailnet.ts.net:9000
-    bucket: fessel
-    # Credentials come from config for now (V4.7); the packaging slice wires
-    # these from a k8s Secret via the environment. Keep this file
-    # root-readable only.
-    access_key: CHANGE_ME
-    secret_key: CHANGE_ME
-    secure: true
+  # Slice 5.5: the uploader PUTs each recording file to webui-backend's
+  # tailnet-only recording-ingest endpoint. The Pi holds NO cluster-store
+  # credentials — auth is by Tailscale identity at the network layer.
+  # 'http' (prod) | 'fake' (in-memory, integration only).
+  driver: http
+  # webui-backend's recording-ingest Tailscale ingress (from the Tanka
+  # webui-recording-ingest Service). No scheme-less host: a full https:// base.
+  # The uploader PUTs to <ingest_url_base>/recording-ingest/<id>/<file>.
+  ingest_url_base: "https://fessel-ingest.tailnet.ts.net:8443"
+  # Per-PUT timeout (segments can be several MB on a slow uplink).
+  timeout_s: 60
+  # Verify the ingress TLS cert. Leave true in production.
+  verify_tls: true
 
   upload:
-    # MinIO key prefix: recordings/explicit/<recording-id>/<file>.
-    key_prefix: recordings/explicit
     # Retryable-failure backoff schedule (seconds); the last value is the cap.
     backoff_s: [30, 60, 300, 900, 1800]
     # How often to scan the upload_queue for new markers.

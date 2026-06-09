@@ -1,9 +1,10 @@
-"""Uploader core tests (V4.6/V4.7/V4.8): the directory-watch upload pipeline
-against a tmp SSD + an in-memory FakeObjectStore. No MQTT, no real MinIO."""
+"""Uploader core tests (V4.6/V4.7/V4.8/V5.5.1): the directory-watch upload
+pipeline against a tmp SSD + an in-memory FakeIngestClient. No MQTT, no real
+backend."""
 
 from fessel_schemas import RecordingMetadata, UploadStateValue
 from fessel_shared import Storage
-from uploader import FakeObjectStore, Uploader
+from uploader import FakeIngestClient, Uploader
 
 
 def _setup(tmp_path, *, segments=2, with_metadata=True):
@@ -36,8 +37,8 @@ def _publish_sink():
 def test_happy_path_uploads_all_files_and_clears_marker(tmp_path):
   s, rid = _setup(tmp_path)
   pubs, publish = _publish_sink()
-  store = FakeObjectStore()
-  up = Uploader(storage=s, store=store, publish=publish)
+  client = FakeIngestClient()
+  up = Uploader(storage=s, client=client, publish=publish)
 
   outs = up.process_pending()
   assert len(outs) == 1 and outs[0].state is UploadStateValue.uploaded
@@ -45,23 +46,39 @@ def test_happy_path_uploads_all_files_and_clears_marker(tmp_path):
   assert not s.upload_marker_path(rid).exists()
   meta = s.read_metadata(rid)
   assert meta.upload_state is UploadStateValue.uploaded and meta.uploaded_at
-  # All files uploaded under recordings/explicit/<id>/<file>.
-  assert set(store.objects) == {
-    f"recordings/explicit/{rid}/index.m3u8",
-    f"recordings/explicit/{rid}/metadata.json",
-    f"recordings/explicit/{rid}/seg-00000.ts",
-    f"recordings/explicit/{rid}/seg-00001.ts",
+  # Every file PUT to the ingest endpoint, keyed by (recording_id, file_name).
+  assert set(client.objects) == {
+    (rid, "index.m3u8"),
+    (rid, "metadata.json"),
+    (rid, "seg-00000.ts"),
+    (rid, "seg-00001.ts"),
   }
   # Progress was published with a retained "uploaded".
   states = [payload["state"] for topic, payload in pubs if topic == f"arm/video/upload/{rid}"]
   assert "uploaded" in states
 
 
+def test_completion_order_metadata_last(tmp_path):
+  # V5.5.1: segments first, then the playlist, then metadata.json LAST —
+  # metadata.json's arrival is the backend's "fully uploaded" marker.
+  s, rid = _setup(tmp_path, segments=2)
+  _, publish = _publish_sink()
+  client = FakeIngestClient()
+  up = Uploader(storage=s, client=client, publish=publish)
+
+  up.process_pending()
+  names = [name for _rid, name in client.put_order]
+  # Segments come before the playlist; metadata.json is strictly last.
+  assert names[-1] == "metadata.json"
+  assert names.index("index.m3u8") > names.index("seg-00001.ts")
+  assert names.index("index.m3u8") < names.index("metadata.json")
+
+
 def test_retryable_keeps_marker_then_succeeds(tmp_path):
   s, rid = _setup(tmp_path)
   _, publish = _publish_sink()
-  store = FakeObjectStore(fail_n_then_ok=1)
-  up = Uploader(storage=s, store=store, publish=publish)
+  client = FakeIngestClient(fail_n_then_ok=1)
+  up = Uploader(storage=s, client=client, publish=publish)
 
   o1 = up.process_pending()
   assert o1[0].state is UploadStateValue.uploading  # transient -> stays
@@ -74,7 +91,7 @@ def test_retryable_keeps_marker_then_succeeds(tmp_path):
 
 
 def test_backoff_increases_and_caps():
-  up = Uploader(storage=None, store=None, publish=lambda *a: None, backoff_s=[30, 60, 300])
+  up = Uploader(storage=None, client=None, publish=lambda *a: None, backoff_s=[30, 60, 300])
   assert up.backoff_for(1) == 30
   assert up.backoff_for(2) == 60
   assert up.backoff_for(3) == 300
@@ -84,8 +101,8 @@ def test_backoff_increases_and_caps():
 def test_permanent_failure_renames_marker_failed(tmp_path):
   s, rid = _setup(tmp_path)
   _, publish = _publish_sink()
-  store = FakeObjectStore(permanent=True)
-  up = Uploader(storage=s, store=store, publish=publish)
+  client = FakeIngestClient(permanent=True)
+  up = Uploader(storage=s, client=client, publish=publish)
 
   o = up.process_pending()
   assert o[0].state is UploadStateValue.failed
@@ -100,7 +117,7 @@ def test_missing_recording_dir_is_non_retryable(tmp_path):
   # Marker with no recording directory -> .failed, not an infinite retry.
   s.create_upload_marker("ghost")
   _, publish = _publish_sink()
-  up = Uploader(storage=s, store=FakeObjectStore(), publish=publish)
+  up = Uploader(storage=s, client=FakeIngestClient(), publish=publish)
   o = up.process_pending()
   assert o[0].state is UploadStateValue.failed
   assert s.upload_failed_path("ghost").exists()
@@ -113,7 +130,7 @@ def test_gate_honoring(tmp_path):
   from fessel_schemas import UploadGate
   from uploader.main import UploaderApp
 
-  app = UploaderApp({"storage": {"ssd_path": str(tmp_path)}, "minio": {"driver": "fake"}})
+  app = UploaderApp({"storage": {"ssd_path": str(tmp_path)}, "uploader": {"driver": "fake"}})
   # Default: allowed (data-safe until the retained gate arrives).
   assert app._allowed() is True
   # Gate denies -> uploads suspended.
@@ -124,39 +141,28 @@ def test_gate_honoring(tmp_path):
   assert app._allowed() is True
 
 
-def test_minio_config_env_overrides(monkeypatch):
-  # The integration env points the test-Pi's uploader at a real in-cluster
-  # MinIO via env (the baked fessel.test.yaml defaults to driver: fake), per
-  # the architecture's "config injected via env". Env overlays the file block.
-  from uploader.main import _minio_config_with_env
+def test_ingest_config_env_overrides(monkeypatch):
+  # The integration env points the test-Pi's uploader at the in-cluster webui
+  # ingest listener via env (the baked fessel.test.yaml defaults to driver:
+  # fake), per the architecture's "config injected via env". Env overlays the
+  # file block.
+  from uploader.main import _ingest_config_with_env
 
-  monkeypatch.setenv("FESSEL_MINIO_DRIVER", "minio")
-  monkeypatch.setenv("FESSEL_MINIO_ENDPOINT", "minio:9000")
-  monkeypatch.setenv("FESSEL_MINIO_ACCESS_KEY", "ak")
-  monkeypatch.setenv("FESSEL_MINIO_SECRET_KEY", "sk")
-  monkeypatch.setenv("FESSEL_MINIO_BUCKET", "fessel")
-  monkeypatch.setenv("FESSEL_MINIO_SECURE", "false")
-  out = _minio_config_with_env({"driver": "fake", "bucket": "old"})
-  assert out["driver"] == "minio"
-  assert out["endpoint"] == "minio:9000"
-  assert out["access_key"] == "ak" and out["secret_key"] == "sk"
-  assert out["bucket"] == "fessel"
-  assert out["secure"] is False
+  monkeypatch.setenv("FESSEL_INGEST_DRIVER", "http")
+  monkeypatch.setenv("FESSEL_INGEST_URL_BASE", "http://webui:8001")
+  monkeypatch.setenv("FESSEL_INGEST_VERIFY_TLS", "false")
+  out = _ingest_config_with_env({"driver": "fake", "ingest_url_base": "old"})
+  assert out["driver"] == "http"
+  assert out["ingest_url_base"] == "http://webui:8001"
+  assert out["verify_tls"] is False
 
 
-def test_minio_config_no_env_is_passthrough(monkeypatch):
-  from uploader.main import _minio_config_with_env
+def test_ingest_config_no_env_is_passthrough(monkeypatch):
+  from uploader.main import _ingest_config_with_env
 
-  for k in (
-    "FESSEL_MINIO_DRIVER",
-    "FESSEL_MINIO_ENDPOINT",
-    "FESSEL_MINIO_ACCESS_KEY",
-    "FESSEL_MINIO_SECRET_KEY",
-    "FESSEL_MINIO_BUCKET",
-    "FESSEL_MINIO_SECURE",
-  ):
+  for k in ("FESSEL_INGEST_DRIVER", "FESSEL_INGEST_URL_BASE", "FESSEL_INGEST_VERIFY_TLS"):
     monkeypatch.delenv(k, raising=False)
-  assert _minio_config_with_env({"driver": "fake"}) == {"driver": "fake"}
+  assert _ingest_config_with_env({"driver": "fake"}) == {"driver": "fake"}
 
 
 def test_reload_applies_upload_tunables(tmp_path):
@@ -164,7 +170,7 @@ def test_reload_applies_upload_tunables(tmp_path):
   import pytest
   from uploader.main import UploaderApp
 
-  app = UploaderApp({"storage": {"ssd_path": str(tmp_path)}, "minio": {"driver": "fake"}})
+  app = UploaderApp({"storage": {"ssd_path": str(tmp_path)}, "uploader": {"driver": "fake"}})
   app.apply_config(
     {"upload": {"poll_interval_s": 3, "backlog_interval_s": 7, "backoff_s": [1, 2, 9]}}
   )
@@ -186,7 +192,7 @@ def test_backlog_gauges(tmp_path):
   s = Storage(str(tmp_path))
   s.ensure_layout()
   pubs, publish = _publish_sink()
-  up = Uploader(storage=s, store=FakeObjectStore(), publish=publish)
+  up = Uploader(storage=s, client=FakeIngestClient(), publish=publish)
 
   count, oldest = up.publish_backlog()
   assert count == 0 and oldest is None

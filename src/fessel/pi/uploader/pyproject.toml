@@ -1,15 +1,15 @@
 [project]
 name = "fessel-uploader"
 version = "0.1.0"
-description = "Fessel Pi-side uploader: ships flagged recordings to MinIO (V4.7)"
+description = "Fessel Pi-side uploader: PUTs flagged recordings to webui-backend's recording-ingest endpoint (V5.5.1)"
 requires-python = ">=3.12"
 dependencies = [
   "fessel-schemas",
   "fessel-shared",
-  # MinIO / S3-compatible object store client. Only imported at runtime on the
-  # Pi via the 'minio' driver; tests inject a fake object store and never import
-  # it (mirrors supervisor's pywizlight seam).
-  "minio>=7.2",
+  # HTTPS client for the recording-ingest PUTs. The Pi is now an HTTPS client
+  # only — NO MinIO SDK, NO S3 credentials (Slice 5.5 V5.5.2). Imported lazily
+  # by the 'http' driver; tests inject a fake client and never import it.
+  "httpx>=0.27",
 ]
 
 [project.scripts]

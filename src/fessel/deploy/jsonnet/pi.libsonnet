@@ -5,20 +5,18 @@
 function(cfg) {
   local ns = cfg.namespace,
 
-  // When a throwaway MinIO is deployed (integration env, includeMinio), point
-  // the test-Pi's uploader at it via env (FESSEL_MINIO_*), flipping it from the
-  // baked-in `fake` store to the real minio driver so the recording E2E test
-  // (X4.3) ships a flagged recording to actual object storage. `secure: false`
-  // (plain HTTP, in-cluster). Empty otherwise (uploader stays `fake`).
-  local minioEnv =
-    if cfg.includeMinio then [
-      { name: 'FESSEL_MINIO_DRIVER', value: 'minio' },
-      { name: 'FESSEL_MINIO_ENDPOINT', value: 'minio:9000' },
-      { name: 'FESSEL_MINIO_ACCESS_KEY', value: 'fesseltest' },
-      { name: 'FESSEL_MINIO_SECRET_KEY', value: 'fesseltestsecret' },
-      { name: 'FESSEL_MINIO_BUCKET', value: 'fessel' },
-      { name: 'FESSEL_MINIO_SECURE', value: 'false' },
-    ] else [],
+  // Slice 5.5: point the test-Pi's uploader at the in-cluster webui ingest
+  // listener via env (FESSEL_INGEST_*), flipping it from the baked-in `fake`
+  // client to the real `http` driver so the recording round-trip (T5.5.2)
+  // ships a flagged recording through the real backend + (disk) store. The
+  // test bypasses the tailnet (T5.5.1: same as supervisor egress) and reaches
+  // the backend at the in-cluster Service DNS http://webui:<ingestPort>. Plain
+  // HTTP (verify_tls off). Only wired for the in-cluster test-Pi.
+  local ingestEnv = [
+    { name: 'FESSEL_INGEST_DRIVER', value: 'http' },
+    { name: 'FESSEL_INGEST_URL_BASE', value: 'http://webui:' + std.toString(cfg.ingestPort) },
+    { name: 'FESSEL_INGEST_VERIFY_TLS', value: 'false' },
+  ],
 
   deployment: {
     apiVersion: 'apps/v1',
@@ -34,7 +32,7 @@ function(cfg) {
             name: 'pi',
             image: cfg.images.testPi,
             ports: [{ name: 'control', containerPort: 8443, protocol: 'TCP' }],
-            [if cfg.includeMinio then 'env']: minioEnv,
+            env: ingestEnv,
             readinessProbe: {
               httpGet: { path: '/healthz', port: 8443 },
               initialDelaySeconds: 5,

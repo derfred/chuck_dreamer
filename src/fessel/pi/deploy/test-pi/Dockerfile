@@ -49,8 +49,10 @@ RUN chmod +x /usr/local/bin/fessel-test-entrypoint
 
 # Test config: point video at the in-cluster mediamtx-srt Service and turn
 # on the software-encoder seam (no hardware encoder in a container). The
-# uploader uses the in-memory 'fake' object store (no real MinIO). This single
-# fessel.yaml overwrites the dpkg-seeded conffile for the test image only.
+# uploader defaults to the in-memory 'fake' ingest client; the integration env
+# flips it to the real http driver against the in-cluster webui ingest listener
+# via FESSEL_INGEST_* env. This single fessel.yaml overwrites the dpkg-seeded
+# conffile for the test image only.
 COPY pi/deploy/test-pi/fessel.test.yaml /etc/fessel/fessel.yaml
 
 EXPOSE 8443

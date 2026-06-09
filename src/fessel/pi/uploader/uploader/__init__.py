@@ -1,22 +1,26 @@
-"""Fessel Pi-side uploader (V4.7): ships flagged recordings to MinIO."""
+"""Fessel Pi-side uploader (V4.7 / V5.5.1): ships flagged recordings to
+webui-backend's tailnet-only recording-ingest endpoint. The Pi holds no
+cluster-store credentials — auth is by Tailscale identity."""
 
 from .core import Uploader, UploadOutcome
-from .objectstore import (
-  FakeObjectStore,
-  MinioConfig,
-  ObjectStore,
+from .ingest import (
+  FakeIngestClient,
+  HttpIngestClient,
+  HttpIngestConfig,
+  IngestClient,
   PermanentError,
   RetryableError,
-  build_object_store,
+  build_ingest_client,
 )
 
 __all__ = [
-  "FakeObjectStore",
-  "MinioConfig",
-  "ObjectStore",
+  "FakeIngestClient",
+  "HttpIngestClient",
+  "HttpIngestConfig",
+  "IngestClient",
   "PermanentError",
   "RetryableError",
   "UploadOutcome",
   "Uploader",
-  "build_object_store",
+  "build_ingest_client",
 ]
