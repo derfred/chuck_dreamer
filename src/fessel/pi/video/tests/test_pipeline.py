@@ -188,7 +188,6 @@ def test_capture_launch_opens_one_camera_and_tees_to_always_on_branches():
     ring_segment_seconds=2,
     ring_playlist_length=10,
     ring_max_files=12,
-    rec_staging_dir="/mnt/ssd/rec_staging",
     use_test_source=True,
     allow_software_encoder=True,
   )
@@ -203,21 +202,11 @@ def test_capture_launch_opens_one_camera_and_tees_to_always_on_branches():
   # Audio: one mic open, its own tee_a feeding the level branch.
   assert launch.count("tee name=tee_a") == 1
   assert "level name=audio_level" in launch
-  # The on-demand LIVE (SRT) branch is NOT baked in (added at runtime).
+  # The on-demand live branch is NOT baked in (added at runtime). Explicit
+  # recording is NOT a branch at all (copy-from-ring), so only the ring's sink.
   assert "srtsink" not in launch
-  # The recording branch IS baked in COLD (it can't be added live): the ring
-  # encoder's H.264 is teed to both the ring sink and a valve-gated rec sink.
-  assert "tee name=rec_h264_tee" in launch
-  assert launch.count("hlssink2") == 2  # ring + recording
-  assert "valve name=rec_valve drop=false" in launch  # built OPEN (cold-start preroll)
-  assert "hlssink2 name=rec_hls" in launch
-  # The recording sink is a finite playlist into the staging dir until a
-  # recording retargets it.
-  assert "/mnt/ssd/rec_staging/raw-%05d.ts" in launch
-  rec = launch[launch.index("name=rec_hls") :]
-  assert "playlist-length=0" in rec and "max-files=0" in rec
-  # Only one encoder feeds both ring + recording (no second always-on encoder).
-  assert launch.count("ring_hls_enc") == 1
+  assert launch.count("hlssink2") == 1  # only the ring's
+  assert "valve" not in launch
 
 
 def test_capture_launch_real_camera_opens_v4l2src_once():
@@ -228,7 +217,6 @@ def test_capture_launch_real_camera_opens_v4l2src_once():
     ring_segment_seconds=2,
     ring_playlist_length=10,
     ring_max_files=12,
-    rec_staging_dir="/r/staging",
     device="/dev/video0",
     use_test_source=False,
     allow_software_encoder=True,

@@ -16,8 +16,6 @@ The architecture's on-disk layout (§2.8, X4.2):
       upload_queue/
       <recording-id>.upload         # flag-for-upload marker (presence = signal)
       <recording-id>.failed         # uploader renames on non-retryable failure
-    rec_staging/                    # scratch the always-on recording hlssink2
-                                    # writes to between recordings (never uploaded)
 
 This module is the single place that knows those paths and the metadata.json
 shape, so the state machine, the MQTT command handlers, and the uploader all
@@ -45,19 +43,14 @@ RECORDINGS_DIRNAME = "recordings"
 EXPLICIT_DIRNAME = "explicit"
 ANOMALY_DIRNAME = "anomaly"
 UPLOAD_QUEUE_DIRNAME = "upload_queue"
-REC_STAGING_DIRNAME = "rec_staging"
 
 METADATA_FILENAME = "metadata.json"
 PLAYLIST_FILENAME = "index.m3u8"
 
-# The always-on recording hlssink2 (valve-gated, §2.2) writes raw fragments under
-# this template; assemble_recording_playlist() renames them to seg-NNNNN.ts and
-# builds the real index.m3u8. Kept distinct so the uploader never PUTs a raw-*.
+# An explicit recording is assembled by copying ring segments into the recording
+# dir as raw-NNNNN.ts (in write order); assemble_recording_playlist() renames them
+# to the final seg-NNNNN.ts and builds index.m3u8.
 REC_RAW_SEGMENT_GLOB = "raw-*.ts"
-REC_RAW_SEGMENT_TEMPLATE = "raw-%05d.ts"
-# hlssink2's own playlist for the recording sink is ignored (its segment counter
-# desyncs from splitmuxsink after a live `location` retarget); we write our own.
-REC_STAGING_PLAYLIST = "throwaway.m3u8"
 
 UPLOAD_MARKER_SUFFIX = ".upload"
 UPLOAD_FAILED_SUFFIX = ".failed"
@@ -90,14 +83,6 @@ class Storage:
   def upload_queue_dir(self) -> Path:
     return self.root / UPLOAD_QUEUE_DIRNAME
 
-  @property
-  def rec_staging_dir(self) -> Path:
-    # Scratch the always-on recording hlssink2 points at when NOT recording, so
-    # its idle fragments never land in a real recording dir (the uploader PUTs
-    # every file in a recording dir). A top-level sibling of recordings/, so it
-    # is never walked by list_recordings (which iterates explicit_dir only).
-    return self.root / REC_STAGING_DIRNAME
-
   def recording_dir(self, recording_id: str) -> Path:
     return self.explicit_dir / recording_id
 
@@ -112,7 +97,6 @@ class Storage:
     self.explicit_dir.mkdir(parents=True, exist_ok=True)
     self.anomaly_dir.mkdir(parents=True, exist_ok=True)
     self.upload_queue_dir.mkdir(parents=True, exist_ok=True)
-    self.rec_staging_dir.mkdir(parents=True, exist_ok=True)
 
   # --- metadata --------------------------------------------------------------
 
@@ -244,19 +228,15 @@ class Storage:
 
 
 def assemble_recording_playlist(recording_dir: str | Path, segment_seconds: int) -> int:
-  """Rebuild a coherent VOD `index.m3u8` from the `raw-*.ts` the always-on
-  recording hlssink2 produced into `recording_dir`, and return the segment count.
+  """Build a coherent VOD `index.m3u8` from the `raw-*.ts` segments staged in
+  `recording_dir` (copied from the ring, in write order), and return the count.
 
-  The recording sink is built cold into the capture pipeline and valve-gated
-  (§2.2) because hlssink2/splitmuxsink cannot be added live to a running
-  pipeline. We point its `location` at the recording dir per recording, but its
-  OWN playlist (`throwaway.m3u8`) is unusable: after a live `location` retarget
-  hlssink2's playlist counter and splitmuxsink's fragment counter desync, so the
-  playlist names don't match the `.ts` on disk. So we ignore it and rebuild from
-  the fragments actually written: rename `raw-NNNNN.ts` -> `seg-NNNNN.ts`
-  contiguously (the uploader PUTs every file in the dir, so the names must be the
-  final HLS names and `throwaway.m3u8` must not survive), then write a finite VOD
-  playlist. Pure filesystem; no GStreamer.
+  An explicit recording is assembled by copying the ring segments covering its
+  window into the recording dir as `raw-NNNNN.ts` (the recording reuses the
+  ring's encode — hlssink2 can't be added live). Here we rename them to the final
+  `seg-NNNNN.ts` contiguously (the uploader PUTs every file in the dir, so the
+  names must be the final HLS names) and write the finite VOD playlist. Pure
+  filesystem; no GStreamer.
   """
   d = Path(recording_dir)
   raw = sorted(d.glob(REC_RAW_SEGMENT_GLOB), key=lambda p: int(p.stem.split("-")[-1]))
@@ -265,8 +245,6 @@ def assemble_recording_playlist(recording_dir: str | Path, segment_seconds: int)
     dst = d / f"seg-{i:05d}.ts"
     os.replace(src, dst)  # same dir -> atomic rename
     names.append(dst.name)
-  # Drop hlssink2's throwaway playlist so the uploader never PUTs it.
-  (d / REC_STAGING_PLAYLIST).unlink(missing_ok=True)
   lines = [
     "#EXTM3U",
     "#EXT-X-VERSION:3",

@@ -53,13 +53,6 @@ LIVE_ENCODER_NAME = "live_enc"
 # handle can resolve the hlssink2 sink to detect first-segment / finalisation.
 RING_HLS_NAME = "ring_hls"
 RECORDING_HLS_NAME = "rec_hls"
-# The explicit-recording branch shares the always-on RING encoder (its H.264 is
-# teed to both the ring sink and a valve-gated recording sink), built COLD into
-# the capture pipeline — hlssink2/splitmuxsink cannot be added live to a running
-# pipeline. These name the shared H.264 tee and the recording valve so the
-# capture pipeline can resolve+drive them at runtime.
-RECORDING_H264_TEE_NAME = "rec_h264_tee"
-RECORDING_VALVE_NAME = "rec_valve"
 
 # Slice 5: stable names for the vision appsink and the audio level element, so
 # the analysis handles can resolve them (pull samples / read bus messages).
@@ -192,10 +185,11 @@ def recording_branch_chain(
 
   TODO(anomaly): this dynamic-add path is broken the same way explicit recording
   was — hlssink2/splitmuxsink fails its muxer→sink link when added to a running
-  pipeline (see build_capture_launch's cold valve-gated recording branch, which
-  replaced it for explicit recording). The anomaly forward-capture
-  (gst_anomaly_handle.py) still uses this and needs the same cold/valve treatment
-  in a follow-up; left as-is here to keep that path compiling and unchanged."""
+  pipeline. Explicit recording was moved off it to copy-from-ring (the always-on
+  ring already segments continuously; GstRecordingPipeline copies the window).
+  The anomaly forward-capture (gst_anomaly_handle.py) still uses this dynamic-add
+  path and needs the same treatment in a follow-up; left as-is here to keep that
+  path compiling and unchanged."""
   prof = encoder_profile(allow_software=allow_software_encoder)
   gop = _hls_gop(mode.fps, segment_seconds)
   encoder = _encoder_chain(prof, bitrate_bps, gop, name=hls_name + "_enc")
@@ -218,7 +212,6 @@ def build_capture_launch(
   ring_segment_seconds: int,
   ring_playlist_length: int,
   ring_max_files: int,
-  rec_staging_dir: str,
   device: str = "/dev/video0",
   audio_device: str = "default",
   use_test_source: bool = False,
@@ -228,19 +221,14 @@ def build_capture_launch(
   """The single always-on capture pipeline (architecture §2.2).
 
   Opens the camera (and mic) ONCE and fans frames out via a tee. Linked at
-  build time: the ring-buffer HLS branch, the vision appsink branch, and the
-  explicit-recording HLS branch off `tee_v`, plus the audio `level` branch off
-  `tee_a`. Only the on-demand LIVE (SRT) branch is added at runtime — it has no
-  splitmuxsink, so it tolerates live attach. The recording branch CANNOT be added
-  live (hlssink2/splitmuxsink fails its muxer→sink link against a running
-  pipeline), so it is built cold here and gated by a `valve`: it shares the ring
-  encoder's H.264 (teed to both sinks) and is driven on/off by the recording
-  state machine via GstCapturePipeline.recording_open/close().
-
-  NB the recording therefore inherits the RING encoder's bitrate/resolution/GOP;
-  the requested `recording.bitrate_bps`/`mode` no longer drives a separate encode
-  (the prior per-recording encoder is gone — one encoder, shared, avoids a second
-  always-allocated hardware encoder slice on the Pi).
+  build time: the ring-buffer HLS branch and the vision appsink branch off
+  `tee_v`, and the audio `level` branch off `tee_a`. The on-demand live branch
+  is added onto `tee_v`'s request pad at runtime (it has no splitmuxsink, so it
+  tolerates live attach). An EXPLICIT recording is NOT a pipeline branch at all:
+  the recording state machine copies the ring's segments for the recording
+  window out of the always-on ring (GstRecordingPipeline, mirroring the anomaly
+  forward-capture) — hlssink2 cannot be added live to a running pipeline, and a
+  cold-built idle hlssink2 sink would block the pipeline from prerolling.
 
   Pure string builder (no gi), so it is unit-testable; build_pipeline() turns
   it into a Gst.Pipeline.
@@ -253,33 +241,14 @@ def build_capture_launch(
   # the ring) can't back-pressure the others or the source.
   ring_gop = _hls_gop(mode.fps, ring_segment_seconds)
   ring_enc = _encoder_chain(prof, ring_bitrate_bps, ring_gop, name=RING_HLS_NAME + "_enc")
-  # The ring encoder's H.264 is teed: one leg to the rolling ring sink, one leg
-  # through a valve to the explicit-recording sink. The recording valve is built
-  # OPEN (drop=false) — a dropping valve starves the rec sink at cold start so the
-  # pipeline can't preroll and hangs; GstCapturePipeline.start() closes it once
-  # PLAYING. The recording sink writes raw-*.ts into a staging dir until a
-  # recording retargets its `location`; assemble_recording_playlist() builds the
-  # real index.m3u8 from those fragments on stop.
-  recording_branch = (
-    f"{RECORDING_H264_TEE_NAME}. ! queue ! "
-    f"valve name={RECORDING_VALVE_NAME} drop=false ! "
-    f"hlssink2 name={RECORDING_HLS_NAME} "
-    f"playlist-location={rec_staging_dir}/throwaway.m3u8 "
-    f"location={rec_staging_dir}/raw-%05d.ts "
-    f"target-duration={ring_segment_seconds} "
-    f"playlist-length=0 "
-    f"max-files=0"
-  )
   ring_branch = (
-    f"{VIDEO_TEE_NAME}. ! queue ! {ring_enc} ! tee name={RECORDING_H264_TEE_NAME} "
-    f"{RECORDING_H264_TEE_NAME}. ! queue ! "
+    f"{VIDEO_TEE_NAME}. ! queue ! {ring_enc} ! "
     f"hlssink2 name={RING_HLS_NAME} "
     f"playlist-location={ring_dir}/index.m3u8 "
     f"location={ring_dir}/seg-%05d.ts "
     f"target-duration={ring_segment_seconds} "
     f"playlist-length={ring_playlist_length} "
-    f"max-files={ring_max_files} "
-    f"{recording_branch}"
+    f"max-files={ring_max_files}"
   )
   vision_branch = (
     f"{VIDEO_TEE_NAME}. ! queue ! videoscale ! "

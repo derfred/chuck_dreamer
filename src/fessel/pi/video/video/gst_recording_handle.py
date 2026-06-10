@@ -1,34 +1,36 @@
-"""GStreamer-backed RecordingPipelineHandle — drives the always-on, valve-gated
-recording sink on the shared capture pipeline (architecture §2.2).
+"""RecordingPipelineHandle for explicit recording — copy-from-ring (§2.2).
 
-The explicit-recording hlssink2 is built COLD into the capture pipeline (it
-cannot be added live — splitmuxsink fails its muxer→sink link against a running
-pipeline), sharing the ring encoder's H.264 through a `valve`. So this handle
-does NOT add/remove a branch; it opens/closes the valve:
-
-  start() -> capture.recording_open(dir): retarget the sink at this recording's
-             dir + open the valve. A GLib poll watches the dir for the first
-             fragment and fires on_segment (-> recording).
-  stop()  -> capture.recording_close(): close the valve, wait one segment
-             duration for the in-flight fragment to finalise, rebuild the real
-             index.m3u8 from the raw-*.ts, then on_exited (-> finalise + idle).
+An explicit recording is NOT a GStreamer branch. hlssink2 cannot be added live
+to the running capture pipeline (splitmuxsink fails its muxer→sink link), and a
+cold-built idle hlssink2 sink blocks the whole pipeline from prerolling. So
+instead of muxing a second time, we reuse the ALWAYS-ON ring: it already encodes
++ segments continuously. Recording just remembers when it started and, on stop,
+copies the ring `.ts` segments covering [start, stop] into the recording dir and
+assembles a finite VOD playlist (mirroring the anomaly forward-capture's
+copy-from-ring, anomaly_recording.py).
 
 The RecordingStateMachine contract is unchanged: start() eventually causes
-on_segment() or on_failed(); stop() eventually causes on_exited(). The SM itself
-stamps metadata.segments via count_segments() AFTER on_exited(), so the playlist
-assembly (which renames raw-*.ts -> seg-*.ts) MUST run before on_exited().
+on_segment() (-> recording) or on_failed(); stop() eventually causes on_exited()
+(-> finalise + idle). The SM stamps metadata.segments via count_segments() AFTER
+on_exited(), so the copy+assemble runs BEFORE on_exited().
+
+Consequence: a recording inherits the ring's resolution/bitrate; the requested
+`recording.bitrate_bps`/`mode` do not drive a separate encode (one encoder).
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
+import time
 from pathlib import Path
 
 import gi
 from fessel_schemas import ModeTriplet
 from fessel_shared import assemble_recording_playlist
 
+from .anomaly_recording import select_ring_segments
 from .gst_capture import GstCapturePipeline
 from .recording_state_machine import RecordingPipelineHandle, RecordingStateMachine
 
@@ -37,8 +39,9 @@ from gi.repository import GLib  # noqa: E402
 
 log = logging.getLogger(__name__)
 
-# How often to poll the recording dir for the first fragment (ms).
-_FIRST_SEGMENT_POLL_MS = 250
+# Slack added to the [start, stop] window so the ring segment whose mtime lands
+# just after the stop request (it was being written when stop fired) is included.
+_WINDOW_END_SLACK_S = 3.0
 
 
 class GstRecordingPipeline(RecordingPipelineHandle):
@@ -47,75 +50,66 @@ class GstRecordingPipeline(RecordingPipelineHandle):
     *,
     sm: RecordingStateMachine,
     capture: GstCapturePipeline,
+    ring_dir: str,
     mode: ModeTriplet,
     recording_dir: str,
-    bitrate_bps: int,
     segment_seconds: int,
+    bitrate_bps: int = 0,
     allow_software_encoder: bool = False,
   ) -> None:
     self._sm = sm
     self._capture = capture
-    self._recording_dir = recording_dir
-    # mode/bitrate_bps/allow_software_encoder are accepted for the factory
-    # signature but no longer drive a separate encode — recording shares the ring
-    # encoder (see build_capture_launch). segment_seconds sets the assembled
-    # playlist's TARGETDURATION/EXTINF and the post-stop flush wait.
+    self._ring_dir = Path(ring_dir)
+    self._recording_dir = Path(recording_dir)
+    # mode/bitrate_bps/allow_software_encoder are vestigial (recording reuses the
+    # ring's encode); segment_seconds sets the assembled playlist's EXTINF.
     self._segment_seconds = int(segment_seconds)
-    self._segment_reported = False
-    self._stopped = False
-    self._poll_id: int | None = None
+    self._start_epoch: float | None = None
     self._lock = threading.Lock()
+    self._stopped = False
 
   def start(self) -> None:
-    try:
-      self._capture.recording_open(self._recording_dir)
-    except Exception:  # noqa: BLE001 — any open failure is a start failure
-      log.exception("recording_open failed for %s", self._recording_dir)
-      self._sm.on_failed()
-      return
-    log.info("recording opened (valve) in %s", self._recording_dir)
-    # Watch the dir for the first fragment; its appearance == recording is live.
-    # Poll on the capture GLib loop (the established pattern, cf. anomaly
-    # forward-capture) rather than a pad probe on the shared muxer.
-    self._poll_id = GLib.timeout_add(_FIRST_SEGMENT_POLL_MS, self._poll_first_segment)
-
-  def _poll_first_segment(self) -> bool:
-    if not self._first_fragment_exists():
-      return True  # keep polling; the SM start-timeout is the backstop
-    with self._lock:
-      if self._segment_reported:
-        return False
-      self._segment_reported = True
-    self._poll_id = None
+    # The ring is always recording, so "start" is just marking the window open.
+    # There is no encoder to spin up, so the recording is live immediately:
+    # report a segment so the state machine advances idle -> recording.
+    self._start_epoch = time.time()
+    log.info("recording window opened at %.3f -> %s", self._start_epoch, self._recording_dir)
     self._sm.on_segment()
-    return False  # one-shot
-
-  def _first_fragment_exists(self) -> bool:
-    return any(Path(self._recording_dir).glob("raw-*.ts"))
 
   def stop(self) -> None:
     with self._lock:
       if self._stopped:
         return
       self._stopped = True
-    if self._poll_id is not None:
-      GLib.source_remove(self._poll_id)
-      self._poll_id = None
-    self._capture.recording_close()  # close the valve (idempotent)
-    # Give hlssink2 one segment duration to finalise the in-flight fragment, then
-    # assemble the real playlist and report EXITED. If the capture loop is down
-    # (shutdown), finalise synchronously so the state machine never hangs waiting
-    # for EXITED.
+    # Copy + assemble on the capture GLib loop if it's running (keeps all GStreamer
+    # adjacent work on one thread), else inline — either way on_exited() must fire.
     if self._capture.loop_is_running():
-      GLib.timeout_add_seconds(self._segment_seconds + 1, self._finalise_and_exit)
+      GLib.idle_add(self._finalise_and_exit)
     else:
       self._finalise_and_exit()
 
   def _finalise_and_exit(self) -> bool:
     try:
-      n = assemble_recording_playlist(self._recording_dir, self._segment_seconds)
+      n = self._copy_window_from_ring()
+      assemble_recording_playlist(self._recording_dir, self._segment_seconds)
       log.info("recording finalised (%d segments) in %s", n, self._recording_dir)
-    except Exception:  # noqa: BLE001 — never block EXITED on assembly
-      log.exception("failed to assemble recording playlist in %s", self._recording_dir)
+    except Exception:  # noqa: BLE001 — never block EXITED on copy/assembly
+      log.exception("failed to assemble recording from ring in %s", self._recording_dir)
     self._sm.on_exited()
     return False  # one-shot
+
+  def _copy_window_from_ring(self) -> int:
+    """Copy (never move — the ring is still rolling) the ring segments covering
+    [start, stop] into the recording dir as raw-NNNNN.ts in write order;
+    assemble_recording_playlist renames them to seg-NNNNN.ts + writes the
+    playlist."""
+    start = self._start_epoch if self._start_epoch is not None else 0.0
+    end = time.time() + _WINDOW_END_SLACK_S
+    self._recording_dir.mkdir(parents=True, exist_ok=True)
+    segs = select_ring_segments(self._ring_dir, start, end)
+    for i, src in enumerate(segs):
+      try:
+        shutil.copy2(src, self._recording_dir / f"raw-{i:05d}.ts")
+      except OSError:
+        log.warning("failed to copy ring segment %s into recording", src)
+    return len(segs)

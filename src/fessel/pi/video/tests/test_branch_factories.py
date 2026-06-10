@@ -1,17 +1,15 @@
-"""Branch-factory wiring tests — the kwargs VideoApp passes to each branch
-handle must match that handle's constructor.
+"""Recording-factory wiring test — the kwargs VideoApp._make_recording_pipeline
+passes must match GstRecordingPipeline's constructor.
 
-These guard the factory<->constructor seam directly: GstRecordingPipeline (and
-its siblings) was refactored into a branch on the shared capture pipeline, so it
-takes `capture=` and no longer takes `device`/`use_test_source` (the capture owns
-the source). A stale caller passing the old kwargs raises TypeError only at
-recording-start time, on the rec-sm thread, where it manifests as the recording
-never leaving `idle` (caught in integration as recording_roundtrip_via_ingest,
-never in unit tests until now). Constructing via the REAL factory turns that into
-a fast, local failure.
+This guards the factory<->constructor seam directly. An explicit recording is
+copy-from-ring (not a pipeline branch): the handle takes `capture=` (for the
+GLib loop) and `ring_dir=` (the segments to copy) and no longer takes the old
+`device`/`use_test_source` source kwargs. A stale caller would only blow up at
+recording-start time on the rec-sm thread (recording never leaves `idle`, seen
+in integration as recording_roundtrip failing) — constructing via the REAL
+factory turns that into a fast, local failure.
 
-No GStreamer: the handle constructors only build a sourceless element-chain
-string; nothing is realised until start().
+No GStreamer: the constructor only stores its args; nothing runs until start().
 """
 
 from __future__ import annotations
@@ -26,8 +24,8 @@ MODE = ModeTriplet(resolution="640x480", fps=30, bitrate_bps=1_000_000)
 
 
 class FakeCapture:
-  """Stands in for the always-on GstCapturePipeline. The recording-branch
-  constructor only stores it; nothing is called until start()."""
+  """Stands in for the always-on GstCapturePipeline. The recording handle only
+  stores it (and calls loop_is_running on stop); nothing runs in the ctor."""
 
 
 def _app_for_factory(tmp_path) -> VideoApp:
@@ -37,28 +35,27 @@ def _app_for_factory(tmp_path) -> VideoApp:
   app = object.__new__(VideoApp)
   app._capture = FakeCapture()
   app._storage = Storage(str(tmp_path))
-  app._rec_cfg = {"bitrate_bps": 1_000_000, "segment_seconds": 2}
-  app._allow_software_encoder = True
+  app._ring_cfg = {"segment_seconds": 2}
   app._rec_sm = object()  # the handle only stores sm; never called here
   return app
 
 
 def test_make_recording_pipeline_matches_constructor(tmp_path):
-  # The regression: _make_recording_pipeline must pass exactly the kwargs
-  # GstRecordingPipeline accepts. A stale `device=`/`use_test_source=` (or a
-  # missing `capture=`) raises TypeError here.
+  # The regression guard: _make_recording_pipeline must pass exactly the kwargs
+  # GstRecordingPipeline accepts (a stale/missing kwarg raises TypeError here).
   app = _app_for_factory(tmp_path)
   handle = VideoApp._make_recording_pipeline(app, "rec-abc", MODE)
   assert isinstance(handle, GstRecordingPipeline)
-  # The branch is wired to the shared capture, not a standalone source.
+  # Wired to the shared capture and pointed at the ring it copies from.
   assert handle._capture is app._capture
+  assert handle._ring_dir == app._storage.ring_dir
   # And the factory created the on-disk recording dir as a side effect.
   assert app._storage.recording_dir("rec-abc").is_dir()
 
 
 def test_recording_handle_rejects_legacy_source_kwargs(tmp_path):
-  # Pins the contract the regression violated: the handle is sourceless, so the
-  # source kwargs that used to be threaded through must NOT be accepted.
+  # Pins the contract the prior regression violated: recording is sourceless
+  # (copy-from-ring), so the old source kwargs must NOT be accepted.
   import pytest
 
   for bad in ("device", "use_test_source"):
@@ -66,9 +63,9 @@ def test_recording_handle_rejects_legacy_source_kwargs(tmp_path):
       GstRecordingPipeline(
         sm=object(),
         capture=FakeCapture(),
+        ring_dir=str(tmp_path / "ring"),
         mode=MODE,
         recording_dir=str(tmp_path),
-        bitrate_bps=1_000_000,
         segment_seconds=2,
         **{bad: "anything"},
       )

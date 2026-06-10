@@ -307,8 +307,6 @@ class VideoApp:
     notices (a crashlooping video process is a clear signal), rather than
     silently running with no capture."""
     audio_level_hz = float(self._audio_cfg.get("publish_level_hz", 2.0))
-    # run() calls self._storage.ensure_layout() before this, so rec_staging_dir
-    # (where the cold recording sink writes until a recording retargets it) exists.
     self._capture = GstCapturePipeline(
       mode=self._ring_mode(),
       ring_dir=str(self._storage.ring_dir),
@@ -439,20 +437,21 @@ class VideoApp:
   # --- Slice 4: explicit recording (V4.2/V4.3/V4.5) --------------------------
 
   def _make_recording_pipeline(self, recording_id: str, mode: ModeTriplet) -> GstRecordingPipeline:
-    # The recording branch attaches to the shared capture pipeline's tee_v
-    # (§2.2), not a standalone pipeline — the capture owns the source, so the
-    # device/test-source live there, not here. The capture pipeline must be up.
+    # An explicit recording copies the relevant window out of the always-on ring
+    # (§2.2) — it is NOT a pipeline branch (hlssink2 can't be added live, and an
+    # idle cold-built hlssink2 would block preroll). The capture (hence the ring)
+    # must be up. segment_seconds matches the ring's so the assembled playlist's
+    # EXTINF is right (recording reuses the ring's encode).
     assert self._capture is not None, "capture pipeline not started"
     recording_dir = str(self._storage.recording_dir(recording_id))
     self._storage.recording_dir(recording_id).mkdir(parents=True, exist_ok=True)
     return GstRecordingPipeline(
       sm=self._rec_sm,
       capture=self._capture,
+      ring_dir=str(self._storage.ring_dir),
       mode=mode,
       recording_dir=recording_dir,
-      bitrate_bps=int(self._rec_cfg["bitrate_bps"]),
-      segment_seconds=int(self._rec_cfg["segment_seconds"]),
-      allow_software_encoder=self._allow_software_encoder,
+      segment_seconds=int(self._ring_cfg["segment_seconds"]),
     )
 
   def _publish_recording_state(
