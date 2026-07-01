@@ -3,7 +3,7 @@ Version: @VERSION@
 Section: misc
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.11), python3-pydantic, python3-paho-mqtt, python3-yaml, python3-fastapi, python3-uvicorn, python3-uvloop, python3-httptools, python3-websockets, python3-watchfiles, python3-httpx, python3-gi, python3-numpy, python3-opencv, gir1.2-gst-plugins-bad-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-tools, mosquitto, v4l-utils
+Depends: python3 (>= 3.11), python3-pydantic, python3-paho-mqtt, python3-yaml, python3-fastapi, python3-uvicorn, python3-uvloop, python3-httptools, python3-websockets, python3-watchfiles, python3-httpx, python3-gi, python3-numpy, python3-opencv, gir1.2-gst-plugins-bad-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-alsa, gstreamer1.0-tools, mosquitto, v4l-utils
 Maintainer: Fessel <noreply@example.com>
 Description: Fessel robot-arm monitoring (Pi side)
  supervisor (safety/control plane + MQTT relay), video (GStreamer pipeline +
