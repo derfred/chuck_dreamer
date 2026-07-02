@@ -36,6 +36,7 @@ from .models import (
   StateResponse,
   UploadBacklog,
   UploadProgress,
+  VersionState,
   VisionState,
 )
 
@@ -56,6 +57,7 @@ _MODELS = {
   "VisionState": VisionState,
   "AudioState": AudioState,
   "AnomalyLogEntry": AnomalyLogEntry,
+  "VersionState": VersionState,
   # StateResponse last: it embeds several of the above; per-model inlining wants
   # the dependencies defined first is not required (refs resolve), but keeping
   # the aggregate last matches the Slice 3 ordering convention.

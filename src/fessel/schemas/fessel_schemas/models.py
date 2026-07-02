@@ -408,6 +408,21 @@ class AudioState(BaseModel):
   healthy: bool = False
 
 
+class VersionState(BaseModel):
+  """The `version` field of supervisor /state (health-check spec §2.1).
+
+  `component` is the AUTHORITATIVE Pi-side version used for the cluster/Pi
+  compatibility comparison (all Pi components ship in one dpkg, so one version
+  covers them). `supervisor`/`video` are optional per-process details, useful in
+  the drill-down only if they ever diverge (e.g. a partial upgrade). The strings
+  are semver-shaped MAJOR.MINOR.PATCH; the comparison uses MAJOR.MINOR only.
+  """
+
+  component: str
+  supervisor: str | None = None
+  video: str | None = None
+
+
 class AnomalyLogEntry(BaseModel):
   """One entry of supervisor's bounded in-memory anomaly log (S5.1/S5.3).
 
@@ -448,6 +463,7 @@ class StateResponse(BaseModel):
   vision: VisionState = Field(default_factory=VisionState)
   audio: AudioState = Field(default_factory=AudioState)
   recent_anomalies: list[AnomalyLogEntry] = Field(default_factory=list)
+  version: VersionState | None = None
 
 
 def mode_to_canonical(mode: ModeTriplet) -> str:

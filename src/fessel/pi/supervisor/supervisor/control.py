@@ -34,6 +34,8 @@ from fessel_schemas import (
   SafetyState,
   StateResponse,
   UploadBacklog,
+  VersionState,
+  fessel_version,
 )
 from fessel_shared import topics
 
@@ -215,6 +217,7 @@ class ControlPlane:
         vision=vision,
         audio=audio,
         recent_anomalies=recent,
+        version=VersionState(component=fessel_version()),
       )
 
   # --- Jetson actions --------------------------------------------------------
