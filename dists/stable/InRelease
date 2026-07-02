@@ -1,34 +1,42 @@
 -----BEGIN PGP SIGNED MESSAGE-----
 Hash: SHA512
 
-Architectures: all
+Architectures: all arm64
 Codename: stable
 Components: main
-Date: Sun, 07 Jun 2026 18:45:58 +0000
+Date: Thu, 02 Jul 2026 19:37:48 +0000
 Description: Fessel Pi monitoring packages
 Label: Fessel
 Origin: Fessel
 Suite: stable
 MD5Sum:
- 83044aefb9f7f3e7fcf02aff29166970              177 Release
- 821eab16afa0e53fae4e31d1e6ab8bf5             4440 main/binary-all/Packages
- 3e3490d4165f1aa4f51b4b54a9f3a5f4             1390 main/binary-all/Packages.gz
+ 5e3167bbe606d4b6d6bc850519f3e568              183 Release
+ 394ed562ceaf804cdc0cf7cf467087ff             4459 main/binary-all/Packages
+ cbd858a6be5efe1a6e78be9d978e3dc8             1554 main/binary-all/Packages.gz
+ 394ed562ceaf804cdc0cf7cf467087ff             4459 main/binary-arm64/Packages
+ cbd858a6be5efe1a6e78be9d978e3dc8             1554 main/binary-arm64/Packages.gz
 SHA1:
- be400d1e04e3eba93d814d61ddc4693c3e4a1236              177 Release
- 76503c03692f13db7d95b22878905cd6c1af8fc0             4440 main/binary-all/Packages
- 06dbb163c499df4c3ce67729de9bd6518ec5efc0             1390 main/binary-all/Packages.gz
+ 737a760954b97505d2fbf15eebddc86c6e16434c              183 Release
+ bff14bda6c2848205c18a5192e0c229a0f25dc7d             4459 main/binary-all/Packages
+ 8eb09134d358edd3ef172b5c88b9307ca4b50016             1554 main/binary-all/Packages.gz
+ bff14bda6c2848205c18a5192e0c229a0f25dc7d             4459 main/binary-arm64/Packages
+ 8eb09134d358edd3ef172b5c88b9307ca4b50016             1554 main/binary-arm64/Packages.gz
 SHA256:
- 74a493f2a3d6c25fdcd746f107ebf0416522cabee694945bece5fd5a925d8992              177 Release
- e50bb8705aef1cdbe99b5764744fae7a469aff5ba64747680fd26f2f38ae155e             4440 main/binary-all/Packages
- fd5e76305c19d23f908cfde8d015f01e21e7e77767af37921a1e238dc62763db             1390 main/binary-all/Packages.gz
+ 510a0a5b7c6f910e9da6f4513a4e0615b994762c7f410a53ed4179bd4607c416              183 Release
+ 48df889ddb68d69b6f4454b66d9b2723ae6d4ea61caeeba173571884bab47635             4459 main/binary-all/Packages
+ 6defb92715a3d0239f558460c9a7d036d3fc66c7032a8463079732994b30f5cf             1554 main/binary-all/Packages.gz
+ 48df889ddb68d69b6f4454b66d9b2723ae6d4ea61caeeba173571884bab47635             4459 main/binary-arm64/Packages
+ 6defb92715a3d0239f558460c9a7d036d3fc66c7032a8463079732994b30f5cf             1554 main/binary-arm64/Packages.gz
 SHA512:
- 47393a83f3ee3531916051c7916405cdfee4d025ce3745f022243bb545bdd648acf076e5097871ad3be131e02fd8f3a8cd2968728a29cbe715ade58213d4efa5              177 Release
- ba0129119ecbb1f51fab1af6ab89ceb436f5362d4b7a6f24ee5cad72c7b226f9447a1616ba21036f0d222c013b9a0e679afa169af35692fcf596a8fbf70af9f1             4440 main/binary-all/Packages
- d90cf754c96fc3a5dd80ddf12401c45cedb858da79705d6b156e6f777c1817ebb0a0a76823bc40c57d93dd9267c596175af6c89a96321997b02d92a3e5996302             1390 main/binary-all/Packages.gz
+ db511894d38ed04dd023084efb6b87b664ffb2b7685114b54ba17fb068311892c61a16bfbc764b541298c8983c1a4bfbf6c0746993a22c5cc8cee1f4dc700591              183 Release
+ 1615453d62a968111644f8898e5f2bf975b5f8093d943d84e668b8e9b0417d7292fcb4f4cec611ce7694615a3cfc478b022d4eb88ae434287ca91a8e48b46a73             4459 main/binary-all/Packages
+ 85bc81376d0bbbf5a822437ad282f5e691191a6d64bf3635fc4dc05b5796a5e1d8cf982bdcc7acc8b5260e17ac010376e9fbd88a22bdb0552217d438efa48593             1554 main/binary-all/Packages.gz
+ 1615453d62a968111644f8898e5f2bf975b5f8093d943d84e668b8e9b0417d7292fcb4f4cec611ce7694615a3cfc478b022d4eb88ae434287ca91a8e48b46a73             4459 main/binary-arm64/Packages
+ 85bc81376d0bbbf5a822437ad282f5e691191a6d64bf3635fc4dc05b5796a5e1d8cf982bdcc7acc8b5260e17ac010376e9fbd88a22bdb0552217d438efa48593             1554 main/binary-arm64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQT8/D1gcIrgMWJqpIxRefGEH2fMhwUCaiW8ZwAKCRBRefGEH2fM
-h+ATAQDCcBQ2KHJXDvn5ikpqCF5+uJpOvLOUW0gy2klNgrD/CAEA+g6XOsMAlimx
-lz7D0/Oo3rlYvEsG0QIA22MyAqELJwQ=
-=e6Re
+iHUEARYKAB0WIQT8/D1gcIrgMWJqpIxRefGEH2fMhwUCaka+DAAKCRBRefGEH2fM
+h957AQDr5QCoKcDMLnG65z/PxVGWfdEaePQSi7b458BKcdV+VwD8C6Sqg5EN1JV4
+AAw20QML2NL5bKuM6tCi1+oZ53cVngI=
+=gjr2
 -----END PGP SIGNATURE-----
