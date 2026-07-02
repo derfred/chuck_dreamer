@@ -15,14 +15,18 @@ Layout: flat — suite `stable`, component `main`, architecture `all`.
 sudo curl -fsSL https://derfred.github.io/chuck_dreamer/fessel-archive-keyring.gpg \
   -o /usr/share/keyrings/fessel-archive-keyring.gpg
 
-# 2. Add the signed source
-echo "deb [arch=all signed-by=/usr/share/keyrings/fessel-archive-keyring.gpg] https://derfred.github.io/chuck_dreamer stable main" \
+# 2. Add the signed source (arch=all,arm64: fessel-monitor is arch-independent,
+#    gstreamer1.0-plugins-rs-fessel ships compiled arm64 plugins)
+echo "deb [arch=all,arm64 signed-by=/usr/share/keyrings/fessel-archive-keyring.gpg] https://derfred.github.io/chuck_dreamer stable main" \
   | sudo tee /etc/apt/sources.list.d/fessel.list
 
 # 3. Install
 sudo apt update
-sudo apt install fessel-monitor
+sudo apt install fessel-monitor gstreamer1.0-plugins-rs-fessel
 ```
+
+(Pis onboarded before the plugin package existed have `arch=all` in
+`fessel.list` — edit it to `arch=all,arm64` once.)
 
 Thereafter, upgrades are just:
 ```sh
@@ -41,6 +45,11 @@ sudo apt install fessel-monitor=0.1.0
   GPG-signs `dists/stable/{Release,Release.gpg,InRelease}`, and pushes the
   updated tree to the `gh-pages` branch.
 - Manual fallback: run the workflow with an explicit `version` input.
+- `gstreamer1.0-plugins-rs-fessel` (the WHIP uplink plugins, arm64) is
+  published into the SAME repo by its own workflow — it versions on
+  gst-plugins-rs upstream + the Pi's GStreamer minor, not on Fessel releases.
+  See `pi/deploy/gst-plugins-rs/README.md`. The two publish jobs share a
+  `concurrency: fessel-apt-repo` group so gh-pages pushes never race.
 
 ## Signing key (one-time setup, done by a maintainer)
 

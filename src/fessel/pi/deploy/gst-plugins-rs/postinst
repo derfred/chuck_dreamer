@@ -1,0 +1,8 @@
+#!/bin/sh
+# Touch the plugin directory so GStreamer rescans its registry on next use.
+# The registry cache is per-user (~/.cache/gstreamer-1.0/) and keyed on
+# directory mtimes — a postinst cannot (and should not) clear users' caches,
+# but bumping the dir mtime makes every user's next GStreamer start rescan.
+set -e
+touch /usr/lib/aarch64-linux-gnu/gstreamer-1.0 || true
+exit 0
