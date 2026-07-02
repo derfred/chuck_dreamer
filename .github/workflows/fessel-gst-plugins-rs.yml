@@ -1,0 +1,103 @@
+# Build gstreamer1.0-plugins-rs-fessel (whipclientsink + rtpgccbwe for the Pi)
+# and publish it into the SAME signed apt repo the fessel-monitor dpkg lives in
+# (gh-pages; see src/fessel/pi/deploy/apt/README.md). The Pi then installs it
+# with plain `apt install gstreamer1.0-plugins-rs-fessel`.
+#
+# Deliberately a SEPARATE workflow from `fessel release`:
+#   - the plugin versions on gst-plugins-rs upstream + the Pi's GStreamer
+#     minor, not on fessel releases;
+#   - the arm64 cargo build under QEMU takes ~45-90 min — far too heavy to
+#     hang on every release tag for an artifact that rarely changes.
+# Runs are manual (workflow_dispatch) plus on changes to the package builder
+# itself. Rebuild triggers in practice: a gst-plugins-rs bump you want, or the
+# Pi's GStreamer minor changing (then also bump GST_PLUGINS_RS_BRANCH to the
+# branch targeting that GStreamer).
+name: fessel gst-plugins-rs dpkg
+
+on:
+  workflow_dispatch:
+    inputs:
+      deb_revision:
+        description: "Debian repackage revision (+fesselN); bump when repackaging the same upstream"
+        default: "1"
+      gst_plugins_rs_branch:
+        description: "gst-plugins-rs branch (0.13 targets GStreamer 1.26 — match the Pi)"
+        default: "0.13"
+  push:
+    paths:
+      - "src/fessel/pi/deploy/gst-plugins-rs/**"
+      - ".github/workflows/fessel-gst-plugins-rs.yml"
+    branches: [main]
+
+permissions:
+  contents: write   # push to gh-pages
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+      - name: Cross-build plugins + assemble .deb (arm64 trixie under QEMU)
+        uses: docker/build-push-action@v6
+        with:
+          context: src/fessel/pi/deploy/gst-plugins-rs
+          platforms: linux/arm64
+          outputs: type=local,dest=dist
+          build-args: |
+            DEB_REVISION=${{ inputs.deb_revision || '1' }}
+            GST_PLUGINS_RS_BRANCH=${{ inputs.gst_plugins_rs_branch || '0.13' }}
+          # The cargo build dominates; cache layers so doc-only/packaging
+          # changes rebuild in minutes instead of an hour.
+          cache-from: type=gha,scope=gst-plugins-rs-deb
+          cache-to: type=gha,scope=gst-plugins-rs-deb,mode=max
+      - run: ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gst-plugins-rs-dpkg
+          path: dist/*.deb
+          if-no-files-found: error
+
+  publish-apt-repo:
+    needs: build-deb
+    runs-on: ubuntu-latest
+    # Serialize against the release workflow's publish job: both append to the
+    # gh-pages apt repo, and a concurrent push would race.
+    concurrency: fessel-apt-repo
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src-repo
+      - name: Checkout gh-pages (the apt repo; preserves prior pool versions)
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+      - name: Download the built .deb
+        uses: actions/download-artifact@v4
+        with:
+          name: gst-plugins-rs-dpkg
+          path: deb
+      - name: Install apt-utils (apt-ftparchive) + gnupg
+        run: sudo apt-get update && sudo apt-get install -y apt-utils gnupg
+      - name: Import signing key
+        env:
+          KEY: ${{ secrets.FESSEL_APT_GPG_PRIVATE_KEY }}
+        run: echo "$KEY" | gpg --batch --import
+      - name: Build + sign the apt repo into gh-pages
+        run: |
+          chmod +x src-repo/src/fessel/pi/deploy/apt/build-apt-repo.sh
+          src-repo/src/fessel/pi/deploy/apt/build-apt-repo.sh \
+            "$PWD/gh-pages" deb/*.deb
+      - name: Commit + push gh-pages
+        run: |
+          cd gh-pages
+          git config user.name "fessel-ci"
+          git config user.email "fessel-ci@users.noreply.github.com"
+          git add -A
+          git commit -m "apt repo: gstreamer1.0-plugins-rs-fessel" || {
+            echo "nothing to commit"; exit 0; }
+          git push

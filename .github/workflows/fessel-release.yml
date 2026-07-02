@@ -105,6 +105,9 @@ jobs:
   publish-apt-repo:
     needs: [setup, pi-dpkg]
     runs-on: ubuntu-latest
+    # Serialize with fessel-gst-plugins-rs.yml's publish job: both append to
+    # the gh-pages apt repo, and a concurrent push would race.
+    concurrency: fessel-apt-repo
     steps:
       - uses: actions/checkout@v4
         with:
