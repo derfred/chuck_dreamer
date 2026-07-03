@@ -62,9 +62,16 @@ WORKDIR /pkg
 COPY postinst /pkg/postinst
 
 RUN set -e; \
-    # Version: upstream (from the webrtc plugin's Cargo.toml) + our revision +
-    # the GStreamer minor we built against.
-    UPSTREAM="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' /src/net/webrtc/Cargo.toml | head -n1)"; \
+    # Version: upstream + our revision + the GStreamer minor we built against.
+    # Upstream comes from the .pc file cargo-c generated for the artifact we
+    # actually built — NOT from net/webrtc/Cargo.toml, which declares
+    # `version.workspace = true` (no literal version line to grep).
+    PC="$(find /src/target -name 'gstrswebrtc*.pc' | head -n1)"; \
+    UPSTREAM="$([ -n "$PC" ] && sed -n 's/^Version: *//p' "$PC" | head -n1)"; \
+    # Fallback: the workspace-level version ([workspace.package] in the root
+    # Cargo.toml) — first literal version line wins.
+    [ -n "$UPSTREAM" ] || UPSTREAM="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' /src/Cargo.toml | head -n1)"; \
+    [ -n "$UPSTREAM" ] || { echo "could not determine upstream version (no .pc, no workspace version)" >&2; exit 1; }; \
     GST_VER="$(pkg-config --modversion gstreamer-1.0)"; \
     GST_MINOR="${GST_VER%.*}"; \
     GST_NEXT="1.$(( $(echo "$GST_MINOR" | cut -d. -f2) + 2 ))"; \
