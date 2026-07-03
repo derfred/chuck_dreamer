@@ -130,6 +130,7 @@ export interface FesselSchemas {
   VisionState?: VisionState;
   AudioState?: AudioState;
   AnomalyLogEntry?: AnomalyLogEntry;
+  VersionState?: VersionState;
   StateResponse?: StateResponse;
   [k: string]: unknown;
 }
@@ -307,6 +308,21 @@ export interface Payload {
   [k: string]: unknown;
 }
 /**
+ * The `version` field of supervisor /state (health-check spec §2.1).
+ *
+ * `component` is the AUTHORITATIVE Pi-side version used for the cluster/Pi
+ * compatibility comparison (all Pi components ship in one dpkg, so one version
+ * covers them). `supervisor`/`video` are optional per-process details, useful in
+ * the drill-down only if they ever diverge (e.g. a partial upgrade). The strings
+ * are semver-shaped MAJOR.MINOR.PATCH; the comparison uses MAJOR.MINOR only.
+ */
+export interface VersionState {
+  component: Component;
+  supervisor?: Supervisor;
+  video?: Video;
+  [k: string]: unknown;
+}
+/**
  * Body of supervisor GET /state and backend GET /api/state (S3.3).
  *
  * `jetson` is whatever the Jetson's GET /state returned (opaque to the
@@ -331,6 +347,7 @@ export interface StateResponse {
   vision?: VisionState;
   audio?: AudioState;
   recent_anomalies?: RecentAnomalies;
+  version?: VersionState | null;
   [k: string]: unknown;
 }
 export interface Plugs {
