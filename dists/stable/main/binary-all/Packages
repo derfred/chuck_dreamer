@@ -66,3 +66,23 @@ Description: Fessel robot-arm monitoring (Pi side)
  by Tailscale identity (Slice 5.5). Configuration lives in /etc/fessel and is
  preserved across upgrades.
 
+Package: gstreamer1.0-plugins-rs-fessel
+Architecture: arm64
+Version: 0.13.7+fessel1+gst1.26
+Priority: optional
+Section: libs
+Maintainer: Fessel <noreply@example.com>
+Depends: libc6 (>= 2.39), libgcc-s1 (>= 4.2), libglib2.0-0t64 (>= 2.54.0), libgstreamer-plugins-bad1.0-0 (>= 1.26.2), libgstreamer-plugins-base1.0-0 (>= 1.22.0), libgstreamer1.0-0 (>= 1.20.0), libssl3t64 (>= 3.0.0), libgstreamer1.0-0 (<< 1.28), gstreamer1.0-plugins-bad, gstreamer1.0-nice
+Filename: pool/main/g/gstreamer1.0-plugins-rs-fessel/gstreamer1.0-plugins-rs-fessel_0.13.7+fessel1+gst1.26_arm64.deb
+Size: 5058060
+MD5sum: bced30d15150af6b8250b777d4fb3600
+SHA1: 4576bca5b76ba5c805eb0cf51106fde7e72149cf
+SHA256: 8f0361ea929c66bf8a7fb6b45cc9dd6a76b5146d88f63bd733ba2f5c2cec5629
+SHA512: 802e185eaa3d741df64092734eb9953e41b13142ca7f37d23b7929198a9303e77e673b5c433da1be35be3f5bdf115262d62822a7626b93b7d1175e958dc6e3e6
+Description: gst-plugins-rs WHIP publisher elements for Fessel
+ whipclientsink (WHIP WebRTC publisher) and rtpgccbwe (GCC
+ congestion control) from gst-plugins-rs 0.13.7, cross-built
+ against Debian trixie's GStreamer 1.26 for the Fessel Pi.
+ Debian does not package the rust net/webrtc plugin; this package
+ exists until it does (then prefer the official one).
+
