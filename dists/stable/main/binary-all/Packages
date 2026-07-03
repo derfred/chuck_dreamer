@@ -86,3 +86,24 @@ Description: gst-plugins-rs WHIP publisher elements for Fessel
  Debian does not package the rust net/webrtc plugin; this package
  exists until it does (then prefer the official one).
 
+Package: gstreamer1.0-plugins-rs-fessel
+Architecture: arm64
+Version: 0.15.3+fessel1+gst1.26
+Priority: optional
+Section: libs
+Maintainer: Fessel <noreply@example.com>
+Depends: libc6 (>= 2.34), libgcc-s1 (>= 4.2), libglib2.0-0t64 (>= 2.54.0), libgstreamer-plugins-bad1.0-0 (>= 1.26.2), libgstreamer-plugins-base1.0-0 (>= 1.22.0), libgstreamer1.0-0 (>= 1.20.0), libgstreamer1.0-0 (<< 1.28), gstreamer1.0-plugins-bad, gstreamer1.0-nice
+Filename: pool/main/g/gstreamer1.0-plugins-rs-fessel/gstreamer1.0-plugins-rs-fessel_0.15.3+fessel1+gst1.26_arm64.deb
+Size: 3569804
+MD5sum: 77a34011764390f52fc627ad5412e36f
+SHA1: bcb45090b285c45e541c5710d88c66fabb6c9865
+SHA256: 90402b3ac111158de3b8d7a7a6f708a788b2e1f8c7e7bb9e819f97b11578e113
+SHA512: b91b8ca8920f0490064447a758629ff6ec52562b4ad6a19af3f97d47dfb392cdef67332059cb0f76d7673dae036d9d399069276795881c4124a387f52b87ab1b
+Description: gst-plugins-rs WebRTC elements for Fessel
+ whipclientsink (WHIP publisher / push), whepserversink (WHEP server
+ / serve-for-pull) and rtpgccbwe (GCC congestion control) from
+ gst-plugins-rs 0.15.3, cross-built against Debian trixie's
+ GStreamer 1.26 for the Fessel Pi. Debian does not package
+ the rust net/webrtc plugin; this package exists until it does
+ (then prefer the official one).
+
