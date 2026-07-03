@@ -21,8 +21,8 @@ on:
         description: "Debian repackage revision (+fesselN); bump when repackaging the same upstream"
         default: "1"
       gst_plugins_rs_branch:
-        description: "gst-plugins-rs branch (0.13 targets GStreamer 1.26 — match the Pi)"
-        default: "0.13"
+        description: "gst-plugins-rs branch (0.15 = whip+whep+rtpgccbwe, links against the Pi's GStreamer 1.26)"
+        default: "0.15"
   push:
     paths:
       - "src/fessel/pi/deploy/gst-plugins-rs/**"
@@ -49,7 +49,7 @@ jobs:
           outputs: type=local,dest=dist
           build-args: |
             DEB_REVISION=${{ inputs.deb_revision || '1' }}
-            GST_PLUGINS_RS_BRANCH=${{ inputs.gst_plugins_rs_branch || '0.13' }}
+            GST_PLUGINS_RS_BRANCH=${{ inputs.gst_plugins_rs_branch || '0.15' }}
           # The cargo build dominates; cache layers so doc-only/packaging
           # changes rebuild in minutes instead of an hour.
           cache-from: type=gha,scope=gst-plugins-rs-deb

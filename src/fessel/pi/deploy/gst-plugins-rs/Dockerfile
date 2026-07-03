@@ -1,26 +1,29 @@
-# Cross-build gst-plugins-rs WHIP support for the Pi and package it as a .deb.
+# Cross-build gst-plugins-rs WebRTC support for the Pi and package it as a .deb.
 #
-# Ships TWO plugins — both are required for the WHIP uplink:
-#   libgstrswebrtc.so  whipclientsink (the WHIP publisher element)
-#   libgstrsrtp.so     rtpgccbwe (GCC bandwidth estimation; without it
-#                      whipclientsink disables congestion control and the
-#                      bitrate bounces instead of adapting — the entire point
-#                      on a cellular uplink)
+# Ships TWO plugins covering BOTH relay architectures:
+#   libgstrswebrtc.so  whipclientsink (WHIP publisher — the Pi PUSHES to the
+#                      relay) AND whepserversink (WHEP server — the Pi SERVES its
+#                      camera for the relay to PULL). whepserversink requires
+#                      branch >= 0.15 (0.13/0.14 lack it).
+#   libgstrsrtp.so     rtpgccbwe (GCC bandwidth estimation; without it the
+#                      webrtc sinks disable congestion control and the bitrate
+#                      bounces instead of adapting — the entire point on a
+#                      cellular uplink)
 #
 # Built inside arm64 Debian trixie (buildx --platform linux/arm64, QEMU on the
 # Mac / amd64 CI) so the plugins link against the SAME GStreamer 1.26 C libs
-# the Pi runs — no cross-linker / sysroot juggling. Branch 0.13 of
-# gst-plugins-rs targets GStreamer 1.26.
+# the Pi runs — no cross-linker / sysroot juggling. Branch 0.15 of
+# gst-plugins-rs needs only GStreamer v1_22 (Pi runs 1.26.2, links fine).
 #
 # The final stage is a scratch image holding just the .deb:
 #   docker buildx build --platform linux/arm64 --output type=local,dest=./dist .
 #
 # Version: <upstream gst-plugins-rs version>+fessel<DEB_REVISION>+gst<minor>,
-# e.g. 0.13.6+fessel1+gst1.26. Bump DEB_REVISION for a repackage of the same
+# e.g. 0.15.0+fessel1+gst1.26. Bump DEB_REVISION for a repackage of the same
 # upstream; the gst minor changes only when the Pi's GStreamer does (which
 # REQUIRES a rebuild — the plugin ABI tracks the GStreamer minor, enforced by
 # the <<-next-minor Depends guard below).
-ARG GST_PLUGINS_RS_BRANCH=0.13
+ARG GST_PLUGINS_RS_BRANCH=0.15
 ARG DEB_REVISION=1
 
 FROM debian:trixie AS build
@@ -28,12 +31,19 @@ ARG GST_PLUGINS_RS_BRANCH
 
 # plugins-bad1.0-dev provides gstreamer-webrtc-1.0.pc (the C webrtc lib the
 # rust plugin links against); base-dev alone is not enough.
+# NOTE: trixie's apt rustc is 1.85, but 0.15's dep tree needs rustc >= 1.86
+# (e.g. idna_adapter). So install a current stable toolchain via rustup instead
+# of apt's rustc/cargo, plus gcc (rustup brings no C linker). cargo-c stays from
+# apt (a cargo subcommand; works with the rustup toolchain on PATH).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      cargo rustc cargo-c binutils \
+      cargo-c binutils curl gcc \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
       libgstreamer-plugins-bad1.0-dev \
       libssl-dev pkg-config git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /src
 RUN git clone --depth 1 --branch "${GST_PLUGINS_RS_BRANCH}" \
@@ -114,12 +124,13 @@ RUN set -e; \
       echo "Architecture: arm64"; \
       echo "Depends: $DEPS"; \
       echo "Maintainer: Fessel <noreply@example.com>"; \
-      echo "Description: gst-plugins-rs WHIP publisher elements for Fessel"; \
-      echo " whipclientsink (WHIP WebRTC publisher) and rtpgccbwe (GCC"; \
-      echo " congestion control) from gst-plugins-rs ${UPSTREAM}, cross-built"; \
-      echo " against Debian trixie's GStreamer ${GST_MINOR} for the Fessel Pi."; \
-      echo " Debian does not package the rust net/webrtc plugin; this package"; \
-      echo " exists until it does (then prefer the official one)."; \
+      echo "Description: gst-plugins-rs WebRTC elements for Fessel"; \
+      echo " whipclientsink (WHIP publisher / push), whepserversink (WHEP server"; \
+      echo " / serve-for-pull) and rtpgccbwe (GCC congestion control) from"; \
+      echo " gst-plugins-rs ${UPSTREAM}, cross-built against Debian trixie's"; \
+      echo " GStreamer ${GST_MINOR} for the Fessel Pi. Debian does not package"; \
+      echo " the rust net/webrtc plugin; this package exists until it does"; \
+      echo " (then prefer the official one)."; \
     } > "$STAGE/DEBIAN/control"; \
     install -m 755 /pkg/postinst "$STAGE/DEBIAN/postinst"; \
     \
