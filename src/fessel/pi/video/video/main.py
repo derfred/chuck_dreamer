@@ -35,6 +35,7 @@ import time
 from fessel_schemas import (
   AnomalyRecordingEvent,
   AnomalyType,
+  CameraState,
   Capabilities,
   LiveActivate,
   LiveDeactivate,
@@ -351,6 +352,22 @@ class VideoApp:
     )
     self._capture.start()
     log.info("capture pipeline started (ring at %s)", self._storage.ring_dir)
+    # §7.4: camera presence is a retained state topic. The capture pipeline IS
+    # the camera (it owns the device and delivers frames — a videotestsrc dev
+    # source counts: frames flow), so pipeline-up is the honest `up` signal.
+    # supervisor caches this into /state.camera.up, which the webui health
+    # gate consults before answering /whep. A failed start never reaches this
+    # line (_start_capture fails loud and the process exits), and supervisor's
+    # heartbeat-staleness handling covers a dead video process going forward.
+    self._publish_camera_state(up=True)
+
+  def _publish_camera_state(self, up: bool) -> None:
+    self._mqtt.publish(
+      topics.STATE_CAMERA,
+      CameraState(up=up).model_dump(),
+      qos=topics.QOS_STATE,
+      retain=topics.RETAIN_STATE,
+    )
 
   # --- Slice 5: vision + audio analysis (V5.1–V5.7) --------------------------
 
@@ -638,6 +655,10 @@ class VideoApp:
       self._gst_audio.stop()
     if self._capture is not None:
       self._capture.stop()
+      # Clean shutdown: retract the retained camera-up so a stopped video
+      # doesn't leave a stale green camera fact. (A crash skips this — then
+      # supervisor's heartbeat staleness turns the video fact red instead.)
+      self._publish_camera_state(up=False)
     self._mqtt.loop_stop()
     self._mqtt.disconnect()
 

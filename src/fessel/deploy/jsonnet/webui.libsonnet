@@ -176,6 +176,12 @@ function(cfg)
         metadata: { labels: { app: 'webui' } },
         spec: {
           [if ts.enabled then 'serviceAccountName']: 'webui',
+          // The webui image runs as non-root (uid 1000, user `webui`); fsGroup
+          // makes the recordings volume group-writable for it. Applies to
+          // PVC/emptyDir volumes — for the hostPath variant the kubelet does
+          // NOT chown, so the operator must ensure the host dir is writable
+          // by gid 1000.
+          securityContext: { fsGroup: 1000 },
           containers: [{
             name: 'webui',
             image: cfg.images.webui,

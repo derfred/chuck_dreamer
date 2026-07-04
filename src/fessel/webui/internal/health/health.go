@@ -187,10 +187,21 @@ func videoFact(body map[string]any, now time.Time) Fact {
 }
 
 func cameraFact(body map[string]any, now time.Time) Fact {
-	if camera, ok := body["camera"].(map[string]any); ok {
-		if up, ok := camera["up"].(bool); ok && up {
-			return Fact{"camera", "green", "present", now}
-		}
+	// Only an EXPLICIT up/down report is a confident fact. `up: null` (video
+	// hasn't reported camera state yet / an older video without the retained
+	// topic) is unknown, not red — a red here would make the /whep gate
+	// fast-reject on ambiguity, which the gate spec reserves for confident
+	// outages (§4.3: ambiguous states fall through to the activation timeout).
+	camera, ok := body["camera"].(map[string]any)
+	if !ok {
+		return Fact{"camera", "unknown", "not reported", now}
+	}
+	up, ok := camera["up"].(bool)
+	if !ok {
+		return Fact{"camera", "unknown", "not reported", now}
+	}
+	if up {
+		return Fact{"camera", "green", "present", now}
 	}
 	return Fact{"camera", "red", "not detected", now}
 }

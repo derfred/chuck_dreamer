@@ -121,6 +121,26 @@ func TestVersionSyncStates(t *testing.T) {
 	}
 }
 
+func TestCameraUnreportedIsUnknownAndGateProceeds(t *testing.T) {
+	// video has never published arm/video/state/camera (up: null / absent):
+	// the fact is unknown, NOT red — and unknown must not fast-reject /whep
+	// (the activation timeout arbitrates ambiguity).
+	for _, body := range []map[string]any{
+		{"vision": map[string]any{"healthy": true}, "version": map[string]any{"component": "1.4.0"}},
+		{"vision": map[string]any{"healthy": true}, "camera": map[string]any{"up": nil},
+			"version": map[string]any{"component": "1.4.0"}},
+	} {
+		m := newTestMonitor(&fakeSup{supervisor.ForwardResult{StatusCode: 200, Body: body}}, &fakeRelay{})
+		snap := m.RefreshOnce()
+		if f := factByID(snap, "camera"); f["state"] != "unknown" {
+			t.Fatalf("camera %v want unknown", f)
+		}
+		if ok, reason := m.GateLiveView(); !ok {
+			t.Fatalf("gate must proceed on unreported camera, rejected: %q", reason)
+		}
+	}
+}
+
 func TestCameraAndVideoRed(t *testing.T) {
 	body := healthyState()
 	body["camera"] = map[string]any{"up": false}
