@@ -119,15 +119,23 @@ class VideoBranch:
     return Gst.PadProbeReturn.REMOVE
 
   def _finish_remove(self) -> bool:
+    # Run the blocking part OFF the GLib loop: set_state(NULL) on a
+    # webrtcsink bin can block (WebRTC session teardown), and this callback
+    # runs on the loop that dispatches ALL bus messages and branch callbacks —
+    # a blocked NULL here wedged the whole branch machinery in production
+    # (state machine stuck in `stopping`, every later activate ignored).
+    threading.Thread(target=self._teardown_blocking, name="branch-teardown", daemon=True).start()
+    return False  # one-shot
+
+  def _teardown_blocking(self) -> None:
     try:
       self._bin.set_state(Gst.State.NULL)
       self._pipeline.remove(self._bin)
       self._tee.release_request_pad(self._tee_pad)
-    except Exception:  # noqa: BLE001 — teardown must not crash the loop
+    except Exception:  # noqa: BLE001 — teardown must not crash
       log.exception("error finishing branch removal")
     if self._on_removed is not None:
       self._on_removed()
-    return False  # one-shot
 
 
 class GstCapturePipeline:

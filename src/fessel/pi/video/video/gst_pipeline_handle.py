@@ -53,6 +53,18 @@ class GstLivePipeline(PipelineHandle):
       on_error=self._on_error,
       on_removed=self._on_removed,
     )
+    if self._branch is not None:
+      # OPTIMISTIC connected: whipclientsink is a webrtcsink bin that adds its
+      # internals dynamically, so the outer branch bin never aggregates to
+      # PLAYING and the bus-based on_playing never fires — the state machine's
+      # connect-timeout then kills a HEALTHY session at connect_timeout_s
+      # (observed in production: media flowing, EOF at exactly 15s). A
+      # successful attach is the honest local signal; a failed WHIP session
+      # surfaces as a branch error -> on_disconnected -> re-attach with
+      # backoff. End-to-end, the relay's live_activation_timeout remains the
+      # authoritative arbiter (§4.3). The bus on_playing path stays as a
+      # harmless dedup'd no-op.
+      self._on_playing()
 
   def stop(self) -> None:
     # Detach the WHIP sender branch from tee_live (tears the WebRTC session
