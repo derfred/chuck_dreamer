@@ -45,6 +45,20 @@ echo "== node public IPs: ${NODE_PUBLIC_IPS} =="
 # pin the pod when the cluster is heterogeneous.
 NODE_HOSTNAMES="${NODE_HOSTNAMES:-}"
 
+# A just-torn-down namespace lingers in Terminating (PVC finalizers); applying
+# into it silently creates objects that die with it ("object has been
+# deleted"). Wait for the deletion to complete first.
+for i in $(seq 1 60); do
+  phase="$(kubectl get ns "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  [ "$phase" != "Terminating" ] && break
+  [ "$i" = 1 ] && echo "== namespace $NS is Terminating; waiting for deletion =="
+  sleep 5
+done
+if [ "$(kubectl get ns "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)" = "Terminating" ]; then
+  echo "ERROR: namespace $NS still Terminating after 5m" >&2
+  exit 1
+fi
+
 echo "== render + apply live-preview env (jsonnet, nodeport mode) =="
 tk eval "$JSONNET/envs/live-preview.jsonnet" \
   -V ns="$NS" -V image_tag="$IMAGE_TAG" -V registry="$REGISTRY" \
