@@ -90,13 +90,16 @@ jobs:
           # bugzoo: Talos nodes register only InternalIPs, so the public
           # viewer-ICE addresses can't be discovered from the node objects —
           # pass them explicitly (source of truth: bugzoo-infrastructure).
-          # Only the suenje workers own public IPs; pin the webui there
-          # (externalTrafficPolicy: Local). 31654 avoids the production
-          # fessel namespace's webui-media NodePort (31554).
+          # ONE IP + ONE pinned node: Cilium KPR does NOT drop non-local
+          # NodePort traffic (unlike kube-proxy with externalTrafficPolicy:
+          # Local), so advertising several node IPs creates multiple live,
+          # asymmetric ICE paths and the browser flaps between them — enough
+          # packet loss that Firefox renders black. 31654 avoids the
+          # production fessel namespace's webui-media NodePort (31554).
           NS="$NS" IMAGE_TAG="$IMAGE_TAG" REGISTRY="$REGISTRY" \
             BASE_DOMAIN="$BASE_DOMAIN" \
-            NODE_PUBLIC_IPS="85.10.209.85,88.99.140.171" \
-            NODE_HOSTNAMES="worker-suenje1,worker-suenje2" \
+            NODE_PUBLIC_IPS="85.10.209.85" \
+            NODE_HOSTNAMES="worker-suenje1" \
             WRTC_UDP_NODEPORT="31654" \
             integration/live-preview/deploy.sh
       - name: Keep alive then auto-teardown
