@@ -54,9 +54,13 @@ export async function startWhep(
   pc.addTransceiver("audio", { direction: "recvonly" });
 
   pc.ontrack = (ev) => {
-    if (ev.streams[0]) {
-      video.srcObject = ev.streams[0];
-    }
+    // Wrap the receiver's track in a LOCALLY-constructed MediaStream instead
+    // of using the remote-announced ev.streams[0]: Firefox decodes the track
+    // either way (getStats framesDecoded advances) but never paints frames
+    // from the remote stream object — videoWidth stays 0 and the element
+    // shows black. Verified live: the same track renders once re-wrapped.
+    // Safari/Chrome render both forms identically.
+    video.srcObject = new MediaStream([ev.track]);
   };
 
   const offer = await pc.createOffer();

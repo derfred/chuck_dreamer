@@ -64,3 +64,19 @@ afterEach(() => {
   // cleared it.
   installFakeRtc();
 });
+
+// jsdom has no MediaStream; whep.ts wraps the received track in a locally-
+// constructed one (the Firefox rendering fix), so tests need a minimal stub.
+class FakeMediaStream {
+  tracks: unknown[];
+  constructor(tracks: unknown[] = []) {
+    this.tracks = tracks;
+  }
+  getTracks() {
+    return this.tracks;
+  }
+  getVideoTracks() {
+    return this.tracks;
+  }
+}
+(globalThis as Record<string, unknown>).MediaStream = FakeMediaStream;
