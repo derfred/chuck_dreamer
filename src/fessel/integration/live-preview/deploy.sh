@@ -50,6 +50,16 @@ tk eval "$JSONNET/envs/live-preview.jsonnet" \
   -V udp_nodeport="$WRTC_UDP_NODEPORT" \
   | kubectl apply -f -
 
+# Restore a previously-stashed TLS secret (see teardown.sh) so cert-manager
+# adopts the existing valid certificate instead of ordering a new one.
+STASH_NS="fessel-preview-certs"
+if kubectl -n "$STASH_NS" get secret fessel-webui-tls >/dev/null 2>&1; then
+  kubectl -n "$STASH_NS" get secret fessel-webui-tls -o json \
+    | jq 'del(.metadata.namespace,.metadata.uid,.metadata.resourceVersion,.metadata.creationTimestamp,.metadata.ownerReferences)' \
+    | kubectl -n "$NS" apply -f -
+  echo "== restored stashed TLS secret =="
+fi
+
 echo "== wait for rollouts =="
 kubectl -n "$NS" rollout status deploy/webui --timeout=120s
 kubectl -n "$NS" rollout status deploy/pi --timeout=180s
