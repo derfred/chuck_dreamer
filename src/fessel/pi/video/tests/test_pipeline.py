@@ -232,7 +232,8 @@ def test_whip_sender_chain_is_sourceless_rtp_whip():
   # session — attaching IS the WHIP handshake.
   chain = whip_sender_chain(whip_endpoint="http://webui:8001/whip/ingest")
   assert chain.startswith("queue ! ")
-  assert "rtph264pay" in chain
+  # whipclientsink payloads internally; RTP elements must NOT appear.
+  assert "rtph264pay" not in chain
   assert "whipclientsink" in chain
   assert 'signaller::whip-endpoint="http://webui:8001/whip/ingest"' in chain
   # No encoder (it rides the warm live encoder) and no SRT remnants.

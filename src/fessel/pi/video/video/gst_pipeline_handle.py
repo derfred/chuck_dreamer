@@ -4,7 +4,7 @@ a standalone pipeline.
 
 The live encoder runs warm in the capture pipeline whenever it is up; this
 handle governs only the sender. `start()` attaches the WHIP sender branch
-(queue ! rtph264pay ! whipclientsink) onto `tee_live`; `stop()` detaches it.
+(queue ! whipclientsink) onto `tee_live`; `stop()` detaches it.
 whipclientsink owns its WebRTC session lifecycle, so attaching IS the WHIP
 handshake and detaching tears the session down.
 

@@ -313,11 +313,14 @@ def force_idr(element: Gst.Element | None) -> None:
   if element is None:
     log.warning("force_idr: live encoder not found")
     return
-  sink = element.get_static_pad("sink")
-  if sink is None:
+  # Upstream events are sent on the SRC pad and travel upstream INTO the
+  # element (sending on the sink pad goes the wrong way — GStreamer warns
+  # "sending custom-upstream event in wrong direction" and drops it).
+  src = element.get_static_pad("src")
+  if src is None:
     return
   event = GstVideo.video_event_new_upstream_force_key_unit(
     Gst.CLOCK_TIME_NONE, all_headers=True, count=0
   )
-  if not sink.send_event(event):
+  if not src.send_event(event):
     log.info("force_idr: encoder did not accept force-key-unit (ignored)")

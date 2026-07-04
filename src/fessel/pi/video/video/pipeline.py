@@ -16,7 +16,7 @@ Live path (architecture §2.2, warm-but-detached / Variant B):
     config-interval=1 ! tee name=tee_live`, with a permanently linked
     `queue ! fakesink` drop branch so the encoder output flows nowhere while
     unwatched (zero uplink, no cold start on first viewer).
-  - On activation, ONLY the WHIP sender sub-branch (`queue ! rtph264pay !
+  - On activation, ONLY the WHIP sender sub-branch (`queue !
     whipclientsink`) is linked onto tee_live; whipclientsink owns its WebRTC
     session lifecycle — attaching IS the WHIP handshake, detaching tears the
     session down. Reconnect after an uplink blip is the state machine's job.
@@ -199,10 +199,11 @@ def whip_sender_chain(*, whip_endpoint: str) -> str:
   detaching it tears the session down. Reconnect after an uplink blip is the
   state machine's job (re-attach with backoff), not the element's.
   """
-  return (
-    f"queue ! rtph264pay ! "
-    f'whipclientsink name={WHIP_SINK_NAME} signaller::whip-endpoint="{whip_endpoint}"'
-  )
+  # NO rtph264pay: whipclientsink is a webrtcsink-family bin that consumes
+  # ENCODED media (video/x-h264 from tee_live) and does RTP payloading +
+  # congestion control internally. Feeding it application/x-rtp fails to link
+  # at parse time ("could not link rtph264pay to live_whip").
+  return f'queue ! whipclientsink name={WHIP_SINK_NAME} signaller::whip-endpoint="{whip_endpoint}"'
 
 
 def recording_branch_chain(
