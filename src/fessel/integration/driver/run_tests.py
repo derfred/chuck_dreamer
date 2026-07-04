@@ -46,6 +46,13 @@ MODE = os.environ.get("FESSEL_MODE", "640x480@30@1000000")
 JUNIT_OUT = os.environ.get("JUNIT_OUT", "/results/junit.xml")
 
 RECONNECT_CYCLES = int(os.environ.get("RECONNECT_CYCLES", "20"))
+# The live-preview env runs the webui with FESSEL_DEV_IDENTITY (no oauth2-proxy
+# there, so a real browser needs the bypass). The requires-auth assertions are
+# meaningless against a bypassed listener: run them as non-blocking XFAILs so
+# the report SHOWS the bypass instead of failing on it.
+AUTH_BYPASS_GAP = (
+  "FESSEL_DEV_IDENTITY auth bypass active in this env" if os.environ.get("AUTH_BYPASS") else None
+)
 # The relay's idle timeout (FESSEL_LIVE_IDLE_TIMEOUT_S, default 10s) plus the
 # Pi-side detach; teardown asserts within this window + margin.
 IDLE_TIMEOUT_S = float(os.environ.get("FESSEL_LIVE_IDLE_TIMEOUT_S", "10"))
@@ -688,19 +695,19 @@ def main() -> int:
   # Live chain (WHEP -> activation -> WHIP -> metrics -> decoded frames).
   suite.run("happy_path_activation", t_happy_path)
   suite.run("teardown_returns_off", t_teardown)
-  suite.run("whep_requires_auth", t_whep_requires_auth)
+  suite.run("whep_requires_auth", t_whep_requires_auth, known_gap=AUTH_BYPASS_GAP)
   suite.run("rapid_reconnect_no_leak", t_rapid_reconnect)
   # Slice 3 control plane (mocked actuators).
   suite.run("control_pause_resume", t_control_pause_resume)
   suite.run("control_power_cycle_verified", t_power_cycle_verified)
   suite.run("control_verify_failure_surfaces", t_verify_failure_surfaces)
-  suite.run("control_requires_auth", t_control_requires_auth)
+  suite.run("control_requires_auth", t_control_requires_auth, known_gap=AUTH_BYPASS_GAP)
   # Slice 5.5 recording round-trip through the new ingest path (disk backend,
   # T5.5.2) + the ingest auth/bypass assertions (T5.5.3).
   suite.run("recording_roundtrip_via_ingest", t_recording_roundtrip_via_ingest)
   suite.run("ingest_listener_accepts_put", t_ingest_listener_accepts_put)
   suite.run("ingest_not_reachable_via_public_listener", t_ingest_not_reachable_via_public_listener)
-  suite.run("recordings_require_auth", t_recordings_require_auth)
+  suite.run("recordings_require_auth", t_recordings_require_auth, known_gap=AUTH_BYPASS_GAP)
 
   with open(JUNIT_OUT, "w") as f:
     f.write(suite.to_junit())

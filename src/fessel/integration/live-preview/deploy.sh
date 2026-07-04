@@ -74,6 +74,7 @@ spec:
             - { name: MEDIA, value: "http://webui:8000" }
             - { name: SUPERVISOR, value: "http://supervisor:8443" }
             - { name: CONTROL_PLANE_ONLY, value: "1" }
+            - { name: AUTH_BYPASS, value: "1" }  # webui runs FESSEL_DEV_IDENTITY here
             - { name: RECONNECT_CYCLES, value: "10" }
             - { name: JUNIT_OUT, value: "/tmp/junit.xml" }
 EOF
