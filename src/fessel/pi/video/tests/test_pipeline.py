@@ -279,3 +279,16 @@ def test_recording_branch_chain_is_sourceless_finite_hls():
   )
   assert "hlssink2 name=anomaly_fwd_hls" in anomaly
   assert "location=/mnt/ssd/recordings/anomaly/a1/seg-9%04d.ts" in anomaly
+
+
+def test_live_branch_pins_constrained_baseline():
+  """The LIVE encoder must write a constrained-baseline SPS: browsers
+  negotiate 42e01f, and Firefox's OpenH264 (baseline-only) silently drops
+  High-profile frames — black video with a healthy connection."""
+  from video.pipeline import live_warm_branch
+
+  chain = live_warm_branch(
+    live_resolution="640x480", live_fps=15, live_bitrate_bps=1_000_000,
+    allow_software_encoder=True,
+  )
+  assert "profile=(string)constrained-baseline" in chain

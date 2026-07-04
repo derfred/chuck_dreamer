@@ -117,6 +117,7 @@ def _encoder_chain(
   bitrate_bps: int,
   gop: int,
   name: str = LIVE_ENCODER_NAME,
+  h264_profile: str | None = None,
 ) -> str:
   """H.264 encode parameterised by bitrate + GOP, per encoder style.
 
@@ -147,7 +148,16 @@ def _encoder_chain(
       f"{prof.element} name={name} bitrate={bitrate_bps // 1000} "
       f"max-keyframe-interval={gop} realtime=true allow-frame-reordering=false"
     )
-  return f"{enc} ! {prof.output_caps} ! h264parse config-interval=1"
+  caps = prof.output_caps
+  if h264_profile is not None:
+    # Pin the H.264 profile via caps negotiation. The LIVE branch needs
+    # constrained-baseline: browsers negotiate profile-level-id 42e01f, and
+    # Firefox decodes WebRTC H.264 with OpenH264 (baseline-only) — an
+    # unpinned encoder writes a High-profile SPS and Firefox silently drops
+    # every frame (black video, "Playing" state). Recording/ring branches
+    # stay unpinned (HLS playback uses full platform decoders).
+    caps = caps.replace("video/x-h264,", f"video/x-h264,profile=(string){h264_profile},")
+  return f"{enc} ! {caps} ! h264parse config-interval=1"
 
 
 # --- shared tee names (architecture §2.2) ------------------------------------
@@ -180,7 +190,9 @@ def live_warm_branch(
   prof = encoder_profile(allow_software=allow_software_encoder)
   width, height = _wh(live_resolution)
   gop = max(1, live_fps)  # ~1s keyframe interval -> short GOP for fast join.
-  encoder = _encoder_chain(prof, live_bitrate_bps, gop, name=LIVE_ENCODER_NAME)
+  encoder = _encoder_chain(
+    prof, live_bitrate_bps, gop, name=LIVE_ENCODER_NAME, h264_profile="constrained-baseline"
+  )
   return (
     f"{VIDEO_TEE_NAME}. ! queue ! videoscale ! videorate ! "
     f"video/x-raw,width={width},height={height},framerate={live_fps}/1,format=I420 ! "
