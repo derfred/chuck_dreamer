@@ -95,6 +95,10 @@ video:
 
   # Slice 5 audio analysis (V5.6). Runs on the always-on level branch.
   audio:
+    # Set false to run without a microphone entirely (video is unaffected;
+    # audio anomaly analysis is disabled). The pipeline ALSO auto-degrades to
+    # this at startup when the device below cannot be opened.
+    enabled: true
     # ALSA capture device for the analysis branch (default = system default).
     device: default
     # Rolling window (s) over which the baseline median is taken.

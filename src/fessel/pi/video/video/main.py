@@ -156,6 +156,10 @@ class VideoApp:
     # started in run().
     self._capture: GstCapturePipeline | None = None
     self._audio_device = (config.get("audio") or {}).get("device", "default")
+    # audio.enabled=false skips the mic chain entirely (deploy-time knob for
+    # rigs without a microphone); the capture pipeline ALSO auto-degrades at
+    # startup when the device can't be opened.
+    self._audio_enabled = bool((config.get("audio") or {}).get("enabled", True))
     # Boot snapshots of the restart-only sections, so a SIGHUP reload (§2.13)
     # can warn about a change to something it cannot hot-apply. The whip
     # endpoint + the live profile are restart-only like srt/camera were: the
@@ -349,6 +353,7 @@ class VideoApp:
       use_test_source=self._use_test_source,
       allow_software_encoder=self._allow_software_encoder,
       audio_level_interval_ns=int(1e9 / max(0.1, audio_level_hz)),
+      include_audio=self._audio_enabled,
     )
     self._capture.start()
     log.info("capture pipeline started (ring at %s)", self._storage.ring_dir)
@@ -450,6 +455,12 @@ class VideoApp:
       log.exception("vision analysis failed to start (continuing without it)")
       self._gst_vision = None
 
+    if self._capture is None or not self._capture.audio_enabled:
+      # The capture pipeline was built without the audio chain (no usable mic
+      # or audio.enabled=false): there is no level element to attach to.
+      log.info("audio analysis disabled (no usable audio device / audio.enabled=false)")
+      self._gst_audio = None
+      return
     try:
       from .gst_audio_handle import GstAudioPipeline
 

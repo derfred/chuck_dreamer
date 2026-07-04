@@ -270,6 +270,7 @@ def build_capture_launch(
   use_test_source: bool = False,
   allow_software_encoder: bool = False,
   audio_level_interval_ns: int = 500_000_000,
+  include_audio: bool = True,
 ) -> str:
   """The single always-on capture pipeline (architecture §2.2).
 
@@ -316,6 +317,16 @@ def build_capture_launch(
     live_bitrate_bps=live_bitrate_bps,
     allow_software_encoder=allow_software_encoder,
   )
+
+  # Audio is analysis-only (V5.6); video is the safety-critical path. A
+  # missing/broken mic must never take the camera down, so the audio chain is
+  # optional: include_audio=False builds a video-only capture (the caller
+  # auto-degrades when the ALSA device can't be opened).
+  if not include_audio:
+    return (
+      f"{video_source} ! tee name={VIDEO_TEE_NAME} "
+      f"{ring_branch} {vision_branch} {live_branch}"
+    )
 
   if use_test_source:
     audio_source = "audiotestsrc is-live=true wave=silence"

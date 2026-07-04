@@ -150,7 +150,23 @@ class GstCapturePipeline:
     use_test_source: bool = False,
     allow_software_encoder: bool = False,
     audio_level_interval_ns: int = 500_000_000,
+    include_audio: bool = True,
   ) -> None:
+    # Audio auto-degrade: a mic that can't be opened must not take down the
+    # VIDEO safety path (a wedged alsasrc stalls the whole pipeline before
+    # PLAYING — seen on the first real-Pi deploy: whipclientsink never even
+    # signalled). Probe the ALSA device up front and drop the audio chain
+    # when it isn't usable; audio analysis is degraded, video unaffected.
+    Gst.init(None)
+    self.audio_enabled = bool(include_audio)
+    if self.audio_enabled and not use_test_source and not alsa_device_openable(audio_device):
+      log.warning(
+        "audio device %r cannot be opened; building capture WITHOUT audio "
+        "(video unaffected; audio analysis disabled)",
+        audio_device,
+      )
+      self.audio_enabled = False
+
     launch = build_capture_launch(
       mode=mode,
       ring_dir=ring_dir,
@@ -166,12 +182,12 @@ class GstCapturePipeline:
       use_test_source=use_test_source,
       allow_software_encoder=allow_software_encoder,
       audio_level_interval_ns=audio_level_interval_ns,
+      include_audio=self.audio_enabled,
     )
     log.info("capture launch: %s", launch)
     # Fail loud at construction if whipclientsink is unavailable (it is only
     # parsed at attach time, which would otherwise hide the missing plugin as
     # an endless connect-failure loop).
-    Gst.init(None)
     if Gst.ElementFactory.find(WHIP_SINK_ELEMENT) is None:
       raise RuntimeError(
         f"{WHIP_SINK_ELEMENT} is not available: the live WHIP sender cannot run. "
@@ -305,6 +321,23 @@ class GstCapturePipeline:
         branch = self._branches.get(msg.src) if msg.src is not None else None
       if branch is not None and branch._on_error is not None:  # noqa: SLF001
         branch._on_error(branch._reached_playing)  # noqa: SLF001
+
+
+def alsa_device_openable(device: str) -> bool:
+  """Probe whether the ALSA capture device can be opened (READY state).
+
+  Used for the audio auto-degrade in GstCapturePipeline: alsasrc only fails at
+  preroll, which wedges the whole capture pipeline — probing up front lets the
+  builder drop the audio chain instead."""
+  Gst.init(None)
+  src = Gst.ElementFactory.make("alsasrc", None)
+  if src is None:
+    return False
+  src.set_property("device", device)
+  ret = src.set_state(Gst.State.READY)
+  ok = ret != Gst.StateChangeReturn.FAILURE
+  src.set_state(Gst.State.NULL)
+  return ok
 
 
 def force_idr(element: Gst.Element | None) -> None:

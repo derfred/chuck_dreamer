@@ -292,3 +292,25 @@ def test_live_branch_pins_constrained_baseline():
     allow_software_encoder=True,
   )
   assert "profile=(string)constrained-baseline" in chain
+
+
+def test_capture_launch_without_audio_omits_audio_chain():
+  """include_audio=False (no usable mic / audio.enabled=false) must yield a
+  video-only pipeline: a wedged alsasrc stalls the WHOLE capture pipeline
+  before PLAYING, taking the safety-critical video path down with it (seen on
+  the first real-Pi deploy: whipclientsink never signalled)."""
+  from fessel_schemas import ModeTriplet
+  from video.pipeline import build_capture_launch
+
+  kwargs = dict(
+    mode=ModeTriplet(resolution="640x480", fps=15, bitrate_bps=1_000_000),
+    ring_dir="/tmp/ring", ring_bitrate_bps=1_000_000, ring_segment_seconds=2,
+    ring_playlist_length=5, ring_max_files=6,
+    allow_software_encoder=True,
+  )
+  without = build_capture_launch(include_audio=False, **kwargs)
+  for frag in ("alsasrc", "audiotestsrc", "tee_a", "level name="):
+    assert frag not in without
+  assert "tee_live" in without  # the video branches are untouched
+  with_audio = build_capture_launch(include_audio=True, **kwargs)
+  assert "tee_a" in with_audio
