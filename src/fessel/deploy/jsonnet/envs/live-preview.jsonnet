@@ -2,11 +2,14 @@
 // over the public net), in-cluster test-Pi, public HTTPS ingress. No
 //
 // External vars: ns, image_tag, registry, base_domain,
-//   node_public_ips (comma-separated), udp_nodeport
+//   node_public_ips (comma-separated), node_hostnames (comma-separated,
+//   may be empty), udp_nodeport
 local fessel = import '../main.libsonnet';
 
 local base = std.extVar('base_domain');
 local ips = std.split(std.extVar('node_public_ips'), ',');
+local hostnamesRaw = std.extVar('node_hostnames');
+local hostnames = if hostnamesRaw == '' then [] else std.split(hostnamesRaw, ',');
 
 local cfg = fessel.config + {
   namespace: std.extVar('ns'),
@@ -19,6 +22,7 @@ local cfg = fessel.config + {
   },
   includeTestPi: true,
   includeTailscale: false,
+  webui+: { nodeHostnames: hostnames },
 };
 
 {

@@ -97,6 +97,11 @@
       // Role/RoleBinding that let the pod get/update it.
       stateSecret: 'fessel-webui-tsstate',
     },
+    // Pin the webui pod to specific nodes (kubernetes.io/hostname In [...]).
+    // Needed when only SOME nodes own the advertised viewer public IPs
+    // (externalTrafficPolicy: Local drops media on the others — a pod on a
+    // no-public-IP node breaks viewer ICE silently). Empty = no affinity.
+    nodeHostnames: [],
   },
 
   // How the relay/backend reaches supervisor. Production: Tailscale (egress

@@ -176,6 +176,19 @@ function(cfg)
         metadata: { labels: { app: 'webui' } },
         spec: {
           [if ts.enabled then 'serviceAccountName']: 'webui',
+          [if std.length(cfg.webui.nodeHostnames) > 0 then 'affinity']: {
+            nodeAffinity: {
+              requiredDuringSchedulingIgnoredDuringExecution: {
+                nodeSelectorTerms: [{
+                  matchExpressions: [{
+                    key: 'kubernetes.io/hostname',
+                    operator: 'In',
+                    values: cfg.webui.nodeHostnames,
+                  }],
+                }],
+              },
+            },
+          },
           // The webui image runs as non-root (uid 1000, user `webui`); fsGroup
           // makes the recordings volume group-writable for it. Applies to
           // PVC/emptyDir volumes — for the hostPath variant the kubelet does

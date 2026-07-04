@@ -17,19 +17,36 @@ JSONNET="$HERE/../../deploy/jsonnet"
 WRTC_UDP_NODEPORT="${WRTC_UDP_NODEPORT:-31554}"
 WEBUI_HOST="fessel-live.${BASE_DOMAIN}"
 
-# Node public IPs of schedulable worker nodes (comma-separated) for the
-# relay's viewer ICE candidates (FESSEL_VIEWER_PUBLIC_IPS).
-NODE_PUBLIC_IPS="$(
-  kubectl get nodes -o jsonpath='{range .items[*]}{.spec.unschedulable}{" "}{.status.addresses[?(@.type=="ExternalIP")].address}{"\n"}{end}' \
-  | awk '$1!="true" && $2!="" {printf "%s%s", sep, $2; sep=","}'
-)"
+# Node public IPs (comma-separated) for the relay's viewer ICE candidates
+# (FESSEL_VIEWER_PUBLIC_IPS). Explicit env wins; otherwise discover from the
+# node objects' ExternalIP. On clusters whose nodes register only an
+# InternalIP (Talos on bugzoo: the public addresses live outside k8s), the
+# discovery finds nothing and the env MUST be provided — fail loud rather
+# than deploy a relay that advertises no reachable candidate.
+if [ -z "${NODE_PUBLIC_IPS:-}" ]; then
+  NODE_PUBLIC_IPS="$(
+    kubectl get nodes -o jsonpath='{range .items[*]}{.spec.unschedulable}{" "}{.status.addresses[?(@.type=="ExternalIP")].address}{"\n"}{end}' \
+    | awk '$1!="true" && $2!="" {printf "%s%s", sep, $2; sep=","}'
+  )"
+fi
+if [ -z "$NODE_PUBLIC_IPS" ]; then
+  echo "ERROR: no node public IPs — nodes register no ExternalIP here; set NODE_PUBLIC_IPS" >&2
+  exit 1
+fi
 echo "== node public IPs: ${NODE_PUBLIC_IPS} =="
+
+# Nodes that actually own those public IPs (comma-separated hostnames,
+# optional). With externalTrafficPolicy: Local, a webui pod scheduled on a
+# node WITHOUT a public IP (worker-zrh1) would break viewer media silently —
+# pin the pod when the cluster is heterogeneous.
+NODE_HOSTNAMES="${NODE_HOSTNAMES:-}"
 
 echo "== render + apply live-preview env (jsonnet, nodeport mode) =="
 tk eval "$JSONNET/envs/live-preview.jsonnet" \
   -V ns="$NS" -V image_tag="$IMAGE_TAG" -V registry="$REGISTRY" \
   -V base_domain="$BASE_DOMAIN" \
   -V node_public_ips="$NODE_PUBLIC_IPS" \
+  -V node_hostnames="$NODE_HOSTNAMES" \
   -V udp_nodeport="$WRTC_UDP_NODEPORT" \
   | kubectl apply -f -
 
