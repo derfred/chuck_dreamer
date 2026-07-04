@@ -15,7 +15,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JSONNET="$HERE/../../deploy/jsonnet"
 
 WRTC_UDP_NODEPORT="${WRTC_UDP_NODEPORT:-31554}"
-WEBUI_HOST="fessel-live.${BASE_DOMAIN}"
+# Subdomain override: lets a preview move to a fresh hostname when the
+# default one has burned Let's Encrypt's duplicate-certificate quota (or is
+# HSTS-pinned in a browser against a fallback cert).
+WEBUI_SUBDOMAIN="${WEBUI_SUBDOMAIN:-fessel-live}"
+WEBUI_HOST="${WEBUI_SUBDOMAIN}.${BASE_DOMAIN}"
 
 # Node public IPs (comma-separated) for the relay's viewer ICE candidates
 # (FESSEL_VIEWER_PUBLIC_IPS). Explicit env wins; otherwise discover from the
@@ -46,6 +50,7 @@ tk eval "$JSONNET/envs/live-preview.jsonnet" \
   -V ns="$NS" -V image_tag="$IMAGE_TAG" -V registry="$REGISTRY" \
   -V base_domain="$BASE_DOMAIN" \
   -V node_public_ips="$NODE_PUBLIC_IPS" \
+  -V webui_host="$WEBUI_HOST" \
   -V node_hostnames="$NODE_HOSTNAMES" \
   -V udp_nodeport="$WRTC_UDP_NODEPORT" \
   | kubectl apply -f -

@@ -31,6 +31,10 @@ env:
   IMAGE_TAG: live-preview
   BASE_DOMAIN: derfred.com
   NS: fessel-live-preview
+  # fessel-live burned the LE duplicate-cert quota on 2026-07-04 (limit
+  # resets 2026-07-05 ~23:00 UTC); -live2 is a fresh identifier. Revert to
+  # fessel-live whenever — the cert stash keeps re-orders from recurring.
+  WEBUI_SUBDOMAIN: fessel-live2
 
 jobs:
   build:

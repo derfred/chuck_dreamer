@@ -3,7 +3,7 @@
 //
 // External vars: ns, image_tag, registry, base_domain,
 //   node_public_ips (comma-separated), node_hostnames (comma-separated,
-//   may be empty), udp_nodeport
+//   may be empty), udp_nodeport, webui_host
 local fessel = import '../main.libsonnet';
 
 local base = std.extVar('base_domain');
@@ -14,7 +14,7 @@ local hostnames = if hostnamesRaw == '' then [] else std.split(hostnamesRaw, ','
 local cfg = fessel.config + {
   namespace: std.extVar('ns'),
   images+: { registry: std.extVar('registry'), tag: std.extVar('image_tag'), pullPolicy: 'Always' },
-  hosts: { webui: 'fessel-live.' + base },
+  hosts: { webui: std.extVar('webui_host') },
   webrtc+: {
     mode: 'nodeport',
     nodePublicIPs: ips,
