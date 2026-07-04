@@ -75,7 +75,7 @@ HEARTBEAT_INTERVAL_S = 5.0
 class RecordingStartBody(BaseModel):
   """Body of supervisor POST /recording/start (S4.1). webui-backend is the only
   caller; the canonical mode string + operator pass-through are enough (no
-  mediamtx-style raw-query flexibility needed)."""
+  raw-query flexibility needed)."""
 
   mode: str
   operator: str | None = None

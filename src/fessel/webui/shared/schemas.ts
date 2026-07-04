@@ -7,10 +7,18 @@ export type Resolution = string;
 export type Fps = number;
 export type BitrateBps = number;
 export type Modes = ModeTriplet[];
-export type Path = string | null;
-export type Path1 = string | null;
 export type LiveStateValue = "off" | "starting" | "running" | "stopping";
-export type Path2 = string | null;
+export type Path = string | null;
+/**
+ * Error codes of a rejected POST /whep (webui relay, architecture §2.3).
+ */
+export type LiveViewErrorCode =
+  | "live_unavailable"
+  | "live_timeout"
+  | "live_activation_failed"
+  | "live_error"
+  | "whep_negotiate_failed";
+export type Reason = string;
 export type On = boolean | null;
 export type Verified = boolean;
 export type VerifiedAt = string | null;
@@ -123,6 +131,7 @@ export interface FesselSchemas {
   LiveActivate?: LiveActivate;
   LiveDeactivate?: LiveDeactivate;
   LiveState?: LiveState;
+  LiveViewError?: LiveViewError;
   PlugState?: PlugState;
   CameraState?: CameraState;
   RecordingState?: RecordingState;
@@ -142,8 +151,7 @@ export interface FesselSchemas {
  *
  * `resolution` is the canonical "<W>x<H>" string; fps and bitrate_bps are
  * integers. The full canonical form (incl. fps and bitrate) is produced by
- * mode_to_canonical and is what travels in the WHEP `mode` query parameter
- * and the signed token.
+ * mode_to_canonical; recordings use it (the live path is a fixed profile).
  */
 export interface ModeTriplet {
   resolution: Resolution;
@@ -162,21 +170,16 @@ export interface Capabilities {
  * Payload of arm/video/cmd/live/activate.
  *
  * Parameterless (architecture §2.2): the live profile is a deploy-time config
- * setting on video, not a per-session parameter — the former `mode` triplet is
- * gone from the activation path. `path` is retained as an optional field for
- * wire tolerance only (legacy callers still send it); video ignores it.
+ * setting on video, not a per-session parameter. The message carries no
+ * fields; it means "a viewer wants the live stream; attach the sender."
  */
 export interface LiveActivate {
-  path?: Path;
   [k: string]: unknown;
 }
 /**
- * Payload of arm/video/cmd/live/deactivate.
- *
- * Parameterless; `path` is optional wire tolerance only (see LiveActivate).
+ * Payload of arm/video/cmd/live/deactivate. Parameterless.
  */
 export interface LiveDeactivate {
-  path?: Path1;
   [k: string]: unknown;
 }
 /**
@@ -184,8 +187,20 @@ export interface LiveDeactivate {
  */
 export interface LiveState {
   state: LiveStateValue;
-  path?: Path2;
+  path?: Path;
   mode?: ModeTriplet | null;
+  [k: string]: unknown;
+}
+/**
+ * Error body of a rejected POST /whep.
+ *
+ * Authored by the Go webui (generated Go struct) and consumed by the
+ * frontend's WHEP client (generated Zod validator), so both ends of the
+ * live-view error contract derive from this one definition.
+ */
+export interface LiveViewError {
+  error: LiveViewErrorCode;
+  reason: Reason;
   [k: string]: unknown;
 }
 /**

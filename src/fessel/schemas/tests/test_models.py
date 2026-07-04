@@ -34,15 +34,12 @@ def test_capabilities_payload():
   assert dumped["modes"][0]["resolution"] == "640x480"
 
 
-def test_live_activate_is_parameterless_but_wire_tolerant():
-  # Parameterless activation (§2.2): no mode anywhere in the live path.
+def test_live_activate_is_parameterless():
+  # Parameterless activation (§2.2): no fields at all in the live commands.
   a = LiveActivate()
-  assert a.path is None
-  assert not hasattr(a, "mode")
-  # Wire tolerance: legacy callers still send {"path": ...}; it validates and
-  # is ignored downstream.
-  legacy = LiveActivate.model_validate({"path": "pi"})
-  assert legacy.path == "pi"
+  assert a.model_dump() == {}
+  # Unknown wire fields are ignored (pydantic default), not an error.
+  assert LiveActivate.model_validate({"stray": "x"}).model_dump() == {}
   st = LiveState(state=LiveStateValue.running)
   assert st.model_dump()["state"] == "running"
 

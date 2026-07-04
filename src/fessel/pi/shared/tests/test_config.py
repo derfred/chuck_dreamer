@@ -14,7 +14,7 @@ FESSEL_YAML = textwrap.dedent(
   storage:
     ssd_path: /mnt/ssd
   video:
-    srt: {host: mediamtx-srt, port: 8890}
+    whip: {endpoint: http://webui:8001/whip/ingest}
     ring: {fps: 30}
   supervisor:
     http: {port: 8443}
@@ -44,7 +44,7 @@ def test_shared_sections_present_in_every_component(tmp_path):
 def test_component_subtree_flattened_to_top_level(tmp_path):
   p = _write(tmp_path, FESSEL_YAML)
   video = load_component_config(p, "video")
-  assert video["srt"] == {"host": "mediamtx-srt", "port": 8890}
+  assert video["whip"] == {"endpoint": "http://webui:8001/whip/ingest"}
   assert video["ring"] == {"fps": 30}
   sup = load_component_config(p, "supervisor")
   assert sup["http"] == {"port": 8443}

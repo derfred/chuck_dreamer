@@ -1,7 +1,7 @@
 // The fessel webui: a single Go service that serves the frontend + API,
 // terminates the WebRTC live path (WHIP ingest from the Pi, WHEP fan-out to
 // browsers), and fronts the recording store. Replaces the former
-// FastAPI-backend + mediamtx pair (architecture §4).
+// browsers), and fronts the recording store (architecture §4).
 //
 // Two listeners in one process (B5.5.7): the public app on FESSEL_PORT and
 // the tailnet-only ingest app on FESSEL_INGEST_PORT. Both share the storage
@@ -73,11 +73,6 @@ func main() {
 		slog.Error("init relay", "err", err)
 		os.Exit(1)
 	}
-	if cfg.PullFrom != "" {
-		slog.Info("uplink mode: PULL (WHEP client)", "origin", cfg.PullFrom)
-		rly.StartPull(cfg.PullFrom)
-	}
-
 	mon := health.NewMonitor(sup, rly, health.Config{
 		RefreshInterval: cfg.HealthRefresh,
 		FreshThreshold:  cfg.HealthFresh,
@@ -87,19 +82,18 @@ func main() {
 	defer mon.Stop()
 
 	// Activation ownership (§2.3): the controller drives supervisor's
-	// parameterless live activate/deactivate. The `path` field is transitional
-	// — the current supervisor ActivateRequest still requires it.
+	// parameterless live activate/deactivate.
 	ctrl := &relay.Controller{
 		Gate: mon.GateLiveView,
 		Activate: func() error {
-			res := sup.Post("/control/live/activate", map[string]any{"path": cfg.LivePath})
+			res := sup.Post("/control/live/activate", nil)
 			if res.StatusCode < 200 || res.StatusCode >= 300 {
 				return fmt.Errorf("supervisor activate returned %d: %v", res.StatusCode, res.Body)
 			}
 			return nil
 		},
 		Deactivate: func() error {
-			res := sup.Post("/control/live/deactivate", map[string]any{"path": cfg.LivePath})
+			res := sup.Post("/control/live/deactivate", nil)
 			if res.StatusCode < 200 || res.StatusCode >= 300 {
 				return fmt.Errorf("supervisor deactivate returned %d: %v", res.StatusCode, res.Body)
 			}

@@ -19,9 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,9 +32,8 @@ import (
 
 // h264Codec is registered on both ingest and viewer MediaEngines. The fmtp
 // matches whipclientsink's default H.264 output (constrained-baseline,
-// non-interleaved). See the whip-relay prototype notes on profile-level-id:
-// in PULL mode the relay is the offerer and GStreamer's whepserversink is
-// STRICT about profile matching — offer the profile the Pi actually encodes.
+// non-interleaved). Keep FESSEL_H264_FMTP aligned with what the Pi's encoder
+// actually emits — GStreamer answerers are strict about profile matching.
 var h264Codec = webrtc.RTPCodecParameters{
 	RTPCodecCapability: webrtc.RTPCodecCapability{
 		MimeType:     webrtc.MimeTypeH264,
@@ -572,101 +569,4 @@ func WaitForTailnetIP(timeout time.Duration) string {
 		slog.Info("waiting for tailnet interface (tailscale sidecar starting)…")
 		time.Sleep(time.Second)
 	}
-}
-
-// --- pull-mode uplink (validated escape hatch) --------------------------------------
-
-// StartPull switches the uplink to WHEP-CLIENT mode: the relay dials OUT to
-// the origin's (the Pi's) WHEP endpoint and pulls the stream, instead of
-// waiting for a WHIP push. This inverts who initiates and sidesteps the
-// ICE-address-symmetry / privileged-sidecar problem; kept as the validated
-// fallback from the whip-relay prototype (deploy/PULL-VALIDATION.md).
-func (r *Relay) StartPull(whepURL string) {
-	go func() {
-		backoff := time.Second
-		for {
-			l := slog.With("dir", "ingest", "mode", "pull", "origin", whepURL)
-			if err := r.pullOnce(whepURL, l); err != nil {
-				l.Warn("pull failed; will retry", "err", err, "in", backoff.String())
-				time.Sleep(backoff)
-				if backoff < 15*time.Second {
-					backoff *= 2
-				}
-				continue
-			}
-			backoff = time.Second
-			l.Info("pull ended; reconnecting")
-			time.Sleep(time.Second)
-		}
-	}()
-}
-
-func (r *Relay) pullOnce(whepURL string, l *slog.Logger) error {
-	pc, err := r.ingestAPI.NewPeerConnection(stunConfig)
-	if err != nil {
-		return fmt.Errorf("new peer connection: %w", err)
-	}
-	logCandidates(l, pc)
-
-	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo,
-		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
-		_ = pc.Close()
-		return fmt.Errorf("add transceiver: %w", err)
-	}
-
-	done := make(chan struct{})
-	var once sync.Once
-	closeDone := func() { once.Do(func() { close(done) }) }
-
-	r.attachIngest(pc, l)
-	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
-		if s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateClosed || s == webrtc.PeerConnectionStateDisconnected {
-			closeDone()
-		}
-	})
-
-	offer, err := pc.CreateOffer(nil)
-	if err != nil {
-		_ = pc.Close()
-		return fmt.Errorf("create offer: %w", err)
-	}
-	gatherComplete := webrtc.GatheringCompletePromise(pc)
-	if err := pc.SetLocalDescription(offer); err != nil {
-		_ = pc.Close()
-		return fmt.Errorf("set local: %w", err)
-	}
-	<-gatherComplete
-
-	l.Info("dialing origin WHEP")
-	answer, err := postSDP(whepURL, pc.LocalDescription().SDP)
-	if err != nil {
-		_ = pc.Close()
-		return fmt.Errorf("POST offer: %w", err)
-	}
-	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer}); err != nil {
-		_ = pc.Close()
-		return fmt.Errorf("set remote answer: %w", err)
-	}
-
-	<-done
-	_ = pc.Close()
-	return nil
-}
-
-func postSDP(url, offer string) (string, error) {
-	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(offer))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/sdp")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("origin returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	return string(body), nil
 }

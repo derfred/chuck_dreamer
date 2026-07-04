@@ -47,7 +47,7 @@ video:
 # --- supervisor -------------------------------------------------------------
 
 supervisor:
-  # Plain HTTP (no TLS) on 0.0.0.0:8443 so mediamtx's runOnDemand curl and the
+  # Plain HTTP (no TLS) on 0.0.0.0:8443 so the webui relay's activate call and the
   # test Job can reach it over in-cluster Service DNS (stands in for Tailscale).
   http:
     host: 0.0.0.0

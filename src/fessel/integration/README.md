@@ -79,8 +79,8 @@ applies the answer, and asserts ICE connects + a frame decodes. This
 replaced the headed-Chrome/Xvfb/Playwright rig:
 
 - The old blocker ("headless Chrome can't complete ICE in-cluster") was a
-  mediamtx-config + Chrome-candidate artefact; with podip host candidates a
-  plain Python peer connects fine.
+  media-server-config + Chrome-candidate artefact; with podip host candidates
+  a plain Python peer connects fine.
 - aiortc gives full control over candidates (no mDNS obfuscation, no STUN
   needed) and an H.264 decoder via PyAV — so codec negotiation AND decode are
   still exercised, without a 1GB browser image.

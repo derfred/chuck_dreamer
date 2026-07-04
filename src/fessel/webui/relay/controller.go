@@ -1,5 +1,5 @@
-// The activation controller owns the on-demand live lifecycle that mediamtx's
-// runOnDemand used to own, in-process (architecture §2.3/§4.2):
+// The activation controller owns the on-demand live lifecycle, in-process
+// (architecture §2.3/§4.2):
 //
 //   - First viewer on /whep with no live ingest -> call
 //     supervisor:/control/live/activate; block until the WHIP ingest is up or

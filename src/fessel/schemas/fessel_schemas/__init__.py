@@ -11,10 +11,10 @@ The canonical mode-triplet string form is fixed here once:
 e.g. "1280x720@30@2500000". This exact form flows through:
   - the WHEP `mode` query parameter,
   - the HMAC-signed token (over path + mode + expiry),
-  - the mediamtx config and the backend token signer.
+  - the recording-start command and recording metadata.
 
 It is parsed/serialised only via mode_to_canonical / mode_from_canonical
-so signer (backend) and verifier (mediamtx) never diverge.
+so every producer and consumer of the form agrees on it.
 """
 
 from .models import (
@@ -31,6 +31,8 @@ from .models import (
     LiveDeactivate,
     LiveState,
     LiveStateValue,
+    LiveViewError,
+    LiveViewErrorCode,
     ModeTriplet,
     PlugState,
     RecordingFlagUploadCmd,
@@ -71,6 +73,8 @@ __all__ = [
     "LiveDeactivate",
     "LiveState",
     "LiveStateValue",
+    "LiveViewError",
+    "LiveViewErrorCode",
     "ModeTriplet",
     "PlugState",
     "RecordingFlagUploadCmd",

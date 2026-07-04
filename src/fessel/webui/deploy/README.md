@@ -9,10 +9,8 @@ and network routing topology** so the next person doesn't have to
 reverse-engineer which endpoints are guarded.
 
 The webui is the Go binary from `deploy/go.Dockerfile`: backend + embedded
-React frontend + in-process Pion WHIP/WHEP relay. **mediamtx is gone**,
-and with it the whole JWT/JWKS/WHEP-token machinery (`/jwks`,
-`FESSEL_WHEP_SECRET`, `FESSEL_PUBLIC_WEBUI_HOST` host gate,
-`forbid_identity_headers` bypass rules). There is no streaming secret.
+React frontend + in-process Pion WHIP/WHEP relay. There is no separate
+media server and no JWT/JWKS/WHEP-token machinery — no streaming secret.
 
 ## Network exposure (production)
 

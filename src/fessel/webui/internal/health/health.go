@@ -6,9 +6,8 @@
 // The five facts (root-cause-first display order):
 //
 //	pi_control    reachability of supervisor over the cluster->Pi control path
-//	relay         the in-process live relay (replaces the mediamtx probe of the
-//	              old design: nothing to reach over the network — the fact
-//	              reports ingest/viewer state instead)
+//	relay         the in-process live relay (nothing to reach over the
+//	              network — the fact reports ingest/viewer state)
 //	video         video process liveness, read from /state.vision.healthy
 //	camera        camera presence, read from /state.camera.up
 //	version_sync  cluster vs Pi MAJOR.MINOR must-match (spec §3.4)

@@ -1,6 +1,6 @@
 # Test Job image: the WHEP viewer is aiortc — a real Python ICE/DTLS/SRTP
 # peer with an H.264 decoder (via PyAV's bundled ffmpeg), so the driver can
-# assert decoded frames without any browser. The mediamtx-era Chrome/Xvfb
+# assert decoded frames without any browser. The former Chrome/Xvfb
 # machinery is gone: in podip mode the in-process Pion relay and this pod
 # exchange plain pod-IP host candidates, so in-cluster ICE completes.
 #

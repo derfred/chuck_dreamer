@@ -1,5 +1,5 @@
 // Fessel cluster-side deployment library — the single source of truth for
-// the Go webui (backend + Pion WHIP/WHEP relay, no more mediamtx) plus the
+// the Go webui (backend + in-process Pion WHIP/WHEP relay) plus the
 // test-Pi and Tailscale Services. Owned by the Fessel code (this repo);
 // consumed by bugzoo-infrastructure via a jb git dependency, and by this
 // repo's own integration / live-preview test envs.
@@ -54,7 +54,7 @@ local minioLib = import 'minio.libsonnet';
               // The backend's tailnet-only ingest listener (T5.5.3 bypass test).
               { name: 'WEBUI_INGEST', value: 'http://webui:' + std.toString(cfg.ingestPort) },
               // WHEP signaling now lives on the webui public listener (the
-              // relay is in-process; mediamtx is gone).
+              // relay is in-process).
               { name: 'MEDIA', value: 'http://webui:8000' },
               { name: 'SUPERVISOR', value: 'http://supervisor:8443' },
               { name: 'FESSEL_PATH', value: 'pi' },

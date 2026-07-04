@@ -9,7 +9,7 @@
 // NOTE: the WHIP ingest (live media) is deliberately NOT here. An operator
 // ingress proxy DNATs, which breaks ICE address symmetry (architecture §5.1);
 // the Pi instead dials the webui pod's tailscale SIDECAR (webui.libsonnet,
-// cfg.webui.tailscaleSidecar) directly. The former mediamtx SRT ingress is
+// cfg.webui.tailscaleSidecar) directly. The retired SRT-uplink ingress is
 // retired with the SRT uplink.
 function(cfg) {
   local ns = cfg.namespace,

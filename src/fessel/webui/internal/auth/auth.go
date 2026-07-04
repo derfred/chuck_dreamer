@@ -6,9 +6,8 @@
 // flow; it trusts these headers when present and treats their absence as
 // unauthenticated. Header names are config, not hardcoded.
 //
-// With the mediamtx design gone there are no proxy-bypass endpoints left on
-// the public listener (the /jwks reject-identity dance is deleted); the
-// ingest listener carries no identity headers at all (tailnet trust).
+// There are no proxy-bypass endpoints on the public listener; the ingest
+// listener carries no identity headers at all (tailnet trust).
 package auth
 
 import (

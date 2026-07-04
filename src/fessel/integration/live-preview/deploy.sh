@@ -7,8 +7,8 @@
 #
 # Required env: NS, IMAGE_TAG, REGISTRY, BASE_DOMAIN
 # Optional: WRTC_UDP_NODEPORT (default 31554) — the viewer media UDP NodePort
-# (FESSEL_WHEP_SECRET and the TCP NodePort are GONE: the in-process Pion
-# relay replaced mediamtx; UDP-only ICE, no JWT.)
+# (No streaming secret and no TCP NodePort: the in-process Pion
+# relay is in-process; UDP-only ICE, no JWT.)
 set -euo pipefail
 : "${NS:?}" "${IMAGE_TAG:?}" "${REGISTRY:?}" "${BASE_DOMAIN:?}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

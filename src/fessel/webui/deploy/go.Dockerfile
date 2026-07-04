@@ -1,6 +1,6 @@
 # fessel webui (Go): single image with the Go binary (API + WHIP/WHEP relay +
 # recording store front) and the built React app served as static assets.
-# Replaces the FastAPI image (deploy/Dockerfile) AND the mediamtx deployment at
+# The single cluster-side image: Go binary (API + WHIP/WHEP relay) at
 # cutover; until then both Dockerfiles coexist.
 #
 # Build from the repo's src/fessel/webui directory:

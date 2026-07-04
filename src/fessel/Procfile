@@ -1,10 +1,12 @@
-# Local dev: run mosquitto + supervisor + video together (I0.4).
+# Local dev: run mosquitto + supervisor + video + webui together (I0.4).
 # Use with `honcho start` or `foreman start` from src/fessel/.
 #
 # video MUST be invoked via its --system-site-packages venv binary directly
-# (see pi/video venv note). supervisor uses a clean uv venv.
+# (see pi/video venv note). supervisor uses a clean uv venv. The Go webui
+# serves the API on :8000 (+ ingest on :8001); the vite dev server proxies
+# /api to it.
 mosquitto: mosquitto -c pi/deploy/mosquitto.conf
-supervisor: SUPERVISOR_CONFIG=pi/deploy/supervisor.yaml.example pi/supervisor/.venv/bin/supervisor
-video: VIDEO_CONFIG=pi/deploy/video.yaml.example pi/video/.venv/bin/video
-backend: cd webui/backend && FESSEL_WHEP_SECRET=dev-secret FESSEL_MEDIA_BASE=http://localhost:8889 uv run uvicorn app.main:app --port 8000
+supervisor: FESSEL_CONFIG=pi/deploy/fessel.yaml.example pi/supervisor/.venv/bin/supervisor
+video: FESSEL_CONFIG=pi/deploy/fessel.yaml.example pi/video/.venv/bin/video
+webui: cd webui && FESSEL_SUPERVISOR_BASE=http://localhost:8443 FESSEL_RECORDINGS_BACKEND=disk FESSEL_RECORDINGS_DISK_PATH=/tmp/fessel-recordings go run ./cmd/webui
 frontend: cd webui/frontend && npm run dev

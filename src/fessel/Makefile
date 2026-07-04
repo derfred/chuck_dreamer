@@ -5,7 +5,7 @@
 SHELL := /bin/bash
 HERE := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-PY_PROJECTS := schemas pi/shared pi/supervisor pi/uploader webui/backend
+PY_PROJECTS := schemas pi/shared pi/supervisor pi/uploader
 # pi/video is handled separately: it needs a --system-site-packages venv
 # for PyGObject (gi). See dev-env docs and I0.4.
 
@@ -64,6 +64,7 @@ check-types: types
 	@git diff --exit-code -- \
 	  "$(HERE)webui/shared/schemas.ts" \
 	  "$(HERE)webui/frontend/src/generated/validators.ts" \
+	  "$(HERE)webui/internal/schemas/schemas_gen.go" \
 	  || { echo "ERROR: generated types/validators are stale — run 'make types' and commit"; exit 1; }
 
 # --- packaging placeholders (arrive in a later slice) ---

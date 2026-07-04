@@ -8,9 +8,10 @@ Robot-arm monitoring system. This tree is self-contained under
   (Jetson pause/stop/resume, WiZ plug power control with send-and-verify, and
   the `/state` aggregation).
 - **video** — Pi-side GStreamer pipeline + live state machine.
-- **webui** — cluster-side backend (FastAPI) + frontend (React) + mediamtx.
-  The backend forwards `/api/control/*` and `/api/state` to supervisor; the
-  frontend dashboard shows state and issues control commands.
+- **webui** — the single cluster-side Go service: frontend (React) + API +
+  the in-process Pion WHIP/WHEP live relay + the recording-store front. It
+  forwards `/api/control/*` and `/api/state` to supervisor; the frontend
+  dashboard shows state, plays live video, and issues control commands.
 - **schemas** — canonical wire shapes (single source of truth).
 
 See `docs/fessel/` for the requirements, architecture, and slice plans.
@@ -23,13 +24,13 @@ pi/supervisor/      supervisor process (clean venv)
 pi/video/           video process (system-site-packages venv for gi)
 pi/shared/          shared Pi-side code (MQTT client, config, topics)
 pi/deploy/          systemd units, mosquitto.conf, config examples
-webui/backend/      FastAPI: signed WHEP URL minting
+webui/cmd,relay,internal/  Go service (API + WHIP/WHEP relay + store front)
 webui/frontend/     React WHEP client
 webui/shared/       generated TS types (do not hand-edit)
-webui/deploy/       mediamtx config template + k8s manifests
-tools/              generate-types.sh, render-mediamtx-config.sh
+webui/deploy/       container image + deploy docs (jsonnet lives in deploy/)
+tools/              generate-types.sh (+ the Go struct generator it drives)
 Makefile            build/test/lint entry point
-Procfile            local dev (mosquitto + supervisor + video + backend + frontend)
+Procfile            local dev (mosquitto + supervisor + video + webui + frontend)
 ```
 
 ## Build & test
@@ -37,7 +38,7 @@ Procfile            local dev (mosquitto + supervisor + video + backend + fronte
 ```
 make -C src/fessel sync          # uv sync each clean-venv project
 make -C src/fessel test          # pytest (clean-venv projects) + frontend tsc
-make -C src/fessel types         # regenerate the TS types + Zod validators
+make -C src/fessel types         # regenerate the TS types + Zod validators + Go structs
 make -C src/fessel check-types   # fail if the generated output is stale (CI guard)
 make -C src/fessel test-video    # video tests (needs the gi venv, below)
 ```
@@ -102,11 +103,10 @@ falls back to software encoding.
 
 ## Local dev
 
-`supervisor`/`backend` use clean uv venvs:
+`supervisor` uses a clean uv venv; the webui runs via `go run`:
 
 ```
 cd src/fessel/pi/supervisor && uv sync
-cd src/fessel/webui/backend && uv sync
 ```
 
 Then run everything with a Procfile runner:

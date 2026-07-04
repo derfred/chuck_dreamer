@@ -5,6 +5,7 @@
 // URL, no token, no mode selection; the live profile is fixed).
 
 import { AuthError } from "./api";
+import { LiveViewErrorSchema } from "./generated/validators";
 
 // A non-201 from /whep. The backend answers structured JSON errors
 // ({error, reason}) for the health-gate/activation outcomes:
@@ -96,12 +97,14 @@ export function deleteWhepSession(location: string): void {
   });
 }
 
-// Pull the operator-facing `reason` out of a /whep error body.
+// Pull the operator-facing `reason` out of a /whep error body. The body is
+// validated against the generated LiveViewError schema (the same definition
+// the Go relay's generated struct serialises), so both ends of the live-view
+// error contract derive from the one pydantic source.
 async function whepReason(res: Response): Promise<string> {
   try {
-    const body = (await res.json()) as { reason?: string; error?: string };
-    if (body.reason) return body.reason;
-    if (body.error) return body.error;
+    const parsed = LiveViewErrorSchema.safeParse(await res.json());
+    if (parsed.success) return parsed.data.reason;
   } catch {
     // non-JSON error body; fall through to status-only message.
   }

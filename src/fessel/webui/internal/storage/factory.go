@@ -13,15 +13,9 @@ import (
 func Build(cfg config.Config) (Backend, error) {
 	backend := cfg.RecordingsBackend
 	if backend == "" {
-		// Back-compat with the MinIO-only env: if those vars are present,
-		// behave as a MinIO backend; otherwise there is nothing to build. The
-		// ingest endpoint requires a store, so error rather than silently
+		// The ingest endpoint requires a store, so error rather than silently
 		// dropping uploads.
-		if cfg.MinioEndpoint != "" {
-			backend = "minio"
-		} else {
-			return nil, fmt.Errorf("no recordings storage configured: set FESSEL_RECORDINGS_BACKEND to 'minio' or 'disk'")
-		}
+		return nil, fmt.Errorf("no recordings storage configured: set FESSEL_RECORDINGS_BACKEND to 'minio' or 'disk'")
 	}
 	switch backend {
 	case "disk":

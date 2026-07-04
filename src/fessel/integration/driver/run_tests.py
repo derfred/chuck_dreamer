@@ -1,4 +1,4 @@
-"""Integration test driver (Go webui + in-process Pion relay; mediamtx is GONE).
+"""Integration test driver (Go webui + in-process Pion relay).
 
 Runs in-cluster as a Job. Acts as the WHEP viewer and asserts the full
 live chain against the deployed Fessel system, emitting JUnit XML:
@@ -11,8 +11,8 @@ The WHEP client is aiortc (a real Python ICE/DTLS/SRTP peer) — no browser.
 The integration env runs the relay in `podip` mode, so both Pion (webui pod)
 and aiortc (this pod) gather plain host candidates on routable pod IPs and
 ICE completes in-cluster. That gives this tier a genuine DATA-PLANE
-assertion (decoded frames in the viewer), which the old mediamtx + headless
-Chrome setup could never do; the relay's Prometheus metrics on
+assertion (decoded frames in the viewer), which the old headless-Chrome
+setup could never do; the relay's Prometheus metrics on
 /metrics (fessel_relay_ingest_live, fessel_relay_ingest_packets_total, ...)
 independently prove the Pi -> relay ingest leg.
 
@@ -494,7 +494,7 @@ def main() -> int:
     assert p2 > p1, f"ingest RTP not flowing: packets_total {p1} -> {p2}"
     # Viewer leg (relay -> this pod): ICE/DTLS connects and a frame decodes.
     # podip mode makes in-cluster ICE work; this is the data-plane assertion
-    # the mediamtx-era suite could never make.
+    # the old Chrome-based suite could never make.
     session.wait_media(timeout=25)
     assert metric_value("fessel_relay_viewers") >= 1, "viewer gauge not incremented"
 

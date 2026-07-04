@@ -3,7 +3,7 @@
 // the tailnet-only ingest listener, and — production — the kernel-mode
 // Tailscale sidecar for WHIP ingest (architecture §4.2/§5.1).
 //
-// Replaces the FastAPI backend AND mediamtx: one container, two HTTP
+// One container, two HTTP
 // listeners —
 //   - public (:8000): frontend + /api + /whep signaling + /metrics; behind
 //     oauth2-proxy via the public Ingress (nodeport mode).

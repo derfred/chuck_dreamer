@@ -21,8 +21,7 @@ class ModeTriplet(BaseModel):
 
   `resolution` is the canonical "<W>x<H>" string; fps and bitrate_bps are
   integers. The full canonical form (incl. fps and bitrate) is produced by
-  mode_to_canonical and is what travels in the WHEP `mode` query parameter
-  and the signed token.
+  mode_to_canonical; recordings use it (the live path is a fixed profile).
   """
 
   resolution: str = Field(pattern=r"^\d+x\d+$", description='"<W>x<H>", e.g. "1280x720"')
@@ -47,21 +46,35 @@ class LiveActivate(BaseModel):
   """Payload of arm/video/cmd/live/activate.
 
   Parameterless (architecture §2.2): the live profile is a deploy-time config
-  setting on video, not a per-session parameter — the former `mode` triplet is
-  gone from the activation path. `path` is retained as an optional field for
-  wire tolerance only (legacy callers still send it); video ignores it.
+  setting on video, not a per-session parameter. The message carries no
+  fields; it means "a viewer wants the live stream; attach the sender."
   """
-
-  path: str | None = None
 
 
 class LiveDeactivate(BaseModel):
-  """Payload of arm/video/cmd/live/deactivate.
+  """Payload of arm/video/cmd/live/deactivate. Parameterless."""
 
-  Parameterless; `path` is optional wire tolerance only (see LiveActivate).
+
+class LiveViewErrorCode(str, Enum):
+  """Error codes of a rejected POST /whep (webui relay, architecture §2.3)."""
+
+  live_unavailable = "live_unavailable"  # health-gate fast reject (503)
+  live_timeout = "live_timeout"  # ingest not up within live_activation_timeout (504)
+  live_activation_failed = "live_activation_failed"  # supervisor activate failed (502)
+  live_error = "live_error"  # unexpected controller failure (500)
+  whep_negotiate_failed = "whep_negotiate_failed"  # SDP negotiation failed (500)
+
+
+class LiveViewError(BaseModel):
+  """Error body of a rejected POST /whep.
+
+  Authored by the Go webui (generated Go struct) and consumed by the
+  frontend's WHEP client (generated Zod validator), so both ends of the
+  live-view error contract derive from this one definition.
   """
 
-  path: str | None = None
+  error: LiveViewErrorCode
+  reason: str
 
 
 class LiveState(BaseModel):
@@ -478,7 +491,7 @@ def mode_to_canonical(mode: ModeTriplet) -> str:
   """Serialise a ModeTriplet to the canonical "<W>x<H>@<fps>@<bitrate_bps>" form.
 
   This is the ONLY place the canonical string is built. The token signer
-  (backend) and verifier (mediamtx) both depend on this exact form.
+  depend on this exact form.
   """
   return f"{mode.resolution}@{mode.fps}@{mode.bitrate_bps}"
 

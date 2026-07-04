@@ -2,9 +2,8 @@
 // variables. The Tanka library wires these at deploy time; defaults suit the
 // in-cluster dev/integration environments.
 //
-// The FESSEL_WHEP_SECRET / FESSEL_MEDIA_BASE / FESSEL_WHEP_TTL_S /
-// FESSEL_MEDIAMTX_BASE knobs of the FastAPI backend are GONE: the relay is
-// in-process (no mediamtx, no JWT/JWKS).
+// The live relay is in-process: there is no media-server config and no
+// JWT/JWKS machinery.
 package config
 
 import (
@@ -50,18 +49,12 @@ type Config struct {
 	// Live relay (architecture §4.2/§2.3).
 	LiveActivationTimeout time.Duration // FESSEL_LIVE_ACTIVATION_TIMEOUT_S, default 15s
 	LiveIdleTimeout       time.Duration // FESSEL_LIVE_IDLE_TIMEOUT_S, default 10s
-	// Transitional: the current supervisor ActivateRequest still requires a
-	// `path`; carried until the parameterless activate lands on the Pi side.
-	LivePath string // FESSEL_LIVE_PATH, default "pi"
 
 	// ICE advertisement, per plane (see relay.ICEConfig).
 	ViewerPublicIPs []string // FESSEL_VIEWER_PUBLIC_IPS (comma-separated node public IPs)
 	ViewerUDPPort   int      // FESSEL_VIEWER_UDP_PORT (the NodePort)
 	IngestPublicIP  string   // FESSEL_INGEST_PUBLIC_IP ("auto" = discover tailnet 100.x addr)
 	IngestUDPPort   int      // FESSEL_INGEST_UDP_PORT
-
-	// Optional WHEP-client uplink (validated escape hatch; empty = WHIP push).
-	PullFrom string // FESSEL_PULL_FROM
 }
 
 func FromEnv() Config {
@@ -86,12 +79,10 @@ func FromEnv() Config {
 		HealthStale:           envSeconds("FESSEL_HEALTH_STALE_S", 60*time.Second),
 		LiveActivationTimeout: envSeconds("FESSEL_LIVE_ACTIVATION_TIMEOUT_S", 15*time.Second),
 		LiveIdleTimeout:       envSeconds("FESSEL_LIVE_IDLE_TIMEOUT_S", 10*time.Second),
-		LivePath:              envStr("FESSEL_LIVE_PATH", "pi"),
 		ViewerPublicIPs:       splitCSV(os.Getenv("FESSEL_VIEWER_PUBLIC_IPS")),
 		ViewerUDPPort:         envInt("FESSEL_VIEWER_UDP_PORT", 0),
 		IngestPublicIP:        strings.TrimSpace(os.Getenv("FESSEL_INGEST_PUBLIC_IP")),
 		IngestUDPPort:         envInt("FESSEL_INGEST_UDP_PORT", 0),
-		PullFrom:              strings.TrimSpace(os.Getenv("FESSEL_PULL_FROM")),
 	}
 }
 

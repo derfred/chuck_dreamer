@@ -1,6 +1,6 @@
 // Integration-test environment: pod-IP WebRTC (in-cluster test client — the
 // relay's ICE env is left empty so Pion host candidates are the pod IP),
-// in-cluster test-Pi, no ingress/Tailscale/mediamtx. Renders the infra
+// in-cluster test-Pi, no ingress/Tailscale. Renders the infra
 // objects (NOT the test Job — the workflow applies that separately after
 // readiness).
 //

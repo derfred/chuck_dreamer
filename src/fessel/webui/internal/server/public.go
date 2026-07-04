@@ -24,6 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/derfred/fessel/webui/internal/auth"
+	"github.com/derfred/fessel/webui/internal/schemas"
 	"github.com/derfred/fessel/webui/internal/storage"
 	"github.com/derfred/fessel/webui/internal/supervisor"
 	"github.com/derfred/fessel/webui/internal/version"
@@ -99,14 +100,14 @@ func (p *Public) Handler() http.Handler {
 		if p.requireIdentity(w, r) == nil {
 			return
 		}
-		// Static dev set, matching the FastAPI backend. Capabilities are out of
-		// the live path (fixed live profile); this feeds the recording-start
-		// mode selector until the supervisor /capabilities proxy lands.
-		writeJSON(w, http.StatusOK, map[string]any{
-			"modes": []map[string]any{
-				{"resolution": "640x480", "fps": 30, "bitrate_bps": 1_000_000},
-				{"resolution": "1280x720", "fps": 30, "bitrate_bps": 2_500_000},
-				{"resolution": "1280x720", "fps": 15, "bitrate_bps": 1_500_000},
+		// Static dev set. Capabilities are out of the live path (fixed live
+		// profile); this feeds the recording-start mode selector until the
+		// supervisor /capabilities proxy lands.
+		writeJSON(w, http.StatusOK, schemas.Capabilities{
+			Modes: []schemas.ModeTriplet{
+				{Resolution: "640x480", Fps: 30, BitrateBps: 1_000_000},
+				{Resolution: "1280x720", Fps: 30, BitrateBps: 2_500_000},
+				{Resolution: "1280x720", Fps: 15, BitrateBps: 1_500_000},
 			},
 		})
 	})
@@ -243,8 +244,8 @@ func (p *Public) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.Relay == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"error": "live_unavailable", "reason": "relay disabled",
+		writeJSON(w, http.StatusServiceUnavailable, schemas.LiveViewError{
+			Error: schemas.LiveViewErrorCodeLiveUnavailable, Reason: "relay disabled",
 		})
 		return
 	}
@@ -260,20 +261,20 @@ func (p *Public) handleWHEP(w http.ResponseWriter, r *http.Request) {
 			var actFail *relay.ActivationFailedError
 			switch {
 			case errors.As(err, &gate):
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-					"error": "live_unavailable", "reason": gate.Reason,
+				writeJSON(w, http.StatusServiceUnavailable, schemas.LiveViewError{
+					Error: schemas.LiveViewErrorCodeLiveUnavailable, Reason: gate.Reason,
 				})
 			case errors.Is(err, relay.ErrActivationTimeout):
-				writeJSON(w, http.StatusGatewayTimeout, map[string]any{
-					"error": "live_timeout", "reason": "timed out starting stream",
+				writeJSON(w, http.StatusGatewayTimeout, schemas.LiveViewError{
+					Error: schemas.LiveViewErrorCodeLiveTimeout, Reason: "timed out starting stream",
 				})
 			case errors.As(err, &actFail):
-				writeJSON(w, http.StatusBadGateway, map[string]any{
-					"error": "live_activation_failed", "reason": actFail.Detail,
+				writeJSON(w, http.StatusBadGateway, schemas.LiveViewError{
+					Error: schemas.LiveViewErrorCodeLiveActivationFailed, Reason: actFail.Detail,
 				})
 			default:
-				writeJSON(w, http.StatusInternalServerError, map[string]any{
-					"error": "live_error", "reason": err.Error(),
+				writeJSON(w, http.StatusInternalServerError, schemas.LiveViewError{
+					Error: schemas.LiveViewErrorCodeLiveError, Reason: err.Error(),
 				})
 			}
 			slog.Info("whep rejected", "operator", identity.User, "err", err)
@@ -283,8 +284,8 @@ func (p *Public) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	answer, id, err := p.Relay.HandleViewerOffer(string(offer), r.RemoteAddr)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error": "whep_negotiate_failed", "reason": err.Error(),
+		writeJSON(w, http.StatusInternalServerError, schemas.LiveViewError{
+			Error: schemas.LiveViewErrorCodeWhepNegotiateFailed, Reason: err.Error(),
 		})
 		return
 	}

@@ -12,7 +12,7 @@
 #   NS                 target namespace (created if missing)
 #   IMAGE_TAG          run-id tag for the built images
 #   REGISTRY           e.g. ghcr.io/derfred
-# (FESSEL_WHEP_SECRET is GONE: no mediamtx, no JWT/JWKS — viewer auth is
+# (There is no streaming secret: no JWT/JWKS — viewer auth is
 # oauth2-proxy in production and absent in the in-cluster test.)
 set -euo pipefail
 : "${NS:?}" "${IMAGE_TAG:?}" "${REGISTRY:?}"
