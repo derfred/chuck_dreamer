@@ -8,10 +8,12 @@
 //     auto-reconnect on backoff with a FRESH peer connection (dead PC reused
 //     never), returning to Playing when media flows again;
 //   - an ICE drop as the separate faster path to Stalled;
-//   - a 401 on the WHEP mint escalating to re-auth (redirect), NOT a retry;
-//   - the reconnect-attempt budget terminating in Error;
+//   - a 401 on the /whep POST escalating to re-auth (redirect), NOT a retry;
+//   - the reconnect-attempt budget terminating in Error, carrying the
+//     backend's differentiated reason (503/504 body) in the message;
 //   - the first-frame timeout giving up to Error when no frame ever arrives;
-//   - stop() returning cleanly to Idle and tearing the PC down.
+//   - stop() returning cleanly to Idle, tearing the PC down, and DELETEing
+//     the /whep/{id} resource the Location header named.
 //
 // The hook drives an HTMLVideoElement via a ref. We render it with renderHook
 // and hand it a ref to a <video> we create and control directly, so the tests
@@ -24,9 +26,6 @@ import { createRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createdPcs, installFakeRtc, type FakeRTCPeerConnection } from "./test/fakeRtc";
 import { useLiveSession } from "./useLiveSession";
-import type { ModeTriplet } from "../../shared/schemas";
-
-const MODE: ModeTriplet = { resolution: "640x480", fps: 30, bitrate_bps: 1_000_000 };
 
 // Defaults from config.ts that the assertions below depend on.
 const POLL_MS = 1500;
@@ -46,27 +45,28 @@ function mountSession() {
   return { result, video };
 }
 
-// WHEP mint mock: resolves a fresh signed URL.
-function mockWhepOk() {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({ url: "https://media/pi/whep?mode=640x480@30@1000000&jwt=x" }),
-      text: async () => "v=0\r\n",
-    }),
-  );
+// Build a fetch response the whep client understands: status + optional SDP
+// answer + optional JSON error body + the Location header a 201 carries.
+function whepResponse(status: number, opts: { body?: unknown; location?: string } = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (h: string) => (h === "Location" ? (opts.location ?? null) : null) },
+    json: async () => opts.body ?? {},
+    text: async () => "v=0\r\n",
+  };
 }
 
-// /api/auth/whep-url returns 401 (session expired) → AuthError → re-auth.
+// /whep answers 201 + SDP + Location (the DELETE teardown resource).
+function mockWhepOk(location = "/whep/42") {
+  const fn = vi.fn().mockResolvedValue(whepResponse(201, { location }));
+  vi.stubGlobal("fetch", fn);
+  return fn;
+}
+
+// /whep returns 401 (session expired at the auth proxy) → AuthError → re-auth.
 function mockWhep401() {
-  vi.stubGlobal(
-    "fetch",
-    vi
-      .fn()
-      .mockResolvedValue({ ok: false, status: 401, json: async () => ({}), text: async () => "" }),
-  );
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(whepResponse(401)));
 }
 
 // Advance fake timers AND let the async connect/poll bodies drain.
@@ -83,8 +83,8 @@ function pc(): FakeRTCPeerConnection {
 // Drive a fresh session to Playing: start, let signaling complete, deliver
 // advancing media so the next poll promotes WaitingForVideo → Playing.
 async function reachPlaying(h: ReturnType<typeof mountSession>) {
-  act(() => h.result.current.start(MODE));
-  await tick(0); // drain fetch + startWhep → WaitingForVideo
+  act(() => h.result.current.start());
+  await tick(0); // drain the /whep POST → WaitingForVideo
   expect(h.result.current.state).toBe("WaitingForVideo");
   pc().bytesReceived = 1000;
   h.video.currentTime = 0.1;
@@ -114,7 +114,7 @@ describe("happy path", () => {
     expect(h.result.current.state).toBe("Idle");
 
     // Requesting is entered synchronously on start (before the awaits resolve).
-    act(() => h.result.current.start(MODE));
+    act(() => h.result.current.start());
     expect(h.result.current.state).toBe("Requesting");
 
     await reachPlaying(h);
@@ -125,7 +125,7 @@ describe("happy path", () => {
   it("WaitingForVideo masks the keyframe wait: no Playing until media advances", async () => {
     mockWhepOk();
     const h = mountSession();
-    act(() => h.result.current.start(MODE));
+    act(() => h.result.current.start());
     await tick(0);
     expect(h.result.current.state).toBe("WaitingForVideo");
 
@@ -188,20 +188,20 @@ describe("media liveness (F2.3) + auto-reconnect (F2.4)", () => {
     expect(h.result.current.detail).toContain("disconnected");
   });
 
-  it("gives up to Error after the reconnect-attempt budget is exhausted", async () => {
+  it("gives up to Error after the budget, surfacing the backend's 503 reason", async () => {
     mockWhepOk();
     const h = mountSession();
     await reachPlaying(h);
 
-    // Make every reconnect signal fail so attempts climb to the budget.
+    // Make every reconnect fail with the health-gate's differentiated 503 so
+    // attempts climb to the budget and the reason reaches the operator.
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({
-        ok: false,
-        status: 503,
-        json: async () => ({}),
-        text: async () => "",
-      }),
+      vi
+        .fn()
+        .mockResolvedValue(
+          whepResponse(503, { body: { error: "live_unavailable", reason: "Pi unreachable" } }),
+        ),
     );
     // Trip the stall (two polls span the 3000ms window; see the test above).
     await tick(POLL_MS);
@@ -215,14 +215,16 @@ describe("media liveness (F2.3) + auto-reconnect (F2.4)", () => {
     }
     expect(h.result.current.state).toBe("Error");
     expect(h.result.current.detail).toContain(String(MAX_ATTEMPTS));
+    // The differentiated reason from the /whep error body reaches the display.
+    expect(h.result.current.detail).toContain("Pi unreachable");
   });
 });
 
 describe("re-auth escalation (F2.5)", () => {
-  it("a 401 on the WHEP mint re-authenticates (reload) and does NOT retry", async () => {
+  it("a 401 on the /whep POST re-authenticates (reload) and does NOT retry", async () => {
     mockWhep401();
     const h = mountSession();
-    act(() => h.result.current.start(MODE));
+    act(() => h.result.current.start());
     await tick(0);
 
     // Escalation is immediate: Error state + a re-navigation (reload) so the
@@ -245,7 +247,7 @@ describe("first-frame timeout + stop", () => {
   it("times out to Error if no frame ever arrives in WaitingForVideo", async () => {
     mockWhepOk();
     const h = mountSession();
-    act(() => h.result.current.start(MODE));
+    act(() => h.result.current.start());
     await tick(0);
     expect(h.result.current.state).toBe("WaitingForVideo");
 
@@ -255,8 +257,8 @@ describe("first-frame timeout + stop", () => {
     expect(h.result.current.detail).toContain("no video");
   });
 
-  it("stop() returns to Idle, clears the video, and closes the PC", async () => {
-    mockWhepOk();
+  it("stop() returns to Idle, clears the video, closes the PC, and DELETEs the WHEP resource", async () => {
+    const fetchMock = mockWhepOk("/whep/42");
     const h = mountSession();
     await reachPlaying(h);
     const p = pc();
@@ -265,6 +267,13 @@ describe("first-frame timeout + stop", () => {
     expect(h.result.current.state).toBe("Idle");
     expect(h.video.srcObject).toBeNull();
     expect(p.closed).toBe(true);
+
+    // Clean viewer teardown: the Location the 201 named is DELETEd.
+    const deletes = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit | undefined)?.method === "DELETE",
+    );
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0][0]).toBe("/whep/42");
 
     // No stray timers fire afterwards (teardown invalidated the poll loop).
     await tick(POLL_MS * 3);

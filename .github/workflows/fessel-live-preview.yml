@@ -47,10 +47,12 @@ jobs:
       - name: Build + push webui
         uses: docker/build-push-action@v6
         with:
-          context: src/fessel
-          file: src/fessel/webui/deploy/Dockerfile
+          context: src/fessel/webui
+          file: src/fessel/webui/deploy/go.Dockerfile
           platforms: linux/amd64
           push: true
+          build-args: |
+            FESSEL_VERSION=${{ env.IMAGE_TAG }}
           tags: ${{ env.REGISTRY }}/fessel-webui:${{ env.IMAGE_TAG }}
       - name: Build + push test-pi
         uses: docker/build-push-action@v6
@@ -82,13 +84,11 @@ jobs:
           curl -sSLo "$HOME/bin/tk" "https://github.com/grafana/tanka/releases/download/v0.31.3/tk-linux-amd64"
           chmod +x "$HOME/bin/kubectl" "$HOME/bin/tk"; echo "$HOME/bin" >> "$GITHUB_PATH"
       - name: Deploy live preview
-        env:
-          FESSEL_WHEP_SECRET: live-preview-secret-${{ github.run_id }}
         run: |
           cd src/fessel
           chmod +x integration/*.sh integration/live-preview/*.sh
           NS="$NS" IMAGE_TAG="$IMAGE_TAG" REGISTRY="$REGISTRY" \
-            FESSEL_WHEP_SECRET="$FESSEL_WHEP_SECRET" BASE_DOMAIN="$BASE_DOMAIN" \
+            BASE_DOMAIN="$BASE_DOMAIN" \
             integration/live-preview/deploy.sh
       - name: Keep alive then auto-teardown
         run: |

@@ -3,10 +3,14 @@
 // integration / live-preview test envs in this repo) override these.
 //
 // One library, three shapes, selected by `webrtc.mode`:
-//   - "nodeport" : production / live-preview. WebRTC media over a NodePort
-//                  on the node public IPs (browser is on the public net).
-//   - "podip"    : per-PR integration test. WebRTC media advertised on the
-//                  mediamtx pod IP (the test client is in-cluster).
+//   - "nodeport" : production / live-preview. Viewer WebRTC media over a UDP
+//                  NodePort on the node public IPs (browser is on the public
+//                  net); the webui relay advertises those IPs as ICE
+//                  candidates (FESSEL_VIEWER_PUBLIC_IPS).
+//   - "podip"    : per-PR integration test. The viewer/ingest ICE env is left
+//                  EMPTY so Pion gathers host candidates — the webui pod IP is
+//                  directly reachable by the in-cluster test client. No
+//                  NodePort Service is rendered.
 {
   namespace: 'fessel',
 
@@ -23,51 +27,93 @@
     // defaults from bugzoo-infrastructure) pulls the released image. The test
     // envs still override images.tag via std.extVar('image_tag').
     tag: $.version,
+    // The Go webui: single binary (API + WHIP/WHEP relay + recording store
+    // front) + embedded React app, built from src/fessel/webui/deploy/go.Dockerfile.
     webui: $.images.registry + '/fessel-webui:' + $.images.tag,
     // test-pi image is only used by the test/live-preview envs.
     testPi: $.images.registry + '/fessel-test-pi:' + $.images.tag,
-    // upstream mediamtx; >= 1.13.0 for authJWTExclude. -ffmpeg = Alpine
-    // (has /bin/sh + wget for runOnDemand); plain image is scratch.
-    mediamtx: 'bluenviron/mediamtx:1.18.2-ffmpeg',
   },
 
-  // Shared HMAC/JWT secret (the value is supplied by the consumer; the
-  // library only references the Secret it creates).
-  whepSecret: error 'fessel.whepSecret must be set',
-
-  // Hostnames for the public HTTPS ingresses (nodeport/live-preview only).
+  // Hostname for the public HTTPS ingress (nodeport/live-preview only). The
+  // former hosts.media is GONE — WHEP signaling is same-origin on the webui
+  // host (the relay is in-process; there is no separate media server).
   hosts: {
     webui: 'fessel.example.com',
-    media: 'media-fessel.example.com',
   },
   // cert-manager ClusterIssuer for ingress TLS.
   clusterIssuer: 'letsencrypt-prod',
   ingressClass: 'nginx',
 
+  // WebRTC media exposure for the in-process Pion relay (architecture §4.2).
+  // Two independent UDP planes:
+  //   - viewer plane (/whep, browsers on the public net): nodeport mode binds
+  //     a fixed UDP port exposed as a NodePort (externalTrafficPolicy: Local)
+  //     and advertises the node public IPs; podip mode leaves the ICE env
+  //     empty (host candidates = pod IP, in-cluster reachable).
+  //   - ingest plane (/whip/ingest, the Pi over the tailnet): a fixed UDP port
+  //     on the pod's tailscale-sidecar interface. NOT a NodePort — the Pi
+  //     dials the sidecar's tailnet IP directly (§5.1); only meaningful when
+  //     webui.tailscaleSidecar.enabled.
   webrtc: {
     mode: 'nodeport',  // 'nodeport' | 'podip'
-    // nodeport mode:
-    nodePublicIPs: [],          // e.g. ['85.10.209.85','88.99.140.171']
-    udpNodePort: 31554,
-    tcpNodePort: 31555,
-    // podip mode uses a fixed in-cluster port:
-    podIpPort: 8189,
+    // nodeport mode (viewer plane):
+    nodePublicIPs: [],       // e.g. ['85.10.209.85','88.99.140.171']
+    udpNodePort: 31554,      // viewer media UDP NodePort (= FESSEL_VIEWER_UDP_PORT)
+    // ingest plane (tailscale sidecar mode): fixed UDP port the relay binds
+    // for Pi->relay media. Reuses the old TCP-NodePort number (31555) since
+    // that NodePort is retired; it is a plain container port here, not a
+    // NodePort (tailnet traffic terminates in the pod netns).
+    ingestUdpPort: 31555,    // = FESSEL_INGEST_UDP_PORT
   },
 
-  // How the Pi reaches supervisor and how mediamtx reaches supervisor.
-  // Production: Tailscale (egress Service named 'supervisor'). Test: an
-  // in-cluster Service named 'supervisor' backed by the test-pi pod.
+  // Relay live-session lifecycle (architecture §2.3/§4.2): first-viewer
+  // activation timeout and zero-viewers idle deactivation timeout, in seconds.
+  live: {
+    activationTimeoutS: 15,  // FESSEL_LIVE_ACTIVATION_TIMEOUT_S
+    idleTimeoutS: 10,        // FESSEL_LIVE_IDLE_TIMEOUT_S
+  },
+
+  // webui pod extras.
+  webui: {
+    // Kernel-mode Tailscale sidecar (production only, architecture §5.1): puts
+    // a real tailscale0 + the 100.64/10 route INSIDE the webui pod netns so
+    // the relay can terminate the Pi's WHIP media with symmetric ICE (the
+    // sidecar's tailnet IP is the ingest candidate; FESSEL_INGEST_PUBLIC_IP=auto
+    // discovers it). Needs NET_ADMIN + /dev/net/tun => the namespace must be
+    // PodSecurity `privileged` (or the pod exempted); see deploy/README.md.
+    tailscaleSidecar: {
+      enabled: false,
+      image: 'tailscale/tailscale:v1.98.4',
+      // Tailnet device name; the Pi dials http://<hostname>.<tailnet>.ts.net:8001
+      // for WHIP signaling (and the pod's tailnet IP for media).
+      hostname: 'fessel-webui',
+      // Secret holding the Tailscale auth key. Supplied by the consumer
+      // (referenced by name here, never created by this library).
+      authkeySecret: 'fessel-ts-auth',
+      authkeyKey: 'TS_AUTHKEY',
+      // Secret tailscaled persists its node state into (TS_KUBE_SECRET), so
+      // the tailnet identity SURVIVES pod restarts (an emptyDir would mint a
+      // new device each restart). The library renders the ServiceAccount +
+      // Role/RoleBinding that let the pod get/update it.
+      stateSecret: 'fessel-webui-tsstate',
+    },
+  },
+
+  // How the relay/backend reaches supervisor. Production: Tailscale (egress
+  // Service named 'supervisor'). Test: an in-cluster Service named
+  // 'supervisor' backed by the test-pi pod.
   supervisorBase: 'http://supervisor:8443',
 
-  // Recording storage backend (Slice 5.5, §4.3 / I5.5.4). webui-backend fronts
-  // the recording store; the Pi uploads to its tailnet-only ingest listener and
+  // Recording storage backend (Slice 5.5, §4.3 / I5.5.4). webui fronts the
+  // recording store; the Pi uploads to its tailnet-only ingest listener and
   // holds no cluster-store credentials. One of two backends, selected here:
   //   backend: 'disk'  -> a mounted directory at disk.path; backend serves
-  //                       playback byte ranges; Deployment strategy becomes
-  //                       Recreate. The directory is backed by either a PVC or a
-  //                       node hostPath (disk.volume).
+  //                       playback byte ranges. The directory is backed by
+  //                       either a PVC or a node hostPath (disk.volume).
   //   backend: 'minio' -> an S3 bucket; backend redirects playback to presigned
-  //                       URLs; Deployment stays RollingUpdate.
+  //                       URLs.
+  // (The Deployment is strategy: Recreate in BOTH cases now — the single-
+  // replica relay holds live WebRTC session state; see webui.libsonnet.)
   // The library validates the choice at apply time (webui.libsonnet).
   recordingsStorage: {
     backend: 'disk',  // 'disk' | 'minio'
@@ -95,17 +141,17 @@
       bucket: 'fessel',
       secure: true,
       // The access/secret keys are referenced from a k8s Secret (not inlined).
-      // Default to the existing WHEP secret's namespace convention: a Secret
-      // named here with two keys. Consumers supply real values.
+      // Consumers supply real values.
       secretName: 'fessel-minio-creds',
       accessKeyKey: 'access_key',
       secretKeyKey: 'secret_key',
     },
   },
 
-  // The TCP port webui-backend's tailnet-only recording-ingest listener binds
-  // (B5.5.7). The public Ingress never routes here; the webui-recording-ingest
-  // Tailscale Service (and, in test, the in-cluster webui Service) target it.
+  // The TCP port webui's tailnet-only ingest listener binds (B5.5.7). Serves
+  // ALL Pi->webui traffic: recording uploads AND /whip/ingest signaling. The
+  // public Ingress never routes here; the webui-recording-ingest Tailscale
+  // Service (and, in test, the in-cluster webui Service) target it.
   ingestPort: 8001,
 
   // Production only: the magicDNS hostname for the recording-ingest Tailscale
@@ -122,7 +168,10 @@
   // base_url -> jetson-mock). Never set in production or live-preview.
   includeControlMocks: false,
 
-  // Whether to render the Tailscale ingress/egress Services (production).
+  // Whether to render the Tailscale operator Services (production):
+  // recording-ingest ingress + supervisor egress. The WHIP ingest does NOT
+  // use an operator Service — it goes through the pod's tailscale sidecar
+  // (webui.tailscaleSidecar); production enables both.
   includeTailscale: false,
 
   // Whether to render a throwaway in-namespace MinIO (integration env only),

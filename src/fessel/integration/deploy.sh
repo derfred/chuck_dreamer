@@ -5,24 +5,24 @@
 #
 # Two tailnet-substituted endpoints become in-cluster Service DNS (the
 # library's webrtc.mode=podip + includeTestPi handle this):
-#   - mediamtx -> supervisor (runOnDemand): supervisor.<ns>.svc:8443
-#   - video -> mediamtx (SRT publish): mediamtx-srt.<ns>.svc:8890
+#   - webui relay -> supervisor (live activate): supervisor.<ns>.svc:8443
+#   - video -> webui relay (WHIP publish): webui.<ns>.svc:8001/whip/ingest
 #
 # Required env:
 #   NS                 target namespace (created if missing)
 #   IMAGE_TAG          run-id tag for the built images
 #   REGISTRY           e.g. ghcr.io/derfred
-#   FESSEL_WHEP_SECRET shared HMAC/JWT secret (one value -> backend + mediamtx)
+# (FESSEL_WHEP_SECRET is GONE: no mediamtx, no JWT/JWKS — viewer auth is
+# oauth2-proxy in production and absent in the in-cluster test.)
 set -euo pipefail
-: "${NS:?}" "${IMAGE_TAG:?}" "${REGISTRY:?}" "${FESSEL_WHEP_SECRET:?}"
+: "${NS:?}" "${IMAGE_TAG:?}" "${REGISTRY:?}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JSONNET="$HERE/../deploy/jsonnet"
 
 echo "== rendering integration env from jsonnet =="
 render() {
   tk eval "$JSONNET/envs/integration.jsonnet" \
-    -V ns="$NS" -V image_tag="$IMAGE_TAG" -V registry="$REGISTRY" \
-    -V whep_secret="$FESSEL_WHEP_SECRET"
+    -V ns="$NS" -V image_tag="$IMAGE_TAG" -V registry="$REGISTRY"
 }
 
 echo "== applying (creates namespace + infra) =="
@@ -43,7 +43,6 @@ rollout() {
     return 1
   fi
 }
-rollout mediamtx 120s
 rollout webui 120s
 rollout pi 180s
 # jetson-mock only exists in the integration env (includeControlMocks); gate on
@@ -62,7 +61,7 @@ fi
 echo "== stability check (no restarts after settle) =="
 sleep 15
 unstable=0
-stability_targets="mediamtx webui pi"
+stability_targets="webui pi"
 if kubectl -n "$NS" get deploy jetson-mock >/dev/null 2>&1; then
   stability_targets="$stability_targets jetson-mock"
 fi

@@ -11,14 +11,7 @@ function num(name: string, fallback: number): number {
   return Number.isFinite(v) ? v : fallback;
 }
 
-function str(name: string, fallback: string): string {
-  const raw = import.meta.env[name as keyof ImportMetaEnv] as string | undefined;
-  return raw && raw !== "" ? raw : fallback;
-}
-
 export const config = {
-  // mediamtx source path for the single live feed.
-  livePath: str("VITE_LIVE_PATH", "pi"),
   // getStats() / currentTime polling interval while Playing/WaitingForVideo.
   statsPollMs: num("VITE_STATS_POLL_MS", 1500),
   // Both bytesReceived and currentTime must fail to advance across this
@@ -35,4 +28,12 @@ export const config = {
   // from outside the UI (direct supervisor calls, or the Slice 6 safety state
   // machine acting on its own) and the dashboard must reflect that.
   statePollMs: num("VITE_STATE_POLL_MS", 2000),
+  // Corner-light /api/health/pi poll interval (health-check spec §4.2). Aligned
+  // with the backend refresh (default 5s) — polling faster only reads the same
+  // cached snapshot.
+  healthPollMs: num("VITE_HEALTH_POLL_MS", 5000),
+  // If the last SUCCESSFUL health fetch is older than this, the light degrades
+  // to grey/"stale" regardless of the last-known colour (spec §4.4): a green
+  // light the browser can't refresh must not keep showing green.
+  healthStaleMs: num("VITE_HEALTH_STALE_MS", 20000),
 };

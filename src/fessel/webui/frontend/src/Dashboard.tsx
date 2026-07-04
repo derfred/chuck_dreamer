@@ -14,7 +14,6 @@ import type {
   AnomalyLogEntry,
   Capabilities,
   ModeTriplet,
-  PlugState,
   StateResponse,
 } from "../../shared/schemas";
 import {
@@ -170,7 +169,14 @@ export function Dashboard() {
     <div style={{ padding: 16 }}>
       <h1>Fessel</h1>
 
-      <StatusPanel state={state} error={stateError} />
+      {stateError && (
+        <div
+          style={{ background: "#f5deb3", padding: "4px 8px", fontSize: 13, marginBottom: 8 }}
+          role="status"
+        >
+          State unavailable — showing last known. Retrying…
+        </div>
+      )}
 
       <SensingStrip
         vision={state?.vision}
@@ -195,18 +201,6 @@ export function Dashboard() {
       <h2 style={{ fontSize: 16, marginTop: 24 }}>Recording</h2>
       <RecordingControls recording={state?.recording} />
       <BacklogIndicator backlog={state?.upload_backlog} />
-
-      <p style={{ marginTop: 24, display: "flex", gap: 16 }}>
-        <a href="/live" onClick={(e) => (e.preventDefault(), navigate("/live"))}>
-          Go to live view →
-        </a>
-        <a href="/ring" onClick={(e) => (e.preventDefault(), navigate("/ring"))}>
-          View ring buffer →
-        </a>
-        <a href="/recordings" onClick={(e) => (e.preventDefault(), navigate("/recordings"))}>
-          Browse recordings →
-        </a>
-      </p>
 
       {pending && (
         <ConfirmModal def={pending} onCancel={() => setPending(null)} onConfirm={confirm} />
@@ -530,63 +524,6 @@ function fmtTimeShort(ts: string | null | undefined): string {
   const d = new Date(ts);
   if (isNaN(d.getTime())) return ts;
   return d.toLocaleTimeString();
-}
-
-// --- status panel (read-only facts, F3.1) -----------------------------------
-
-function StatusPanel({ state, error }: { state: StateResponse | null; error: boolean }) {
-  return (
-    <section>
-      <h2 style={{ fontSize: 16 }}>Status</h2>
-      {error && (
-        <div
-          style={{ background: "#f5deb3", padding: "4px 8px", fontSize: 13, marginBottom: 8 }}
-          role="status"
-        >
-          State unavailable — showing last known. Retrying…
-        </div>
-      )}
-      {state === null ? (
-        <p style={{ color: "#666" }}>Loading…</p>
-      ) : (
-        <table style={{ borderCollapse: "collapse" }}>
-          <tbody>
-            <Row label="Safety state" value={state.safety_state ?? "—"} />
-            <Row label="Jetson" value={jetsonSummary(state.jetson)} />
-            <Row label="Arm plug" value={plugSummary(state.plugs?.arm)} />
-            <Row label="Jetson plug" value={plugSummary(state.plugs?.jetson)} />
-            <Row label="Camera" value={cameraSummary(state.camera?.up)} />
-          </tbody>
-        </table>
-      )}
-    </section>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <tr>
-      <td style={{ padding: "2px 12px 2px 0", color: "#666" }}>{label}</td>
-      <td style={{ padding: "2px 0", fontFamily: "monospace" }}>{value}</td>
-    </tr>
-  );
-}
-
-function jetsonSummary(jetson: StateResponse["jetson"]): string {
-  if (jetson == null) return "unknown";
-  const s = (jetson as { state?: unknown }).state;
-  return typeof s === "string" ? s : "reported";
-}
-
-function plugSummary(plug: PlugState | undefined): string {
-  if (!plug) return "unknown";
-  const power = plug.on === true ? "on" : plug.on === false ? "off" : "unknown";
-  // An unverified read is the load-bearing fact (S3.1): show it, never hide it.
-  return plug.verified ? power : `${power} (unverified)`;
-}
-
-function cameraSummary(up: boolean | null | undefined): string {
-  return up === true ? "up" : up === false ? "down" : "unknown";
 }
 
 // --- control button (F3.2) ---------------------------------------------------

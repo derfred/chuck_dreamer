@@ -5,20 +5,20 @@
 # leaves the stack UP and prints the URL. Does NOT tear down (use
 # teardown.sh or the workflow's TTL).
 #
-# Required env: NS, IMAGE_TAG, REGISTRY, FESSEL_WHEP_SECRET, BASE_DOMAIN
-# Optional: WRTC_UDP_NODEPORT (default 31554), WRTC_TCP_NODEPORT (31555)
+# Required env: NS, IMAGE_TAG, REGISTRY, BASE_DOMAIN
+# Optional: WRTC_UDP_NODEPORT (default 31554) — the viewer media UDP NodePort
+# (FESSEL_WHEP_SECRET and the TCP NodePort are GONE: the in-process Pion
+# relay replaced mediamtx; UDP-only ICE, no JWT.)
 set -euo pipefail
-: "${NS:?}" "${IMAGE_TAG:?}" "${REGISTRY:?}" "${FESSEL_WHEP_SECRET:?}" "${BASE_DOMAIN:?}"
+: "${NS:?}" "${IMAGE_TAG:?}" "${REGISTRY:?}" "${BASE_DOMAIN:?}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JSONNET="$HERE/../../deploy/jsonnet"
 
 WRTC_UDP_NODEPORT="${WRTC_UDP_NODEPORT:-31554}"
-WRTC_TCP_NODEPORT="${WRTC_TCP_NODEPORT:-31555}"
 WEBUI_HOST="fessel-live.${BASE_DOMAIN}"
-MEDIA_HOST="media-fessel-live.${BASE_DOMAIN}"
 
 # Node public IPs of schedulable worker nodes (comma-separated) for the
-# library's webrtcAdditionalHosts.
+# relay's viewer ICE candidates (FESSEL_VIEWER_PUBLIC_IPS).
 NODE_PUBLIC_IPS="$(
   kubectl get nodes -o jsonpath='{range .items[*]}{.spec.unschedulable}{" "}{.status.addresses[?(@.type=="ExternalIP")].address}{"\n"}{end}' \
   | awk '$1!="true" && $2!="" {printf "%s%s", sep, $2; sep=","}'
@@ -28,13 +28,12 @@ echo "== node public IPs: ${NODE_PUBLIC_IPS} =="
 echo "== render + apply live-preview env (jsonnet, nodeport mode) =="
 tk eval "$JSONNET/envs/live-preview.jsonnet" \
   -V ns="$NS" -V image_tag="$IMAGE_TAG" -V registry="$REGISTRY" \
-  -V whep_secret="$FESSEL_WHEP_SECRET" -V base_domain="$BASE_DOMAIN" \
+  -V base_domain="$BASE_DOMAIN" \
   -V node_public_ips="$NODE_PUBLIC_IPS" \
-  -V udp_nodeport="$WRTC_UDP_NODEPORT" -V tcp_nodeport="$WRTC_TCP_NODEPORT" \
+  -V udp_nodeport="$WRTC_UDP_NODEPORT" \
   | kubectl apply -f -
 
 echo "== wait for rollouts =="
-kubectl -n "$NS" rollout status deploy/mediamtx --timeout=120s
 kubectl -n "$NS" rollout status deploy/webui --timeout=120s
 kubectl -n "$NS" rollout status deploy/pi --timeout=180s
 
@@ -54,7 +53,7 @@ spec:
           image: ${REGISTRY}/fessel-test-driver:${IMAGE_TAG}
           env:
             - { name: WEBUI, value: "http://webui:8000" }
-            - { name: MEDIA, value: "http://mediamtx:8889" }
+            - { name: MEDIA, value: "http://webui:8000" }
             - { name: SUPERVISOR, value: "http://supervisor:8443" }
             - { name: CONTROL_PLANE_ONLY, value: "1" }
             - { name: RECONNECT_CYCLES, value: "10" }
@@ -74,7 +73,8 @@ cat <<EOF
   Open:  https://${WEBUI_HOST}/
   (pick a mode, click "Start live view", confirm moving video)
 
-  WHEP host: https://${MEDIA_HOST}
+  (WHEP signaling is same-origin on the webui host; media on UDP
+   NodePort ${WRTC_UDP_NODEPORT})
   Namespace: ${NS}
   Tear down: integration/live-preview/teardown.sh  (NS=${NS})
 ============================================================

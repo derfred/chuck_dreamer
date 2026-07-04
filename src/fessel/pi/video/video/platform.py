@@ -8,7 +8,7 @@ encoding.
 The ONE exception is an explicit, config-gated software-encoder mode used
 only by the integration-test container (which has no hardware encoder).
 It must be off by default; a unit test asserts that. See
-build_live_launch / encoder_profile callers and the Slice 1.5 plan (T1.2).
+encoder_profile callers and the Slice 1.5 plan (T1.2).
 """
 
 from __future__ import annotations

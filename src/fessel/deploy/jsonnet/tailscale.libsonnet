@@ -1,30 +1,18 @@
-// Tailscale Services for the cluster<->Pi legs (production only). Two
-// distinct shapes (the footgun: they look similar but differ):
-//   - ingress: cluster exposes mediamtx SRT TO the tailnet so the Pi pushes
-//     to it (tailscale.com/expose).
+// Tailscale OPERATOR Services for the cluster<->Pi legs (production only).
+// Two distinct shapes (the footgun: they look similar but differ):
+//   - ingress: cluster exposes webui's recording-ingest listener TO the
+//     tailnet so the Pi uploads to it (tailscale.com/expose).
 //   - egress: cluster pods dial OUT to the Pi's supervisor over the tailnet
 //     (type: ExternalName + tailscale.com/tailnet-fqdn). NOT the expose
 //     annotation.
+//
+// NOTE: the WHIP ingest (live media) is deliberately NOT here. An operator
+// ingress proxy DNATs, which breaks ICE address symmetry (architecture §5.1);
+// the Pi instead dials the webui pod's tailscale SIDECAR (webui.libsonnet,
+// cfg.webui.tailscaleSidecar) directly. The former mediamtx SRT ingress is
+// retired with the SRT uplink.
 function(cfg) {
   local ns = cfg.namespace,
-
-  // Pi -> cluster: SRT ingest exposed to the tailnet.
-  srtIngress: {
-    apiVersion: 'v1',
-    kind: 'Service',
-    metadata: {
-      name: 'mediamtx-srt-ts',
-      namespace: ns,
-      annotations: {
-        'tailscale.com/expose': 'true',
-        'tailscale.com/hostname': 'mediamtx-srt',
-      },
-    },
-    spec: {
-      selector: { app: 'mediamtx' },
-      ports: [{ port: 8890, targetPort: 8890, protocol: 'UDP' }],
-    },
-  },
 
   // Pi -> cluster: recording uploads exposed to the tailnet (I5.5.2). A SECOND,
   // distinct ingress in front of webui-backend's tailnet-only ingest listener

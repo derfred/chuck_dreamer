@@ -51,7 +51,7 @@ echo "== pods =="
 kubectl get pods -n "$NS" -o wide || true
 echo "== recent events =="
 kubectl get events -n "$NS" --sort-by=.lastTimestamp 2>/dev/null | tail -30 || true
-for app in mediamtx webui pi; do
+for app in webui pi; do
   echo "== describe $app =="
   kubectl describe deploy "$app" -n "$NS" 2>/dev/null | tail -25 || true
   for p in $(kubectl get pods -n "$NS" -l app="$app" -o name 2>/dev/null); do

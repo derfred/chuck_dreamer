@@ -46,8 +46,9 @@ function(cfg) {
     },
   },
 
-  // Control-plane Service. mediamtx's runOnDemand resolves `supervisor`
-  // (in-cluster DNS) here; the test driver reads /state/live here too.
+  // Control-plane Service. The webui relay's live activate/deactivate calls
+  // resolve `supervisor` (in-cluster DNS) here; the test driver reads
+  // /state/live here too.
   service: {
     apiVersion: 'v1',
     kind: 'Service',

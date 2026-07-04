@@ -71,8 +71,8 @@ jobs:
       - name: Build + push webui (linux/amd64)
         uses: docker/build-push-action@v6
         with:
-          context: src/fessel
-          file: src/fessel/webui/deploy/Dockerfile
+          context: src/fessel/webui
+          file: src/fessel/webui/deploy/go.Dockerfile
           platforms: linux/amd64
           push: true
           tags: ${{ env.REGISTRY }}/fessel-webui:${{ needs.setup.outputs.image_tag }}

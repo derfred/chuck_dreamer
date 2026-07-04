@@ -1,15 +1,16 @@
-// Integration-test environment: pod-IP WebRTC (in-cluster test client),
-// in-cluster test-Pi, no ingress/Tailscale. Renders the infra objects
-// (NOT the test Job — the workflow applies that separately after readiness).
+// Integration-test environment: pod-IP WebRTC (in-cluster test client — the
+// relay's ICE env is left empty so Pion host candidates are the pod IP),
+// in-cluster test-Pi, no ingress/Tailscale/mediamtx. Renders the infra
+// objects (NOT the test Job — the workflow applies that separately after
+// readiness).
 //
 // External vars (jsonnet --ext-str):
-//   ns, image_tag, registry, whep_secret
+//   ns, image_tag, registry
 local fessel = import '../main.libsonnet';
 
 local cfg = fessel.config + {
   namespace: std.extVar('ns'),
   images+: { registry: std.extVar('registry'), tag: std.extVar('image_tag') },
-  whepSecret: std.extVar('whep_secret'),
   webrtc+: { mode: 'podip' },
   includeTestPi: true,
   includeControlMocks: true,  // jetson-mock pod; WiZ is the in-process fake bulb
@@ -24,6 +25,8 @@ local cfg = fessel.config + {
   },
   includeMinio: false,  // disk backend default; no throwaway MinIO in CI
   includeTailscale: false,
+  // No tailscale sidecar: the test-Pi reaches /whip/ingest at the in-cluster
+  // webui Service (http://webui:8001), no tailnet involved.
 };
 
 // Emit a List so `kubectl apply -f -` consumes the whole stream.

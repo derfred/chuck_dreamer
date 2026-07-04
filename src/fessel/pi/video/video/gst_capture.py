@@ -6,13 +6,16 @@ pipeline's `tee`, not its own source. `GstCapturePipeline` owns that pipeline:
 
   v4l2src ! ... ! tee_v   ├─ ring  (hlssink2, always-on, linked at build)
                           ├─ vision (appsink, always-on, linked at build)
-                          ├─ live   (added/removed at runtime)
-                          └─ recording (added/removed at runtime)
+                          ├─ live encoder (WARM, always-on, linked at build)
+                          │    ! tee_live ├─ fakesink (drop, always linked)
+                          │               └─ WHIP sender (added/removed at runtime)
+                          └─ anomaly forward-capture (added/removed at runtime)
   alsasrc ! ... ! tee_a   └─ level  (always-on)
 
-The on-demand live and recording branches are attached/detached on the RUNNING
-pipeline via tee request pads + a blocking pad probe (the standard GStreamer
-dynamic-branch dance): request a `tee_v` src pad, link a parsed branch bin onto
+On-demand branches (the live WHIP sender on `tee_live`, the anomaly
+forward-capture on `tee_v`) are attached/detached on the RUNNING pipeline via
+tee request pads + a blocking pad probe (the standard GStreamer
+dynamic-branch dance): request a tee src pad, link a parsed branch bin onto
 it, `sync_state_with_parent()`; to remove, block the tee pad, unlink, send EOS
 into just that branch so its sink finalises, then set the bin to NULL and
 release the request pad — without disturbing the always-on branches.
@@ -36,6 +39,14 @@ gi.require_version("GstVideo", "1.0")
 from gi.repository import GLib, Gst, GstVideo  # noqa: E402
 
 from .pipeline import VIDEO_TEE_NAME, build_capture_launch, build_pipeline  # noqa: E402
+
+# whipclientsink comes from gst-plugins-rs (net/webrtc): NOT part of Debian's
+# GStreamer — on the Pi it is the cross-built gstreamer1.0-plugins-rs-fessel
+# deb, on Mac dev it comes from gst-plugins-rs. The element is only parsed at
+# WHIP-sender ATTACH time, where a missing element would surface as a quiet
+# connect-failure loop; check it at pipeline construction instead so a
+# missing plugin fails loud at startup (same convention as the hw encoder).
+WHIP_SINK_ELEMENT = "whipclientsink"
 
 log = logging.getLogger(__name__)
 
@@ -84,7 +95,7 @@ class VideoBranch:
     """Detach this branch from the running pipeline without disturbing others.
 
     Blocks the tee src pad, unlinks, sends EOS into the branch so its sink
-    (srtsink/hlssink2) finalises, then NULLs + removes the bin and releases the
+    (whipclientsink/hlssink2) finalises, then NULLs + removes the bin and releases the
     tee request pad. The `on_removed` callback fires once teardown is done."""
     with self._lock:
       if self._removed:
@@ -131,6 +142,9 @@ class GstCapturePipeline:
     ring_segment_seconds: int,
     ring_playlist_length: int,
     ring_max_files: int,
+    live_resolution: str = "1280x720",
+    live_fps: int = 15,
+    live_bitrate_bps: int = 1_500_000,
     device: str = "/dev/video0",
     audio_device: str = "default",
     use_test_source: bool = False,
@@ -144,6 +158,9 @@ class GstCapturePipeline:
       ring_segment_seconds=ring_segment_seconds,
       ring_playlist_length=ring_playlist_length,
       ring_max_files=ring_max_files,
+      live_resolution=live_resolution,
+      live_fps=live_fps,
+      live_bitrate_bps=live_bitrate_bps,
       device=device,
       audio_device=audio_device,
       use_test_source=use_test_source,
@@ -151,6 +168,16 @@ class GstCapturePipeline:
       audio_level_interval_ns=audio_level_interval_ns,
     )
     log.info("capture launch: %s", launch)
+    # Fail loud at construction if whipclientsink is unavailable (it is only
+    # parsed at attach time, which would otherwise hide the missing plugin as
+    # an endless connect-failure loop).
+    Gst.init(None)
+    if Gst.ElementFactory.find(WHIP_SINK_ELEMENT) is None:
+      raise RuntimeError(
+        f"{WHIP_SINK_ELEMENT} is not available: the live WHIP sender cannot run. "
+        "Install gst-plugins-rs net/webrtc (on the Pi: the "
+        "gstreamer1.0-plugins-rs-fessel deb from pi/deploy/gst-plugins-rs)."
+      )
     self._pipeline = build_pipeline(launch)  # fails loud if encoder missing
     self._tee = self._pipeline.get_by_name(VIDEO_TEE_NAME)
     self._loop = GLib.MainLoop()
@@ -195,15 +222,23 @@ class GstCapturePipeline:
     self,
     chain: str,
     *,
+    tee_name: str = VIDEO_TEE_NAME,
     on_playing: Callable[[], None] | None = None,
     on_error: Callable[[bool], None] | None = None,
     on_removed: Callable[[], None] | None = None,
   ) -> VideoBranch | None:
     """Parse `chain` (a sourceless 'queue ! ... ! sink' string from pipeline.py),
-    link it onto a fresh tee_v request pad, and sync it into the running
-    pipeline. Returns the VideoBranch handle, or None on a build/link failure
-    (which fires on_error so the caller's state machine sees a connect failure
-    rather than hanging)."""
+    link it onto a fresh request pad of `tee_name` (tee_v for raw-frame
+    consumers, tee_live for the WHIP sender on the warm live encoder), and
+    sync it into the running pipeline. Returns the VideoBranch handle, or None
+    on a build/link failure (which fires on_error so the caller's state
+    machine sees a connect failure rather than hanging)."""
+    tee = self._tee if tee_name == VIDEO_TEE_NAME else self._pipeline.get_by_name(tee_name)
+    if tee is None:
+      log.error("tee %s not found in capture pipeline", tee_name)
+      if on_error is not None:
+        on_error(False)
+      return None
     try:
       branch_bin = Gst.parse_bin_from_description(chain, True)
     except GLib.Error:
@@ -213,21 +248,21 @@ class GstCapturePipeline:
       return None
 
     self._pipeline.add(branch_bin)
-    tee_pad = self._tee.get_request_pad("src_%u")
+    tee_pad = tee.get_request_pad("src_%u")
     sink_pad = branch_bin.get_static_pad("sink")
     if tee_pad is None or sink_pad is None or tee_pad.link(sink_pad) != Gst.PadLinkReturn.OK:
-      log.error("failed to link branch onto tee_v")
+      log.error("failed to link branch onto %s", tee_name)
       branch_bin.set_state(Gst.State.NULL)
       self._pipeline.remove(branch_bin)
       if tee_pad is not None:
-        self._tee.release_request_pad(tee_pad)
+        tee.release_request_pad(tee_pad)
       if on_error is not None:
         on_error(False)
       return None
 
     branch = VideoBranch(
       pipeline=self._pipeline,
-      tee=self._tee,
+      tee=tee,
       bin_=branch_bin,
       tee_pad=tee_pad,
       on_playing=on_playing,

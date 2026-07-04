@@ -1,25 +1,33 @@
-// webui (backend+frontend) Deployment + Service, the shared WHEP Secret, and
-// — Slice 5.5 — the recording storage wiring (disk PVC or MinIO) plus the
-// tailnet-only recording-ingest listener.
+// webui (Go binary: backend + embedded frontend + Pion WHIP/WHEP relay)
+// Deployment + Services, the recording storage wiring (disk PVC or MinIO),
+// the tailnet-only ingest listener, and — production — the kernel-mode
+// Tailscale sidecar for WHIP ingest (architecture §4.2/§5.1).
 //
-// In nodeport mode it's exposed via HTTPS Ingress and mints WHEP URLs at the
-// public media host; in podip (test) mode it's ClusterIP only and the test
-// client reaches mediamtx in-cluster.
+// Replaces the FastAPI backend AND mediamtx: one container, two HTTP
+// listeners —
+//   - public (:8000): frontend + /api + /whep signaling + /metrics; behind
+//     oauth2-proxy via the public Ingress (nodeport mode).
+//   - ingest (:cfg.ingestPort): ALL Pi->webui traffic — recording uploads +
+//     /whip/ingest signaling. The public Ingress NEVER routes here; the
+//     tailnet reaches it via the webui-recording-ingest operator Service
+//     (recordings) and the pod's tailscale sidecar (WHIP).
+// — plus two UDP media planes (viewer + ingest, see below).
 //
-// Two listeners (B5.5.7): the public surface on :8000 (behind oauth2-proxy via
-// the public Ingress) and the tailnet-only recording-ingest listener on
-// cfg.ingestPort. The public Ingress NEVER routes to the ingest port; the
-// webui Service exposes it for the tailnet ingress (prod) / the in-cluster
-// test-Pi (integration) to reach.
+// Media exposure by cfg.webrtc.mode:
+//   - nodeport: FESSEL_VIEWER_PUBLIC_IPS = node public IPs, viewer media on a
+//     UDP NodePort (externalTrafficPolicy: Local).
+//   - podip: viewer/ingest ICE env left EMPTY -> Pion gathers host candidates
+//     (the pod IP), which the in-cluster test client reaches directly. No
+//     NodePort Service.
 function(cfg)
   local ns = cfg.namespace;
   local nodeport = cfg.webrtc.mode == 'nodeport';
+  local ts = cfg.webui.tailscaleSidecar;
   local rs = cfg.recordingsStorage;
   local disk = rs.backend == 'disk';
   // The disk backend's directory is backed by either a PVC or a node hostPath.
   local hostPath = disk && rs.disk.volume == 'hostPath';
   local pvc = disk && !hostPath;  // 'pvc' (default) when disk and not hostPath
-  local mediaBase = if nodeport then 'https://' + cfg.hosts.media else 'http://mediamtx:8889';
 
   // Validate the backend choice at apply time (I5.5.4).
   assert rs.backend == 'disk' || rs.backend == 'minio' :
@@ -27,7 +35,7 @@ function(cfg)
   assert !disk || rs.disk.volume == 'pvc' || rs.disk.volume == 'hostPath' :
          "recordingsStorage.disk.volume must be 'pvc' or 'hostPath'";
 
-  // recordings_storage env (the factory in app/storage/factory.py reads these).
+  // recordings_storage env (internal/config/config.go reads these).
   local storageEnv =
     if disk then [
       { name: 'FESSEL_RECORDINGS_BACKEND', value: 'disk' },
@@ -47,10 +55,24 @@ function(cfg)
       },
     ];
 
+  // ICE advertisement, per plane (relay.ICEConfig; see the mode note above).
+  // podip mode sets NEITHER plane: empty env = Pion host candidates = pod IP.
+  local viewerEnv =
+    if nodeport then [
+      { name: 'FESSEL_VIEWER_PUBLIC_IPS', value: std.join(',', cfg.webrtc.nodePublicIPs) },
+      { name: 'FESSEL_VIEWER_UDP_PORT', value: std.toString(cfg.webrtc.udpNodePort) },
+    ] else [];
+  local ingestIceEnv =
+    if ts.enabled then [
+      // 'auto': the relay discovers the sidecar's 100.x tailnet address and
+      // advertises it as the ingest ICE candidate — symmetric with what the
+      // Pi dials, so media rides WireGuard end to end (§5.1).
+      { name: 'FESSEL_INGEST_PUBLIC_IP', value: 'auto' },
+      { name: 'FESSEL_INGEST_UDP_PORT', value: std.toString(cfg.webrtc.ingestUdpPort) },
+    ] else [];
+
   // The disk backend mounts a directory at rs.disk.path, backed by either a PVC
-  // (the portable default) or a node hostPath (single-node / pinned). Either
-  // way the Deployment uses strategy: Recreate (I5.5.1) — a RWO PVC can't span a
-  // rolling update's two-pod window, and a hostPath shouldn't have two writers.
+  // (the portable default) or a node hostPath (single-node / pinned).
   local diskVolume =
     if pvc then [{ name: 'recordings', persistentVolumeClaim: { claimName: 'fessel-recordings' } }]
     else if hostPath then [{
@@ -63,14 +85,35 @@ function(cfg)
     else [];
   local diskMount = if disk then [{ name: 'recordings', mountPath: rs.disk.path }] else [];
 
-  {
-  secret: {
-    apiVersion: 'v1',
-    kind: 'Secret',
-    metadata: { name: 'fessel-whep-secret', namespace: ns },
-    stringData: { secret: cfg.whepSecret },
-  },
+  // Kernel-mode Tailscale sidecar (production, §5.1): joins THIS pod to the
+  // tailnet so the pod netns gets a real tailscale0 (100.x) interface + the
+  // 100.64/10 route; the relay sources WHIP ingest media from it with
+  // symmetric ICE. Kernel mode specifically (TS_USERSPACE=false): only kernel
+  // mode installs a route other in-netns processes (the relay) can use.
+  //
+  // POD SECURITY: needs NET_ADMIN + /dev/net/tun — the namespace must carry
+  // `pod-security.kubernetes.io/enforce: privileged` (or exempt this pod);
+  // the cluster-default `baseline` policy rejects it. See deploy/README.md.
+  local tailscaleContainer = {
+    name: 'tailscale',
+    image: ts.image,
+    env: [
+      { name: 'TS_AUTHKEY', valueFrom: { secretKeyRef: { name: ts.authkeySecret, key: ts.authkeyKey } } },
+      { name: 'TS_HOSTNAME', value: ts.hostname },
+      { name: 'TS_USERSPACE', value: 'false' },  // kernel mode: real tailscale0 in the netns
+      // PERSISTENT node state in a k8s Secret: the tailnet identity (device +
+      // node key) survives pod restarts. An emptyDir would mint a brand-new
+      // device on every restart (the whip-relay prototype's flaw). Requires
+      // the Role/RoleBinding below (get/update on the state Secret).
+      { name: 'TS_KUBE_SECRET', value: ts.stateSecret },
+      { name: 'TS_EXTRA_ARGS', value: '--accept-dns=false' },
+    ],
+    securityContext: { capabilities: { add: ['NET_ADMIN'] } },
+    volumeMounts: [{ name: 'dev-net-tun', mountPath: '/dev/net/tun' }],
+    resources: { requests: { cpu: '50m', memory: '64Mi' } },
+  };
 
+  {
   // I5.5.1: the PVC for the disk backend. Only rendered when the disk backend
   // uses the PVC volume (not hostPath, and not the MinIO backend).
   [if pvc then 'recordingsPvc']: {
@@ -84,39 +127,83 @@ function(cfg)
     },
   },
 
+  // --- Tailscale sidecar state RBAC (only when the sidecar is enabled) ------
+  // tailscaled (containerboot) reads/writes its node state into the
+  // ts.stateSecret Secret via the pod's ServiceAccount. `create` cannot be
+  // restricted by resourceName, hence the separate unscoped rule (first boot
+  // creates the Secret if the consumer didn't pre-create it).
+  [if ts.enabled then 'serviceAccount']: {
+    apiVersion: 'v1',
+    kind: 'ServiceAccount',
+    metadata: { name: 'webui', namespace: ns },
+  },
+
+  [if ts.enabled then 'tsStateRole']: {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind: 'Role',
+    metadata: { name: 'webui-ts-state', namespace: ns },
+    rules: [
+      { apiGroups: [''], resources: ['secrets'], verbs: ['create'] },
+      {
+        apiGroups: [''],
+        resources: ['secrets'],
+        resourceNames: [ts.stateSecret],
+        verbs: ['get', 'update', 'patch'],
+      },
+    ],
+  },
+
+  [if ts.enabled then 'tsStateRoleBinding']: {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind: 'RoleBinding',
+    metadata: { name: 'webui-ts-state', namespace: ns },
+    roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'Role', name: 'webui-ts-state' },
+    subjects: [{ kind: 'ServiceAccount', name: 'webui', namespace: ns }],
+  },
+
   deployment: {
     apiVersion: 'apps/v1',
     kind: 'Deployment',
     metadata: { name: 'webui', namespace: ns, labels: { app: 'webui' } },
     spec: {
       replicas: 1,
-      // Recreate when the disk backend's ReadWriteOnce PVC is mounted (a
-      // transient two-pod rolling update can't both attach it); otherwise the
-      // backend is stateless again, so RollingUpdate is fine (I5.5.1).
-      strategy: { type: if disk then 'Recreate' else 'RollingUpdate' },
+      // Recreate ALWAYS: the single-replica relay holds per-session WebRTC
+      // state (and, disk backend, a ReadWriteOnce volume) — a rolling update's
+      // transient two-pod window would split sessions/volume (§4.2).
+      strategy: { type: 'Recreate' },
       selector: { matchLabels: { app: 'webui' } },
       template: {
         metadata: { labels: { app: 'webui' } },
         spec: {
+          [if ts.enabled then 'serviceAccountName']: 'webui',
           containers: [{
             name: 'webui',
             image: cfg.images.webui,
             env: [
-              { name: 'FESSEL_WHEP_SECRET', valueFrom: { secretKeyRef: { name: 'fessel-whep-secret', key: 'secret' } } },
-              { name: 'FESSEL_MEDIA_BASE', value: mediaBase },
-              { name: 'FESSEL_WHEP_TTL_S', value: if nodeport then '300' else '60' },
               { name: 'FESSEL_INGEST_PORT', value: std.toString(cfg.ingestPort) },
+              { name: 'FESSEL_SUPERVISOR_BASE', value: cfg.supervisorBase },
+              { name: 'FESSEL_LIVE_ACTIVATION_TIMEOUT_S', value: std.toString(cfg.live.activationTimeoutS) },
+              { name: 'FESSEL_LIVE_IDLE_TIMEOUT_S', value: std.toString(cfg.live.idleTimeoutS) },
             ]
-            // Public-host gate for /jwks (I2.1): in nodeport mode the backend
-            // 404s /jwks for requests on the public ingress host.
-            + (if nodeport then [{ name: 'FESSEL_PUBLIC_WEBUI_HOST', value: cfg.hosts.webui }] else [])
+            + viewerEnv
+            + ingestIceEnv
             + storageEnv,
             ports: [
-              { name: 'public', containerPort: 8000 },
-              // Tailnet-only ingest listener (B5.5.7). NOT routed by the public
-              // Ingress; targeted by the webui Service's `ingest` port.
-              { name: 'ingest', containerPort: cfg.ingestPort },
-            ],
+              { name: 'public', containerPort: 8000, protocol: 'TCP' },
+              // Tailnet-only ingest listener (B5.5.7): recording uploads +
+              // /whip/ingest signaling. NOT routed by the public Ingress;
+              // targeted by the webui Service's `ingest` port (recordings)
+              // and dialled at the sidecar's tailnet IP (WHIP).
+              { name: 'ingest', containerPort: cfg.ingestPort, protocol: 'TCP' },
+            ]
+            // Viewer media UDP (nodeport mode; the NodePort Service targets it).
+            + (if nodeport then [
+              { name: 'media-view', containerPort: cfg.webrtc.udpNodePort, protocol: 'UDP' },
+            ] else [])
+            // Ingest media UDP (sidecar mode; tailnet traffic terminates in-pod).
+            + (if ts.enabled then [
+              { name: 'media-ing', containerPort: cfg.webrtc.ingestUdpPort, protocol: 'UDP' },
+            ] else []),
             volumeMounts: diskMount,
             readinessProbe: {
               httpGet: { path: '/healthz', port: 8000 },
@@ -124,8 +211,12 @@ function(cfg)
               periodSeconds: 3,
             },
             resources: { requests: { cpu: '100m', memory: '128Mi' } },
-          }],
-          volumes: diskVolume,
+          }]
+          + (if ts.enabled then [tailscaleContainer] else []),
+          volumes: diskVolume
+          + (if ts.enabled then [
+            { name: 'dev-net-tun', hostPath: { path: '/dev/net/tun', type: 'CharDevice' } },
+          ] else []),
         },
       },
     },
@@ -140,10 +231,32 @@ function(cfg)
       ports: [
         { name: 'public', port: 8000, targetPort: 8000 },
         // The ingest port is exposed on the ClusterIP Service so the tailnet
-        // ingress (prod) and the in-cluster test-Pi (integration) can reach it.
-        // The public Ingress below still only routes to the public port.
+        // recording ingress (prod) and the in-cluster test-Pi (integration)
+        // can reach it. The public Ingress below still only routes to the
+        // public port.
         { name: 'ingest', port: cfg.ingestPort, targetPort: cfg.ingestPort },
       ],
+    },
+  },
+
+  // nodeport mode only: viewer WebRTC media on the node public IPs. Local
+  // traffic policy keeps the source address symmetric with the advertised
+  // node candidate (no SNAT hop).
+  [if nodeport then 'viewerMediaService']: {
+    apiVersion: 'v1',
+    kind: 'Service',
+    metadata: { name: 'webui-media', namespace: ns },
+    spec: {
+      type: 'NodePort',
+      externalTrafficPolicy: 'Local',
+      selector: { app: 'webui' },
+      ports: [{
+        name: 'media-view',
+        port: cfg.webrtc.udpNodePort,
+        targetPort: cfg.webrtc.udpNodePort,
+        nodePort: cfg.webrtc.udpNodePort,
+        protocol: 'UDP',
+      }],
     },
   },
 
@@ -155,14 +268,11 @@ function(cfg)
       namespace: ns,
       annotations: {
         'cert-manager.io/cluster-issuer': cfg.clusterIssuer,
-        // Proxy-bypass split (I2.1): /jwks must NEVER be reachable on the
-        // public ingress (the `oct` JWK is the signing secret); the backend's
-        // FESSEL_PUBLIC_WEBUI_HOST host gate enforces that. The recording-
-        // ingest listener (cfg.ingestPort) is a SEPARATE port this Ingress
-        // never targets (it only backends the public :8000), so
-        // /recording-ingest/... is structurally unreachable through the public
-        // ingress (B5.5.7). The webui-recording-ingest Tailscale Service
-        // (tailscale.libsonnet) is the only path to the ingest port.
+        // The recording-ingest/WHIP listener (cfg.ingestPort) is a SEPARATE
+        // port this Ingress never targets (it only backends the public
+        // :8000), so the ingest surface is structurally unreachable through
+        // the public ingress (B5.5.7). The tailnet (operator Service +
+        // sidecar) is the only path to the ingest port.
       },
     },
     spec: {

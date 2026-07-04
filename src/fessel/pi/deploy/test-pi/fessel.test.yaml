@@ -16,11 +16,8 @@ storage:
 # --- video ------------------------------------------------------------------
 
 video:
-  srt:
-    # In-cluster mediamtx SRT Service (stands in for the Tailscale ingress
-    # magicDNS name; config-only substitution per the Slice 1.5 plan).
-    host: mediamtx-srt
-    port: 8890
+  whip:
+    endpoint: "http://webui:8001/whip/ingest"
   camera:
     # No /dev/video0 in the container and no kernel module on the cluster
     # nodes: use the built-in videotestsrc (moving 'ball' pattern), which
@@ -30,6 +27,10 @@ video:
     # Test-only software encoder (no hardware encoder in a container).
     allow_software_encoder: true
   live:
+    # Fixed deploy-time live profile (§2.2); small in the test container.
+    resolution: 640x480
+    fps: 15
+    bitrate_bps: 1000000
     connect_timeout_s: 15.0
   ring:
     resolution: 640x480

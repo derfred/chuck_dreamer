@@ -1,24 +1,26 @@
-"""Live-branch state machine (V1.4).
+"""Live-branch state machine (V1.4, reshaped for WHIP §2.2/§2.3).
 
-States: {off, starting, running, stopping}. Activate/deactivate are
-transition REQUESTS, not direct spawn/kill commands. All transitions are
-serialised on a single worker thread so two pipelines can never run at
-once and no encoder process leaks (the specific failure the spike's shell
-scripts exhibited).
+The live ENCODER is always warm (§2.2); this state machine governs the WHIP
+sender branch, not the encoder. "Start" means attach the sender branch and
+establish the WHIP session; "stop" means detach it. Activate/deactivate are
+transition REQUESTS, not direct spawn/kill commands, and are PARAMETERLESS —
+the live profile is a deploy-time config setting, not a per-session mode.
+All transitions are serialised on a single worker thread so two sender
+branches can never run at once and no branch leaks.
 
-Transition table:
+Transition table (architecture §2.3):
 
-| From     | Event             | To       | Action                                  |
-|----------|-------------------|----------|-----------------------------------------|
-| off      | activate(mode)    | starting | spawn pipeline; arm connect-timeout     |
-| starting | srtsink connected | running  | publish state                           |
-| starting | connect fail/tmo  | off      | tear down; log; await next activate     |
-| starting | deactivate        | stopping | cancel pending start; tear down         |
-| running  | deactivate        | stopping | send EOS; await graceful exit           |
-| running  | srt disconnect    | starting | retry with backoff                      |
-| running  | activate          | running  | idempotent ack; no-op                   |
-| stopping | exit              | off      | publish state                           |
-| stopping | activate          | off->starting | queue; transition after exit       |
+| From     | Event               | To       | Action                                    |
+|----------|---------------------|----------|-------------------------------------------|
+| off      | activate            | starting | attach WHIP branch; force IDR; arm timeout |
+| starting | session established | running  | publish state                              |
+| starting | connect fail/tmo    | off      | detach branch; log; await next activate    |
+| starting | deactivate          | stopping | cancel pending start; detach branch        |
+| running  | deactivate          | stopping | detach branch; teardown session            |
+| running  | session dropped     | starting | re-attach with backoff                     |
+| running  | activate            | running  | idempotent ack; no-op                      |
+| stopping | exit                | off      | publish state                              |
+| stopping | activate            | off->starting | queue; transition after exit          |
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from fessel_schemas import LiveStateValue, ModeTriplet
+from fessel_schemas import LiveStateValue
 
 log = logging.getLogger(__name__)
 
@@ -39,43 +41,41 @@ log = logging.getLogger(__name__)
 class _EventKind(Enum):
   ACTIVATE = "activate"
   DEACTIVATE = "deactivate"
-  CONNECTED = "connected"  # srtsink connected
+  CONNECTED = "connected"  # WHIP session established
   CONNECT_FAILED = "connect_failed"  # connect error or timeout
-  DISCONNECTED = "disconnected"  # srt disconnect while running
-  EXITED = "exited"  # pipeline finished tearing down
+  DISCONNECTED = "disconnected"  # WHIP session dropped while running
+  EXITED = "exited"  # sender branch finished tearing down
 
 
 @dataclass
 class _Event:
   kind: _EventKind
-  mode: ModeTriplet | None = None
-  path: str | None = None
 
 
-# A PipelineHandle abstracts the GStreamer pipeline so the state machine is
-# testable without GStreamer. Implementations spawn/teardown and report
-# connected/failed/disconnected/exited back via the supplied event callback.
+# A PipelineHandle abstracts the GStreamer WHIP sender branch so the state
+# machine is testable without GStreamer. Implementations attach/detach and
+# report connected/failed/disconnected/exited back via the supplied callbacks.
 class PipelineHandle:
   def start(self) -> None:  # pragma: no cover - interface
     raise NotImplementedError
 
   def stop(self) -> None:  # pragma: no cover - interface
-    """Request graceful teardown (EOS); must eventually emit EXITED."""
+    """Request graceful detach; must eventually emit EXITED."""
     raise NotImplementedError
 
   def force_idr(self) -> None:  # pragma: no cover - interface
-    """Ask the encoder to emit an IDR keyframe at the next frame (V2.2).
+    """Ask the warm live encoder to emit an IDR keyframe at the next frame.
 
-    Called once when the publisher connects, so a WHEP reader that joined
-    during runOnDemand gets a keyframe immediately rather than waiting up
-    to a full GOP. A no-op by default: it is an optional best-effort
+    Called once when the sender branch is attached (§2.2), so the stream
+    starts with a decodable IDR rather than waiting for the next GOP
+    boundary. A no-op by default: it is an optional best-effort
     optimisation, and an encoder that ignores the force-key-unit event
     simply falls back to the short-GOP + UI-spinner behaviour.
     """
 
 
-PipelineFactory = Callable[[ModeTriplet, str], PipelineHandle]
-StatePublisher = Callable[[LiveStateValue, str | None, ModeTriplet | None], None]
+PipelineFactory = Callable[[], PipelineHandle]
+StatePublisher = Callable[[LiveStateValue], None]
 
 
 class LiveStateMachine:
@@ -100,9 +100,7 @@ class LiveStateMachine:
     self._stop = threading.Event()
 
     self._pipeline: PipelineHandle | None = None
-    self._cur_mode: ModeTriplet | None = None
-    self._cur_path: str | None = None
-    self._queued_activate: _Event | None = None  # activate received during stopping
+    self._queued_activate = False  # activate received during stopping
     self._connect_deadline: float | None = None
     self._backoff: float = reconnect_backoff_s
     self._reconnect_at: float | None = None  # when to retry after disconnect
@@ -121,11 +119,11 @@ class LiveStateMachine:
   def state(self) -> LiveStateValue:
     return self._state
 
-  def request_activate(self, mode: ModeTriplet, path: str) -> None:
-    self._events.put(_Event(_EventKind.ACTIVATE, mode=mode, path=path))
+  def request_activate(self) -> None:
+    self._events.put(_Event(_EventKind.ACTIVATE))
 
-  def request_deactivate(self, path: str | None = None) -> None:
-    self._events.put(_Event(_EventKind.DEACTIVATE, path=path))
+  def request_deactivate(self) -> None:
+    self._events.put(_Event(_EventKind.DEACTIVATE))
 
   # --- callbacks the pipeline implementation calls (thread-safe) ---
 
@@ -165,11 +163,11 @@ class LiveStateMachine:
   def _handle_timers(self) -> None:
     now = time.monotonic()
     if self._connect_deadline is not None and now >= self._connect_deadline:
-      log.warning("srtsink connect timed out in %s", self._state)
+      log.warning("WHIP session connect timed out in %s", self._state)
       self._dispatch(_Event(_EventKind.CONNECT_FAILED))
     if self._reconnect_at is not None and now >= self._reconnect_at:
       self._reconnect_at = None
-      self._spawn(self._cur_mode, self._cur_path)  # type: ignore[arg-type]
+      self._spawn()
 
   def _dispatch(self, ev: _Event) -> None:
     handler = getattr(self, f"_on_{self._state.value}")
@@ -179,22 +177,13 @@ class LiveStateMachine:
 
   def _on_off(self, ev: _Event) -> None:
     if ev.kind is _EventKind.ACTIVATE:
-      self._spawn(ev.mode, ev.path)
+      self._spawn()
     # deactivate/connected/etc. in off: ignore.
 
   def _on_starting(self, ev: _Event) -> None:
     if ev.kind is _EventKind.CONNECTED:
       self._connect_deadline = None
       self._backoff = self._backoff_base
-      # Force an IDR now (V2.2): the publisher has just connected, so a WHEP
-      # reader waiting on runOnDemand gets a keyframe immediately instead of
-      # waiting up to a full GOP. Once per connect — not on every reconnect
-      # retry's CONNECTED — and best-effort (no-op if the encoder ignores it).
-      if self._pipeline is not None:
-        try:
-          self._pipeline.force_idr()
-        except Exception:  # noqa: BLE001
-          log.exception("force_idr failed (continuing; short GOP covers it)")
       self._set_state(LiveStateValue.running)
     elif ev.kind is _EventKind.CONNECT_FAILED:
       self._connect_deadline = None
@@ -210,12 +199,13 @@ class LiveStateMachine:
     if ev.kind is _EventKind.DEACTIVATE:
       self._begin_teardown()
     elif ev.kind is _EventKind.DISCONNECTED:
-      # Tear down current pipeline and retry with backoff -> back to starting.
+      # Detach the current sender branch and re-attach with backoff -> back to
+      # starting (§2.3: uplink-blip recovery is the state machine's job).
       self._teardown()
       self._reconnect_at = time.monotonic() + self._backoff
       self._backoff = min(self._backoff * 2, self._backoff_max)
       self._set_state(LiveStateValue.starting)
-      self._connect_deadline = None  # set when respawn happens
+      self._connect_deadline = None  # set when re-attach happens
     elif ev.kind is _EventKind.ACTIVATE:
       pass  # idempotent ack; no-op
 
@@ -223,23 +213,29 @@ class LiveStateMachine:
     if ev.kind is _EventKind.EXITED:
       self._pipeline = None
       self._set_state(LiveStateValue.off)
-      if self._queued_activate is not None:
-        q = self._queued_activate
-        self._queued_activate = None
-        self._spawn(q.mode, q.path)
+      if self._queued_activate:
+        self._queued_activate = False
+        self._spawn()
     elif ev.kind is _EventKind.ACTIVATE:
       # Queue; transition after current teardown completes.
-      self._queued_activate = ev
+      self._queued_activate = True
 
   # --- helpers ---
 
-  def _spawn(self, mode: ModeTriplet | None, path: str | None) -> None:
-    assert mode is not None and path is not None
-    self._cur_mode, self._cur_path = mode, path
-    self._pipeline = self._make_pipeline(mode, path)
+  def _spawn(self) -> None:
+    self._pipeline = self._make_pipeline()
     self._connect_deadline = time.monotonic() + self._connect_timeout_s
     self._set_state(LiveStateValue.starting)
     self._pipeline.start()
+    # Force an IDR on attach (§2.2/§2.3 off->starting action): the warm
+    # encoder is mid-GOP, so the new WHIP session should start with a
+    # decodable keyframe rather than waiting up to a full GOP. Once per
+    # attach (incl. reconnect re-attach) and best-effort — a failure here
+    # must not break the transition (short GOP covers it).
+    try:
+      self._pipeline.force_idr()
+    except Exception:  # noqa: BLE001
+      log.exception("force_idr failed (continuing; short GOP covers it)")
 
   def _begin_teardown(self) -> None:
     self._connect_deadline = None
@@ -260,6 +256,4 @@ class LiveStateMachine:
 
   def _set_state(self, state: LiveStateValue) -> None:
     self._state = state
-    path = self._cur_path if state is not LiveStateValue.off else None
-    mode = self._cur_mode if state in (LiveStateValue.starting, LiveStateValue.running) else None
-    self._publish_state(state, path, mode)
+    self._publish_state(state)

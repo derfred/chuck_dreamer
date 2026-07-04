@@ -44,16 +44,24 @@ class Capabilities(BaseModel):
 
 
 class LiveActivate(BaseModel):
-  """Payload of arm/video/cmd/live/activate."""
+  """Payload of arm/video/cmd/live/activate.
 
-  path: str
-  mode: ModeTriplet
+  Parameterless (architecture §2.2): the live profile is a deploy-time config
+  setting on video, not a per-session parameter — the former `mode` triplet is
+  gone from the activation path. `path` is retained as an optional field for
+  wire tolerance only (legacy callers still send it); video ignores it.
+  """
+
+  path: str | None = None
 
 
 class LiveDeactivate(BaseModel):
-  """Payload of arm/video/cmd/live/deactivate."""
+  """Payload of arm/video/cmd/live/deactivate.
 
-  path: str
+  Parameterless; `path` is optional wire tolerance only (see LiveActivate).
+  """
+
+  path: str | None = None
 
 
 class LiveState(BaseModel):

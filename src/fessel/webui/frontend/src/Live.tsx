@@ -1,11 +1,10 @@
-// /live page (F2.2). Mode selector populated from capabilities, the full UX
-// state machine (Idle → Requesting → Signaling → WaitingForVideo → Playing,
-// with Stalled/Error recovery), media-liveness detection and auto-reconnect
-// (in useLiveSession), and re-auth escalation on a 401.
+// /live page (F2.2). The full UX state machine (Idle → Requesting → Signaling
+// → WaitingForVideo → Playing, with Stalled/Error recovery), media-liveness
+// detection and auto-reconnect (in useLiveSession), and re-auth escalation on
+// a 401. There is NO resolution/mode selector: the live profile is fixed
+// (architecture §4.4); the WHEP offer goes same-origin to /whep.
 
-import { useEffect, useRef, useState } from "react";
-import type { ModeTriplet } from "../../shared/schemas";
-import { AuthError, fetchCapabilities, modeToCanonical, reauthenticate } from "./api";
+import { useRef } from "react";
 import { useLiveSession } from "./useLiveSession";
 
 // Per-state display: spinner/banner copy + whether the video element shows.
@@ -18,20 +17,8 @@ const SPINNER: Partial<Record<string, string>> = {
 };
 
 export function Live() {
-  const [modes, setModes] = useState<ModeTriplet[]>([]);
-  const [selected, setSelected] = useState<number>(0);
-  const [capsError, setCapsError] = useState<string>("");
   const videoRef = useRef<HTMLVideoElement>(null);
   const session = useLiveSession(videoRef);
-
-  useEffect(() => {
-    fetchCapabilities()
-      .then((c) => setModes(c.modes))
-      .catch((e) => {
-        if (e instanceof AuthError) reauthenticate();
-        else setCapsError(String(e));
-      });
-  }, []);
 
   const { state, detail, attempt } = session;
   const spinner = SPINNER[state];
@@ -42,30 +29,12 @@ export function Live() {
       <h1>Fessel — Live</h1>
 
       <div>
-        <label>
-          Mode:{" "}
-          <select
-            value={selected}
-            onChange={(e) => setSelected(Number(e.target.value))}
-            disabled={state !== "Idle" && state !== "Error"}
-          >
-            {modes.map((m, i) => (
-              <option key={i} value={i}>
-                {modeToCanonical(m)}
-              </option>
-            ))}
-          </select>
-        </label>{" "}
         {state === "Idle" || state === "Error" ? (
-          <button onClick={() => modes[selected] && session.start(modes[selected])} disabled={modes.length === 0}>
-            Start live view
-          </button>
+          <button onClick={session.start}>Start live view</button>
         ) : (
           <button onClick={session.stop}>Stop</button>
         )}
       </div>
-
-      {capsError && <p style={{ color: "crimson" }}>Capabilities error: {capsError}</p>}
 
       <div style={{ position: "relative", width: 640, marginTop: 12 }}>
         <video

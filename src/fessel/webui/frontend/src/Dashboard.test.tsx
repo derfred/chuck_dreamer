@@ -72,15 +72,14 @@ async function renderReady(fn = installFetch()) {
   return fn;
 }
 
-describe("status panel (F3.1)", () => {
-  it("renders the facts, showing an unverified plug read distinctly", async () => {
+describe("status panel removed (moved to the navbar Pi-health indicator)", () => {
+  it("no longer renders the safety_state / plug / camera facts on the dashboard", async () => {
     await renderReady();
-    expect(screen.getByText("SHUTDOWN_ARM")).toBeTruthy();
-    expect(screen.getByText("stopped")).toBeTruthy();
-    expect(screen.getByText("off")).toBeTruthy(); // arm plug, verified off
-    // jetson plug is on but unverified -> the unverified marker is shown.
-    expect(screen.getByText("on (unverified)")).toBeTruthy();
-    expect(screen.getByText("down")).toBeTruthy(); // camera
+    // These now live in the App-chrome PiHealthIndicator drill-down, not the
+    // dashboard. The dashboard must not resurrect them.
+    expect(screen.queryByText("SHUTDOWN_ARM")).toBeNull();
+    expect(screen.queryByText("on (unverified)")).toBeNull();
+    expect(screen.queryByText("Status")).toBeNull();
   });
 });
 
@@ -209,14 +208,16 @@ describe("state poll resilience (F3.4)", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(screen.getByText("SHUTDOWN_ARM")).toBeTruthy();
-    // Trigger the next poll (config.statePollMs = 2000).
+    // First poll succeeded: no banner yet.
+    expect(screen.queryByText(/State unavailable/)).toBeNull();
+    // Trigger the next poll (config.statePollMs = 2000), which 503s.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
+    // The transient banner appears WITHOUT unmounting the dashboard (the
+    // controls stay rendered) — the last-known state is kept, not cleared.
     expect(screen.getByText(/State unavailable/)).toBeTruthy();
-    // Last-known state is still on screen.
-    expect(screen.getByText("SHUTDOWN_ARM")).toBeTruthy();
+    expect(screen.getByText("Controls")).toBeTruthy();
   });
 });
 

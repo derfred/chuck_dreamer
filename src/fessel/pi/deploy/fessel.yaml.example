@@ -19,10 +19,11 @@ storage:
 # --- video ------------------------------------------------------------------
 
 video:
-  srt:
-    # mediamtx's Tailscale magicDNS name (from tailscale-ingress.yaml) + 8890.
-    host: mediamtx-srt
-    port: 8890
+  whip:
+    # The webui relay's WHIP ingest endpoint: the webui pod's tsnet-sidecar
+    # tailnet IP/name + the tailnet-only ingest port, full URL ending in
+    # /whip/ingest (architecture §2.2/§4.2). Restart-only (no SIGHUP apply).
+    endpoint: "http://webui.tailnet.ts.net:8001/whip/ingest"
 
   camera:
     device: /dev/video0
@@ -30,8 +31,16 @@ video:
     use_test_source: false
 
   live:
-    # How long `starting` waits for srtsink to connect before giving up to
-    # `off`. A config parameter, not hardcoded (V1.4).
+    # The WARM live encoder's fixed deploy-time profile (§2.2). Deliberately
+    # lower quality than the recording encoders — the live view is situational
+    # awareness, not the archived artifact. No per-session mode selection.
+    # Restart-only (the warm encoder is baked into the capture pipeline).
+    resolution: 640x480
+    fps: 10
+    bitrate_bps: 1000000
+    # How long `starting` waits for the WHIP session to establish before
+    # giving up to `off`. A config parameter, not hardcoded (V1.4); the
+    # Pi-side complement of the relay's live_activation_timeout.
     connect_timeout_s: 15.0
 
   ring:

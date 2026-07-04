@@ -1,5 +1,5 @@
-"""GStreamer live pipeline (V1.1 capture core + V1.2 SRT branch) and the
-Slice 4 capture branches (V4.1 ring buffer, V4.2 explicit recording).
+"""GStreamer capture pipeline (V1.1 capture core + warm live encoder, §2.2)
+and the Slice 4 capture branches (V4.1 ring buffer, V4.2 explicit recording).
 
 Built in-process via gi/Gst (never by shelling out to gst-launch).
 
@@ -8,9 +8,18 @@ Every cap below is load-bearing on the Pi hardware:
   - v4l2h264enc requires explicit input cap video/x-raw,format=I420.
   - encoder bitrate is set via extra-controls, not a property.
   - output cap video/x-h264,level=(string)4 is required for negotiation.
-  - mpegtsmux -> srtsink with streamid=publish:<path> and pkt_size=1316.
-  - wait-for-connection=false: srtsink fails fast; reconnect is the state
-    machine's job, not the element's.
+
+Live path (architecture §2.2, warm-but-detached / Variant B):
+  - A dedicated live encoder at a FIXED deploy-time profile is built into the
+    always-on capture pipeline and runs warm whenever the pipeline is up:
+    `queue ! videoscale ! videorate ! <caps> ! <hw enc> ! h264parse
+    config-interval=1 ! tee name=tee_live`, with a permanently linked
+    `queue ! fakesink` drop branch so the encoder output flows nowhere while
+    unwatched (zero uplink, no cold start on first viewer).
+  - On activation, ONLY the WHIP sender sub-branch (`queue ! rtph264pay !
+    whipclientsink`) is linked onto tee_live; whipclientsink owns its WebRTC
+    session lifecycle — attaching IS the WHIP handshake, detaching tears the
+    session down. Reconnect after an uplink blip is the state machine's job.
 
 Slice 4 branch shape (HLS to the USB SSD):
   - Both the ring and the explicit-recording branch hardware-encode H.264 and
@@ -21,9 +30,9 @@ Slice 4 branch shape (HLS to the USB SSD):
   - The ring rolls (playlist-length + max-files bound the window); an explicit
     recording is finite (playlist-length=0, max-files=0 -> keep everything).
 
-Like build_live_launch, the ring/recording builders are pure string builders
-(unit-testable without GStreamer); the same encoder-profile selection
-(v4l2h264enc / vtenc_h264 / x264enc test seam) applies to every H.264 branch.
+The ring/recording/live builders are pure string builders (unit-testable
+without GStreamer); the same encoder-profile selection (v4l2h264enc /
+vtenc_h264 / x264enc test seam) applies to every H.264 branch.
 """
 
 from __future__ import annotations
@@ -40,14 +49,19 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# SRT-over-Ethernet MTU-safe payload size; not the default. Larger values
-# risk IP fragmentation over cellular paths.
-SRT_PKT_SIZE = 1316
-
-# Element name for the live encoder, so the pipeline handle can look it up to
-# send a force-key-unit (IDR) event on activation (V2.2). Stable name kept in
-# one place so the builder and the handle agree.
+# Element name for the warm live encoder, so the pipeline handle can look it
+# up to send a force-key-unit (IDR) event on activation (V2.2). Stable name
+# kept in one place so the builder and the handle agree.
 LIVE_ENCODER_NAME = "live_enc"
+
+# The warm live encoder's output tee (§2.2). Always present in the capture
+# pipeline; the WHIP sender branch is attached to / detached from its request
+# pads at runtime. A permanently linked fakesink drop branch keeps the encoder
+# flowing while no sender is attached.
+LIVE_TEE_NAME = "tee_live"
+
+# Element name for the on-demand whipclientsink, for diagnostics/lookup.
+WHIP_SINK_NAME = "live_whip"
 
 # Stable element names for the Slice-4 HLS branches, so the recording pipeline
 # handle can resolve the hlssink2 sink to detect first-segment / finalisation.
@@ -68,6 +82,11 @@ VISION_HEIGHT = 360
 
 def _resolution_wh(mode: ModeTriplet) -> tuple[int, int]:
   w, h = (int(x) for x in mode.resolution.split("x"))
+  return w, h
+
+
+def _wh(resolution: str) -> tuple[int, int]:
+  w, h = (int(x) for x in resolution.split("x"))
   return w, h
 
 
@@ -141,31 +160,49 @@ VIDEO_TEE_NAME = "tee_v"
 AUDIO_TEE_NAME = "tee_a"
 
 
-def _live_sink_chain(*, path: str, srt_host: str, srt_port: int) -> str:
-  srt_uri = f"srt://{srt_host}:{srt_port}?streamid=publish:{path}&pkt_size={SRT_PKT_SIZE}"
-  return f'mpegtsmux ! srtsink uri="{srt_uri}" wait-for-connection=false'
-
-
-def live_branch_chain(
+def live_warm_branch(
   *,
-  mode: ModeTriplet,
-  path: str,
-  srt_host: str,
-  srt_port: int = 8890,
+  live_resolution: str,
+  live_fps: int,
+  live_bitrate_bps: int,
   allow_software_encoder: bool = False,
 ) -> str:
-  """The live branch as a SOURCELESS element chain (queue -> encode -> srtsink),
-  to be linked onto a tee_v request pad at runtime (§2.2 dynamic branch).
+  """The WARM live-encoder branch built into the capture pipeline (§2.2).
 
-  The tee fans out raw I420, so each branch encodes independently — the live
-  branch keeps its own short-GOP encoder (fast WHEP start) regardless of the
-  ring's profile. `name=LIVE_ENCODER_NAME` so the handle can force an IDR.
+  A dedicated encoder at the fixed deploy-time live profile, always running
+  while the pipeline is up: tee_v -> queue -> scale/rate to the live profile
+  -> encode (short ~1s GOP for a fast join) -> tee_live -> fakesink. The
+  fakesink drop branch is permanently linked so the encoder output flows
+  nowhere while unwatched; the WHIP sender (whip_sender_chain) is attached to
+  tee_live's request pads on activation. `name=LIVE_ENCODER_NAME` so the
+  handle can force an IDR on attach.
   """
   prof = encoder_profile(allow_software=allow_software_encoder)
-  gop = max(1, mode.fps)  # ~1s keyframe interval -> short GOP for fast WHEP start.
-  encoder = _encoder_chain(prof, mode.bitrate_bps, gop, name=LIVE_ENCODER_NAME)
-  sink = _live_sink_chain(path=path, srt_host=srt_host, srt_port=srt_port)
-  return f"queue ! {encoder} ! {sink}"
+  width, height = _wh(live_resolution)
+  gop = max(1, live_fps)  # ~1s keyframe interval -> short GOP for fast join.
+  encoder = _encoder_chain(prof, live_bitrate_bps, gop, name=LIVE_ENCODER_NAME)
+  return (
+    f"{VIDEO_TEE_NAME}. ! queue ! videoscale ! videorate ! "
+    f"video/x-raw,width={width},height={height},framerate={live_fps}/1,format=I420 ! "
+    f"{encoder} ! tee name={LIVE_TEE_NAME} "
+    f"{LIVE_TEE_NAME}. ! queue ! fakesink sync=false"
+  )
+
+
+def whip_sender_chain(*, whip_endpoint: str) -> str:
+  """The on-demand WHIP sender as a SOURCELESS element chain, to be linked
+  onto a tee_live request pad on activation (§2.2/§2.3).
+
+  whipclientsink (gst-plugins-rs net/webrtc) owns its WebRTC session: it POSTs
+  the WHIP offer to `whip_endpoint` (the webui relay's /whip/ingest), runs
+  ICE/DTLS, and streams SRTP. Attaching this branch IS the handshake;
+  detaching it tears the session down. Reconnect after an uplink blip is the
+  state machine's job (re-attach with backoff), not the element's.
+  """
+  return (
+    f"queue ! rtph264pay ! "
+    f'whipclientsink name={WHIP_SINK_NAME} signaller::whip-endpoint="{whip_endpoint}"'
+  )
 
 
 def recording_branch_chain(
@@ -212,6 +249,9 @@ def build_capture_launch(
   ring_segment_seconds: int,
   ring_playlist_length: int,
   ring_max_files: int,
+  live_resolution: str = "1280x720",
+  live_fps: int = 15,
+  live_bitrate_bps: int = 1_500_000,
   device: str = "/dev/video0",
   audio_device: str = "default",
   use_test_source: bool = False,
@@ -221,10 +261,12 @@ def build_capture_launch(
   """The single always-on capture pipeline (architecture §2.2).
 
   Opens the camera (and mic) ONCE and fans frames out via a tee. Linked at
-  build time: the ring-buffer HLS branch and the vision appsink branch off
-  `tee_v`, and the audio `level` branch off `tee_a`. The on-demand live branch
-  is added onto `tee_v`'s request pad at runtime (it has no splitmuxsink, so it
-  tolerates live attach). An EXPLICIT recording is NOT a pipeline branch at all:
+  build time: the ring-buffer HLS branch, the vision appsink branch, and the
+  WARM live-encoder branch (fixed deploy-time profile, ending in tee_live +
+  a fakesink drop branch) off `tee_v`, and the audio `level` branch off
+  `tee_a`. The on-demand WHIP sender is added onto `tee_live`'s request pad
+  at runtime (whip_sender_chain). An EXPLICIT recording is NOT a pipeline
+  branch at all:
   the recording state machine copies the ring's segments for the recording
   window out of the always-on ring (GstRecordingPipeline, mirroring the anomaly
   forward-capture) — hlssink2 cannot be added live to a running pipeline, and a
@@ -255,6 +297,12 @@ def build_capture_launch(
     f"video/x-raw,width={VISION_WIDTH},height={VISION_HEIGHT},format=I420 ! "
     f"appsink name={VISION_APPSINK_NAME} emit-signals=true max-buffers=1 drop=true sync=false"
   )
+  live_branch = live_warm_branch(
+    live_resolution=live_resolution,
+    live_fps=live_fps,
+    live_bitrate_bps=live_bitrate_bps,
+    allow_software_encoder=allow_software_encoder,
+  )
 
   if use_test_source:
     audio_source = "audiotestsrc is-live=true wave=silence"
@@ -268,37 +316,10 @@ def build_capture_launch(
 
   return (
     f"{video_source} ! tee name={VIDEO_TEE_NAME} "
-    f"{ring_branch} {vision_branch} "
+    f"{ring_branch} {vision_branch} {live_branch} "
     f"{audio_source} ! audioconvert ! audioresample ! tee name={AUDIO_TEE_NAME} "
     f"{audio_branch}"
   )
-
-
-def build_live_launch(
-  *,
-  mode: ModeTriplet,
-  path: str,
-  srt_host: str,
-  srt_port: int = 8890,
-  device: str = "/dev/video0",
-  use_test_source: bool = False,
-  allow_software_encoder: bool = False,
-) -> str:
-  """Standalone live SRT-push pipeline (source + live branch).
-
-  Retained for the unit tests and as a self-contained reference; the running
-  system uses `live_branch_chain` linked onto the shared capture pipeline's
-  tee (§2.2) rather than this standalone form.
-  """
-  prof = encoder_profile(allow_software=allow_software_encoder)
-  width, height = _resolution_wh(mode)
-  gop = max(1, mode.fps)  # ~1s keyframe interval -> short GOP for fast WHEP start.
-
-  source = _source_chain(device, width, height, mode.fps, use_test_source)
-  encoder = _encoder_chain(prof, mode.bitrate_bps, gop, name=LIVE_ENCODER_NAME)
-  sink = _live_sink_chain(path=path, srt_host=srt_host, srt_port=srt_port)
-
-  return f"{source} ! {encoder} ! {sink}"
 
 
 def _hls_gop(fps: int, segment_seconds: int) -> int:

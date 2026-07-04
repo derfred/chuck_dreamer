@@ -7,14 +7,14 @@ three files (which duplicated `mqtt` and `storage`), the layout is one file:
 
     mqtt:       {host, port}              # shared by all processes
     storage:    {ssd_path}                # shared by video, supervisor, uploader
-    video:      {srt, camera, live, ring, recording}
+    video:      {whip, camera, live, ring, recording}
     supervisor: {http, control}
     uploader:   {driver, ingest_url_base, upload}
 
 `load_component_config(path, component)` returns the flat dict a process
 already expects — the shared sections at top level, with the component's own
 subtree merged in alongside — so process code keeps reading `config.get("mqtt")`,
-`config.get("srt")`, `config.get("control")`, etc. unchanged. A component subtree
+`config.get("whip")`, `config.get("control")`, etc. unchanged. A component subtree
 key wins over a shared key on collision (a component could override `storage`,
 though none does).
 """

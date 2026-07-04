@@ -7,8 +7,8 @@ export type Resolution = string;
 export type Fps = number;
 export type BitrateBps = number;
 export type Modes = ModeTriplet[];
-export type Path = string;
-export type Path1 = string;
+export type Path = string | null;
+export type Path1 = string | null;
 export type LiveStateValue = "off" | "starting" | "running" | "stopping";
 export type Path2 = string | null;
 export type On = boolean | null;
@@ -93,6 +93,9 @@ export type AnomalyType =
   | "audio_spike_cleared";
 export type AnomalyRecordingId = string | null;
 export type Cleared = boolean;
+export type Component = string;
+export type Supervisor = string | null;
+export type Video = string | null;
 /**
  * Abbreviated supervisor safety state (architecture §2.4).
  *
@@ -157,17 +160,23 @@ export interface Capabilities {
 }
 /**
  * Payload of arm/video/cmd/live/activate.
+ *
+ * Parameterless (architecture §2.2): the live profile is a deploy-time config
+ * setting on video, not a per-session parameter — the former `mode` triplet is
+ * gone from the activation path. `path` is retained as an optional field for
+ * wire tolerance only (legacy callers still send it); video ignores it.
  */
 export interface LiveActivate {
-  path: Path;
-  mode: ModeTriplet;
+  path?: Path;
   [k: string]: unknown;
 }
 /**
  * Payload of arm/video/cmd/live/deactivate.
+ *
+ * Parameterless; `path` is optional wire tolerance only (see LiveActivate).
  */
 export interface LiveDeactivate {
-  path: Path1;
+  path?: Path1;
   [k: string]: unknown;
 }
 /**

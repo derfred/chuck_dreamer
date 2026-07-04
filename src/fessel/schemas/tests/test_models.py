@@ -34,10 +34,16 @@ def test_capabilities_payload():
   assert dumped["modes"][0]["resolution"] == "640x480"
 
 
-def test_live_activate_and_state():
-  a = LiveActivate(path="pi", mode=ModeTriplet(resolution="640x480", fps=30, bitrate_bps=1_000_000))
-  assert a.path == "pi"
-  st = LiveState(state=LiveStateValue.running, path="pi", mode=a.mode)
+def test_live_activate_is_parameterless_but_wire_tolerant():
+  # Parameterless activation (§2.2): no mode anywhere in the live path.
+  a = LiveActivate()
+  assert a.path is None
+  assert not hasattr(a, "mode")
+  # Wire tolerance: legacy callers still send {"path": ...}; it validates and
+  # is ignored downstream.
+  legacy = LiveActivate.model_validate({"path": "pi"})
+  assert legacy.path == "pi"
+  st = LiveState(state=LiveStateValue.running)
   assert st.model_dump()["state"] == "running"
 
 

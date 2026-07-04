@@ -116,18 +116,6 @@ export function modeToCanonical(m: ModeTriplet): string {
   return `${m.resolution}@${m.fps}@${m.bitrate_bps}`;
 }
 
-// Mint a fresh signed WHEP URL. A 401 throws AuthError (session expired);
-// callers escalate to re-auth rather than retrying (F2.4 rule).
-export async function fetchWhepUrl(path: string, mode: ModeTriplet): Promise<string> {
-  const params = new URLSearchParams({ path, mode: modeToCanonical(mode) });
-  const res = await fetch(`/api/auth/whep-url?${params.toString()}`);
-  if (res.status === 401) throw new AuthError();
-  clearReauthGuard();
-  if (!res.ok) throw new Error(`whep-url failed: ${res.status}`);
-  const body = (await res.json()) as { url: string };
-  return body.url;
-}
-
 // --- Slice 3 control plane (F3.1–F3.4) --------------------------------------
 
 // The seven operator control actions. The string is the /api/control/<action>
@@ -176,6 +164,36 @@ function diagnosticOf(body: unknown, status: number): string {
 // `jetson` passthrough stays permissive, matching the Python model).
 export function fetchState(): Promise<StateResponse> {
   return getJson<StateResponse>("/api/state", StateResponseSchema);
+}
+
+// --- Pi-connection health (health-check spec §2.2 / §4) ----------------------
+
+// One health fact. `unknown` is first-class (distinct from red): before the
+// first poll, or when a Pi-observed fact is masked because pi_control is red.
+export type HealthState = "green" | "yellow" | "red" | "unknown";
+
+export interface HealthFact {
+  id: string;
+  label: string;
+  state: HealthState;
+  detail: string;
+  observed_at: string;
+}
+
+// The composite /api/health/pi response: the rollup `light` + the per-fact
+// breakdown in root-cause-first display order. A backend-internal projection,
+// not a fessel_schemas wire model, so it is typed here (like RecordingItem).
+export interface PiHealth {
+  light: HealthState;
+  generated_at: string;
+  facts: HealthFact[];
+}
+
+// Poll the composite Pi-connection health. A 401 throws AuthError (the caller
+// escalates to re-auth); any other failure throws so the corner light can begin
+// its staleness clock (spec §4.2/§4.4) rather than blanking.
+export function fetchPiHealth(): Promise<PiHealth> {
+  return getJson<PiHealth>("/api/health/pi");
 }
 
 // --- Slice 4 recordings + ring (F4.1–F4.5) ----------------------------------

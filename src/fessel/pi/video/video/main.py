@@ -14,9 +14,10 @@ plus the shared `mqtt`/`storage` sections, flattened by load_component_config
 into the shape below:
   mqtt: {host, port}        # shared
   storage: {ssd_path}       # shared; USB SSD mount, default /mnt/ssd
-  srt:  {host, port}        # mediamtx Tailscale magicDNS name + 8890
+  whip: {endpoint}          # webui relay's WHIP ingest URL (…/whip/ingest)
   camera: {device, use_test_source}
-  live: {connect_timeout_s}
+  live: {resolution, fps, bitrate_bps,   # fixed deploy-time live profile (§2.2)
+         connect_timeout_s}
   ring:      {bitrate_bps, segment_seconds, playlist_length, max_files,
               resolution, fps}
   recording: {bitrate_bps, segment_seconds, start_timeout_s}
@@ -87,6 +88,16 @@ DEFAULT_RECORDING = {
   "segment_seconds": 2,
   "start_timeout_s": 15.0,
 }
+# Warm live-encoder profile defaults (§2.2) — fixed at deploy time, NOT a
+# per-session parameter. Deliberately lower quality than the recording
+# encoders: the live view is for situational awareness, not the archived
+# artifact. Real values come from `video.live`.
+DEFAULT_LIVE = {
+  "resolution": "1280x720",
+  "fps": 15,
+  "bitrate_bps": 1_500_000,
+  "connect_timeout_s": 15.0,
+}
 # Anomaly-recording window defaults (V5.7) — bracket the moment.
 DEFAULT_ANOMALY = {
   "before_seconds": 30.0,
@@ -105,11 +116,20 @@ class VideoApp:
       port=mqtt_cfg.get("port", 1883),
     )
 
-    srt_cfg = config.get("srt", {})
+    whip_cfg = config.get("whip", {})
     cam_cfg = config.get("camera", {})
-    live_cfg = config.get("live", {})
-    self._srt_host = srt_cfg.get("host", "mediamtx-srt")
-    self._srt_port = srt_cfg.get("port", 8890)
+    live_cfg = {**DEFAULT_LIVE, **(config.get("live") or {})}
+    self._live_cfg = live_cfg
+    # The webui relay's WHIP ingest endpoint (full URL ending in /whip/ingest).
+    # Deploy-time config; without it the live path cannot work — warn loudly
+    # at startup (an activate would then fail into the SM's connect-failure
+    # path rather than crashing the whole video plane).
+    self._whip_endpoint = str(whip_cfg.get("endpoint", "") or "")
+    if not self._whip_endpoint:
+      log.warning(
+        '{"event":"config","note":"video.whip.endpoint is not set; '
+        'live activation will fail until it is configured"}'
+      )
     self._device = cam_cfg.get("device", "/dev/video0")
     self._use_test_source = bool(cam_cfg.get("use_test_source", False))
     # Test-only seam: x264enc software encoder. Off by default; only the
@@ -130,13 +150,17 @@ class VideoApp:
     self._ring_cfg = {**DEFAULT_RING, **(config.get("ring") or {})}
     self._rec_cfg = {**DEFAULT_RECORDING, **(config.get("recording") or {})}
     # The single always-on capture pipeline (§2.2): one camera/mic open, fanned
-    # out via tee to the ring + vision + audio-level branches, with live +
-    # recording added on demand. Built + started in run().
+    # out via tee to the ring + vision + audio-level branches and the WARM live
+    # encoder (tee_live), with the WHIP sender attached on demand. Built +
+    # started in run().
     self._capture: GstCapturePipeline | None = None
     self._audio_device = (config.get("audio") or {}).get("device", "default")
     # Boot snapshots of the restart-only sections, so a SIGHUP reload (§2.13)
-    # can warn about a change to something it cannot hot-apply.
-    self._boot_srt = srt_cfg or None
+    # can warn about a change to something it cannot hot-apply. The whip
+    # endpoint + the live profile are restart-only like srt/camera were: the
+    # warm live encoder is baked into the capture pipeline at startup.
+    self._boot_whip = whip_cfg or None
+    self._boot_live = config.get("live") or None
     self._boot_camera = cam_cfg or None
     self._boot_mqtt = mqtt_cfg or None
     self._boot_storage = storage_cfg or None
@@ -180,26 +204,22 @@ class VideoApp:
     self._gst_vision = None  # GstVisionPipeline (best-effort spawn in run())
     self._gst_audio = None  # GstAudioPipeline
 
-  def _make_pipeline(self, mode: ModeTriplet, path: str) -> GstLivePipeline:
-    # The live branch attaches to the shared capture pipeline's tee_v (§2.2),
-    # not a standalone pipeline. The capture pipeline must be up.
+  def _make_pipeline(self) -> GstLivePipeline:
+    # The WHIP sender attaches to the shared capture pipeline's tee_live
+    # (§2.2: the live encoder is warm; only the sender is attached on demand).
+    # The capture pipeline must be up. Parameterless: the live profile is a
+    # deploy-time config setting baked into the capture pipeline at startup.
     assert self._capture is not None, "capture pipeline not started"
     return GstLivePipeline(
       sm=self._sm,
       capture=self._capture,
-      mode=mode,
-      path=path,
-      srt_host=self._srt_host,
-      srt_port=self._srt_port,
-      allow_software_encoder=self._allow_software_encoder,
+      whip_endpoint=self._whip_endpoint,
     )
 
-  def _publish_live_state(
-    self, state: LiveStateValue, path: str | None, mode: ModeTriplet | None
-  ) -> None:
+  def _publish_live_state(self, state: LiveStateValue) -> None:
     from fessel_schemas import LiveState
 
-    payload = LiveState(state=state, path=path, mode=mode)
+    payload = LiveState(state=state)
     self._mqtt.publish(
       topics.STATE_LIVE,
       payload.model_dump(),
@@ -207,14 +227,15 @@ class VideoApp:
       retain=topics.RETAIN_STATE,
     )
 
-  def _on_activate(self, _topic: str, cmd: LiveActivate) -> None:
+  def _on_activate(self, _topic: str, _cmd: LiveActivate) -> None:
     # Validated by subscribe_model; a malformed payload was already dropped.
-    log.info("activate path=%s mode=%s", cmd.path, cmd.mode)
-    self._sm.request_activate(cmd.mode, cmd.path)
+    # Parameterless (§2.2): any legacy fields on the wire are ignored.
+    log.info("activate")
+    self._sm.request_activate()
 
-  def _on_deactivate(self, _topic: str, cmd: LiveDeactivate) -> None:
-    log.info("deactivate path=%s", cmd.path)
-    self._sm.request_deactivate(cmd.path)
+  def _on_deactivate(self, _topic: str, _cmd: LiveDeactivate) -> None:
+    log.info("deactivate")
+    self._sm.request_deactivate()
 
   # --- Slice 4: ring buffer (V4.1) -------------------------------------------
 
@@ -252,8 +273,8 @@ class VideoApp:
     hot-swap — a new `recording.*` takes effect on the next recording, a new
     `ring.*` on the next ring (re)spawn (e.g. after a camera blip). The running
     ring is deliberately NOT torn down to apply new params (that would punch a
-    gap in the always-on ring and churn the reserved-core pipeline). srt /
-    camera / mqtt / storage are restart-only; a change is logged."""
+    gap in the always-on ring and churn the reserved-core pipeline). whip /
+    live / camera / mqtt / storage are restart-only; a change is logged."""
     self._ring_cfg = {**DEFAULT_RING, **(cfg.get("ring") or {})}
     self._rec_cfg = {**DEFAULT_RECORDING, **(cfg.get("recording") or {})}
     self._rec_sm.set_start_timeout(float(self._rec_cfg["start_timeout_s"]))
@@ -278,9 +299,13 @@ class VideoApp:
       )
     )
     self._recorder.update_auto_upload(bool(self._anomaly_cfg["auto_upload"]))
-    if cfg.get("srt") != self._boot_srt or cfg.get("camera") != self._boot_camera:
+    if (
+      cfg.get("whip") != self._boot_whip
+      or cfg.get("live") != self._boot_live
+      or cfg.get("camera") != self._boot_camera
+    ):
       log.warning(
-        '{"event":"config_reload","note":"srt/camera changed; restart required to apply"}'
+        '{"event":"config_reload","note":"whip/live/camera changed; restart required to apply"}'
       )
     if cfg.get("mqtt") != self._boot_mqtt or cfg.get("storage") != self._boot_storage:
       log.warning(
@@ -299,8 +324,9 @@ class VideoApp:
 
   def _start_capture(self) -> None:
     """Build + start the single always-on capture pipeline (§2.2): one camera
-    open fanned out via tee to the ring (V4.1), vision (V5.1), and audio-level
-    (V5.6) branches. The live + recording branches attach to its tee on demand.
+    open fanned out via tee to the ring (V4.1), vision (V5.1), audio-level
+    (V5.6), and warm live-encoder branches. The live WHIP sender attaches to
+    its tee_live on demand.
 
     NOT best-effort like the old standalone ring: this pipeline IS the camera,
     so if it fails the whole video plane is down — fail loud so the operator
@@ -314,7 +340,9 @@ class VideoApp:
       ring_segment_seconds=int(self._ring_cfg["segment_seconds"]),
       ring_playlist_length=int(self._ring_cfg["playlist_length"]),
       ring_max_files=int(self._ring_cfg["max_files"]),
-      rec_staging_dir=str(self._storage.rec_staging_dir),
+      live_resolution=str(self._live_cfg["resolution"]),
+      live_fps=int(self._live_cfg["fps"]),
+      live_bitrate_bps=int(self._live_cfg["bitrate_bps"]),
       device=self._device,
       audio_device=str(self._audio_device or "default"),
       use_test_source=self._use_test_source,

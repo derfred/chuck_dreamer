@@ -9,10 +9,9 @@
 // not by an ICE event (WebRTC fires none for "media stopped while ICE up").
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ModeTriplet } from "../../shared/schemas";
 import { config } from "./config";
-import { AuthError, fetchWhepUrl, reauthenticate } from "./api";
-import { startWhep } from "./whep";
+import { AuthError, reauthenticate } from "./api";
+import { deleteWhepSession, startWhep } from "./whep";
 
 export type LiveState =
   | "Idle"
@@ -29,7 +28,7 @@ export interface LiveSession {
   detail: string;
   // Reconnect attempt counter (shown in the Stalled banner).
   attempt: number;
-  start: (mode: ModeTriplet) => void;
+  start: () => void;
   stop: () => void;
   retry: () => void;
 }
@@ -41,7 +40,8 @@ interface Sample {
 }
 
 // Drive the live session for a given <video> element. The caller owns the
-// element ref and the mode selection.
+// element ref. There is no mode: the live profile is fixed (§4.4 — no
+// resolution selector).
 export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): LiveSession {
   const [state, setState] = useState<LiveState>("Idle");
   const [detail, setDetail] = useState<string>("");
@@ -49,7 +49,9 @@ export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): Liv
 
   // Mutable refs so async loops/timers read live values without stale closures.
   const pcRef = useRef<RTCPeerConnection | null>(null);
-  const modeRef = useRef<ModeTriplet | null>(null);
+  // The /whep/{id} resource of the current session (from the Location header);
+  // DELETEd on any teardown so the server releases the viewer promptly.
+  const locationRef = useRef<string | null>(null);
   const stateRef = useRef<LiveState>("Idle");
   const attemptRef = useRef<number>(0);
   const pollRef = useRef<number | null>(null);
@@ -76,7 +78,8 @@ export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): Liv
     }
   }, []);
 
-  // Close the peer connection cleanly. The dead PC is never reused (F2.4).
+  // Close the peer connection cleanly and release the server-side WHEP
+  // resource (fire-and-forget DELETE). The dead PC is never reused (F2.4).
   const closePc = useCallback(() => {
     if (pcRef.current) {
       try {
@@ -85,6 +88,10 @@ export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): Liv
         /* already closed */
       }
       pcRef.current = null;
+    }
+    if (locationRef.current) {
+      deleteWhepSession(locationRef.current);
+      locationRef.current = null;
     }
   }, []);
 
@@ -96,11 +103,10 @@ export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): Liv
     samplesRef.current = [];
   }, [clearTimers, closePc]);
 
-  // Escalate re-authentication. Tear down cleanly first so an already-issued
-  // token's in-flight media isn't left dangling against a closed door (F2.5;
-  // satisfies architecture §4.5 rule 6 — we don't hammer, we tear down). The
-  // app re-navigates so the auth proxy can re-authenticate; it names no login
-  // mechanism (auth is infra's concern).
+  // Escalate re-authentication. Tear down cleanly first so in-flight media
+  // isn't left dangling against a closed door (F2.5; architecture §4.5 — we
+  // don't hammer, we tear down). The app re-navigates so the auth proxy can
+  // re-authenticate; it names no login mechanism (auth is infra's concern).
   const escalateReauth = useCallback(() => {
     teardown();
     setLiveState("Error", "Authentication required — re-authenticating…");
@@ -171,17 +177,23 @@ export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): Liv
     [videoRef, setLiveState],
   );
 
-  // Run one connect attempt: mint a fresh WHEP URL, build a fresh PC, signal,
-  // then enter WaitingForVideo and start polling for first frame / stall.
+  // Run one connect attempt: build a fresh PC, POST the offer same-origin to
+  // /whep, then enter WaitingForVideo and start polling for first frame /
+  // stall. The /whep answer can BLOCK up to the server's activation timeout
+  // (~15s) on the first viewer — Signaling ("Establishing connection…")
+  // deliberately covers that wait.
   const connectOnce = useCallback(
     async (gen: number) => {
-      const mode = modeRef.current;
       const video = videoRef.current;
-      if (!mode || !video || gen !== genRef.current) return;
+      if (!video || gen !== genRef.current) return;
       try {
-        let url: string;
+        let session;
         try {
-          url = await fetchWhepUrl(config.livePath, mode);
+          // Requesting ("Connecting…") covers building the offer; the callback
+          // flips to Signaling when the (possibly ~15s-blocking) POST starts.
+          session = await startWhep(video, () => {
+            if (gen === genRef.current) setLiveState("Signaling");
+          });
         } catch (e) {
           if (e instanceof AuthError) {
             escalateReauth();
@@ -189,14 +201,13 @@ export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): Liv
           }
           throw e;
         }
-        if (gen !== genRef.current) return;
-        setLiveState("Signaling");
-        const pc = await startWhep(url, video);
         if (gen !== genRef.current) {
-          pc.close();
+          session.pc.close();
+          if (session.location) deleteWhepSession(session.location);
           return;
         }
-        pcRef.current = pc;
+        pcRef.current = session.pc;
+        locationRef.current = session.location;
         setLiveState("WaitingForVideo");
         samplesRef.current = [];
 
@@ -238,7 +249,13 @@ export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): Liv
       setAttempt(nextAttempt);
 
       if (nextAttempt > config.reconnectMaxAttempts) {
-        setLiveState("Error", `Reconnect failed after ${config.reconnectMaxAttempts} attempts`);
+        // Giving up: carry the last failure's operator-facing reason (e.g. the
+        // /whep 503/504 differentiated reasons) into the Error display.
+        const suffix = reason ? ` — ${reason}` : "";
+        setLiveState(
+          "Error",
+          `Reconnect failed after ${config.reconnectMaxAttempts} attempts${suffix}`,
+        );
         return;
       }
 
@@ -250,19 +267,15 @@ export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): Liv
     [clearTimers, closePc, setLiveState, connectOnce],
   );
 
-  const start = useCallback(
-    (mode: ModeTriplet) => {
-      teardown();
-      modeRef.current = mode;
-      attemptRef.current = 0;
-      setAttempt(0);
-      genRef.current += 1;
-      const gen = genRef.current;
-      setLiveState("Requesting");
-      void connectOnce(gen);
-    },
-    [teardown, setLiveState, connectOnce],
-  );
+  const start = useCallback(() => {
+    teardown();
+    attemptRef.current = 0;
+    setAttempt(0);
+    genRef.current += 1;
+    const gen = genRef.current;
+    setLiveState("Requesting");
+    void connectOnce(gen);
+  }, [teardown, setLiveState, connectOnce]);
 
   const stop = useCallback(() => {
     teardown();
@@ -273,10 +286,8 @@ export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): Liv
   }, [teardown, setLiveState, videoRef]);
 
   const retry = useCallback(() => {
-    const mode = modeRef.current;
-    if (mode) start(mode);
-    else setLiveState("Idle");
-  }, [start, setLiveState]);
+    start();
+  }, [start]);
 
   // Tear down on unmount so timers/PC don't leak.
   useEffect(() => () => teardown(), [teardown]);

@@ -1,6 +1,6 @@
 """Launch-string + encoder-selection tests.
 
-These no longer require gi/Gst — build_live_launch and encoder_profile are
+These do not require gi/Gst — the launch builders and encoder_profile are
 pure string/dataclass logic; only build_pipeline() touches GStreamer.
 """
 
@@ -10,36 +10,35 @@ from fessel_schemas import ModeTriplet
 from video.pipeline import (
   build_audio_launch,
   build_capture_launch,
-  build_live_launch,
   build_recording_launch,
   build_ring_launch,
   build_vision_launch,
-  live_branch_chain,
+  live_warm_branch,
   recording_branch_chain,
+  whip_sender_chain,
 )
 from video.platform import encoder_profile
 
 MODE = ModeTriplet(resolution="1280x720", fps=30, bitrate_bps=2_500_000)
 
 
-def test_live_launch_has_loadbearing_caps():
-  launch = build_live_launch(
-    mode=MODE, path="pi", srt_host="mediamtx-srt", allow_software_encoder=True
+def _capture_launch(**overrides) -> str:
+  kwargs = dict(
+    mode=MODE,
+    ring_dir="/mnt/ssd/ring",
+    ring_bitrate_bps=2_000_000,
+    ring_segment_seconds=2,
+    ring_playlist_length=10,
+    ring_max_files=12,
+    use_test_source=True,
+    allow_software_encoder=True,
   )
-  assert "streamid=publish:pi" in launch
-  assert "pkt_size=1316" in launch
-  assert "wait-for-connection=false" in launch
-  assert "mpegtsmux" in launch
-  # Load-bearing input cap for any v4l2 encoder negotiation; the I420 cap
-  # is present via the source chain.
-  assert "video/x-raw,format=I420" in launch
-  assert launch.strip().endswith("wait-for-connection=false")
+  kwargs.update(overrides)
+  return build_capture_launch(**kwargs)
 
 
 def test_test_source_avoids_v4l2src():
-  launch = build_live_launch(
-    mode=MODE, path="pi", srt_host="h", use_test_source=True, allow_software_encoder=True
-  )
+  launch = _capture_launch(use_test_source=True)
   assert "videotestsrc" in launch
   assert "v4l2src" not in launch
 
@@ -59,7 +58,7 @@ def test_software_encoder_seam_selects_x264enc():
   prof = encoder_profile(allow_software=True)
   assert prof.element == "x264enc"
   assert prof.is_software is True
-  launch = build_live_launch(mode=MODE, path="pi", srt_host="h", allow_software_encoder=True)
+  launch = _capture_launch(allow_software_encoder=True)
   assert "x264enc" in launch
   assert "v4l2h264enc" not in launch
 
@@ -181,16 +180,7 @@ def test_ring_and_recording_use_their_own_bitrate():
 
 
 def test_capture_launch_opens_one_camera_and_tees_to_always_on_branches():
-  launch = build_capture_launch(
-    mode=MODE,
-    ring_dir="/mnt/ssd/ring",
-    ring_bitrate_bps=2_000_000,
-    ring_segment_seconds=2,
-    ring_playlist_length=10,
-    ring_max_files=12,
-    use_test_source=True,
-    allow_software_encoder=True,
-  )
+  launch = _capture_launch()
   # Exactly ONE video source open, fanned out via a single video tee.
   assert launch.count("videotestsrc") == 1
   assert launch.count("tee name=tee_v") == 1
@@ -202,43 +192,67 @@ def test_capture_launch_opens_one_camera_and_tees_to_always_on_branches():
   # Audio: one mic open, its own tee_a feeding the level branch.
   assert launch.count("tee name=tee_a") == 1
   assert "level name=audio_level" in launch
-  # The on-demand live branch is NOT baked in (added at runtime). Explicit
+  # NO SRT anywhere in the live path any more (§2.2: WHIP replaced it), and
+  # the on-demand WHIP sender is NOT baked in (attached at runtime). Explicit
   # recording is NOT a branch at all (copy-from-ring), so only the ring's sink.
   assert "srtsink" not in launch
+  assert "mpegtsmux" not in launch
+  assert "whipclientsink" not in launch
   assert launch.count("hlssink2") == 1  # only the ring's
   assert "valve" not in launch
 
 
+def test_capture_launch_bakes_in_the_warm_live_encoder():
+  # §2.2 warm-but-detached: the fixed-profile live encoder + tee_live (with a
+  # permanently linked fakesink drop branch) are built into the capture
+  # pipeline, so activation only attaches the WHIP sender (no cold start).
+  launch = _capture_launch(live_resolution="640x360", live_fps=15, live_bitrate_bps=1_000_000)
+  assert launch.count("tee name=tee_live") == 1
+  assert "name=live_enc" in launch
+  # Scaled/rated to the fixed deploy-time live profile off the raw tee.
+  assert "video/x-raw,width=640,height=360,framerate=15/1,format=I420" in launch
+  # Short ~1s GOP for a fast join (x264enc software seam: key-int-max = fps).
+  assert "key-int-max=15" in launch
+  # x264enc bitrate is kbit/s -> the live profile's own bitrate, not the ring's.
+  assert "bitrate=1000 " in launch
+  # The drop branch keeps the warm encoder flowing while unwatched.
+  assert "tee_live. ! queue ! fakesink sync=false" in launch
+
+
 def test_capture_launch_real_camera_opens_v4l2src_once():
-  launch = build_capture_launch(
-    mode=MODE,
-    ring_dir="/r",
-    ring_bitrate_bps=2_000_000,
-    ring_segment_seconds=2,
-    ring_playlist_length=10,
-    ring_max_files=12,
-    device="/dev/video0",
-    use_test_source=False,
-    allow_software_encoder=True,
-  )
+  launch = _capture_launch(ring_dir="/r", device="/dev/video0", use_test_source=False)
   # The whole point of the refactor: the camera is opened exactly once.
   assert launch.count("v4l2src") == 1
   assert launch.count("alsasrc") == 1
 
 
-def test_live_branch_chain_is_sourceless_and_keeps_its_own_encoder():
-  chain = live_branch_chain(
-    mode=MODE, path="pi", srt_host="mediamtx-srt", allow_software_encoder=True
-  )
-  # A sourceless 'queue ! ... ! srtsink' chain to link onto a tee_v request pad.
+def test_whip_sender_chain_is_sourceless_rtp_whip():
+  # The on-demand WHIP sender branch (§2.2/§2.3): a sourceless chain linked
+  # onto a tee_live request pad on activation. whipclientsink owns the WebRTC
+  # session — attaching IS the WHIP handshake.
+  chain = whip_sender_chain(whip_endpoint="http://webui:8001/whip/ingest")
   assert chain.startswith("queue ! ")
-  assert "v4l2src" not in chain and "videotestsrc" not in chain
-  assert "streamid=publish:pi" in chain
-  assert "pkt_size=1316" in chain
-  assert "wait-for-connection=false" in chain
-  # Its own short-GOP encoder, named so the handle can force an IDR.
-  assert "name=live_enc" in chain
-  assert "key-int-max=30" in chain  # gop = fps
+  assert "rtph264pay" in chain
+  assert "whipclientsink" in chain
+  assert 'signaller::whip-endpoint="http://webui:8001/whip/ingest"' in chain
+  # No encoder (it rides the warm live encoder) and no SRT remnants.
+  assert "enc" not in chain
+  assert "srtsink" not in chain and "mpegtsmux" not in chain
+
+
+def test_live_warm_branch_uses_its_own_fixed_profile():
+  branch = live_warm_branch(
+    live_resolution="1280x720",
+    live_fps=15,
+    live_bitrate_bps=1_500_000,
+    allow_software_encoder=True,
+  )
+  assert branch.startswith("tee_v. ! queue ! ")
+  assert "name=live_enc" in branch
+  assert "tee name=tee_live" in branch
+  assert "fakesink sync=false" in branch
+  assert "key-int-max=15" in branch  # ~1s GOP at the live fps
+  assert "bitrate=1500 " in branch  # kbit/s (x264enc seam)
 
 
 def test_recording_branch_chain_is_sourceless_finite_hls():

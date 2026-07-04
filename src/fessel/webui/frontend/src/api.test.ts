@@ -5,8 +5,8 @@
 //   - reauthenticate() re-navigates (reload) so the auth proxy can re-auth,
 //     naming no login endpoint — the app is auth-mechanism agnostic — and a
 //     one-shot guard prevents a reload loop;
-//   - modeToCanonical() matches the Python serialiser EXACTLY, since the signer
-//     (backend) and the URL query must agree on the string.
+//   - modeToCanonical() matches the Python serialiser EXACTLY, since the
+//     recording-start POST body must agree on the string.
 
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -16,7 +16,6 @@ import {
   fetchCapabilities,
   fetchMe,
   fetchState,
-  fetchWhepUrl,
   modeToCanonical,
   postControl,
   reauthenticate,
@@ -70,30 +69,6 @@ describe("reauthenticate", () => {
     clearReauthGuard(); // a later non-401 response resets it
     expect(reauthenticate()).toBe(true);
     expect(globalThis.__reloadCount).toBe(2);
-  });
-});
-
-describe("fetchWhepUrl", () => {
-  it("requests with path+canonical mode and returns the signed url", async () => {
-    const fn = mockFetch(200, { url: "https://media/pi/whep?mode=1280x720@30@2500000&jwt=x" });
-    const url = await fetchWhepUrl("pi", MODE);
-    expect(url).toContain("/pi/whep");
-    const called = fn.mock.calls[0][0] as string;
-    expect(called).toContain("path=pi");
-    // mode is URL-encoded; the @ separators survive as %40.
-    expect(decodeURIComponent(called)).toContain("mode=1280x720@30@2500000");
-  });
-
-  it("throws AuthError on 401 (caller escalates to re-auth, does not retry)", async () => {
-    mockFetch(401, {});
-    await expect(fetchWhepUrl("pi", MODE)).rejects.toBeInstanceOf(AuthError);
-  });
-
-  it("throws a plain Error on other failures (a retryable network fault)", async () => {
-    mockFetch(503, {});
-    const err = await fetchWhepUrl("pi", MODE).catch((e) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect(err).not.toBeInstanceOf(AuthError);
   });
 });
 

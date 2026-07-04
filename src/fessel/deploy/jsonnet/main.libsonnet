@@ -1,7 +1,8 @@
 // Fessel cluster-side deployment library — the single source of truth for
-// mediamtx + webui (+ the test-Pi and Tailscale Services). Owned by the
-// Fessel code (this repo); consumed by bugzoo-infrastructure via a jb git
-// dependency, and by this repo's own integration / live-preview test envs.
+// the Go webui (backend + Pion WHIP/WHEP relay, no more mediamtx) plus the
+// test-Pi and Tailscale Services. Owned by the Fessel code (this repo);
+// consumed by bugzoo-infrastructure via a jb git dependency, and by this
+// repo's own integration / live-preview test envs.
 //
 // Usage:
 //   local fessel = import 'main.libsonnet';
@@ -9,12 +10,12 @@
 //   // objs is a flat array of k8s objects -> render to a YAML stream.
 //
 // One library, three shapes via config.webrtc.mode + includeTestPi +
-// includeTailscale:
-//   production       : nodeport WebRTC, Tailscale Services, real off-cluster Pi
+// includeTailscale + webui.tailscaleSidecar.enabled:
+//   production       : nodeport WebRTC, Tailscale Services + webui sidecar,
+//                      real off-cluster Pi
 //   live-preview     : nodeport WebRTC, in-cluster test-Pi, public ingress
 //   integration test : podip WebRTC, in-cluster test-Pi, no ingress/tailscale
 
-local mediamtxLib = import 'mediamtx.libsonnet';
 local webuiLib = import 'webui.libsonnet';
 local piLib = import 'pi.libsonnet';
 local tailscaleLib = import 'tailscale.libsonnet';
@@ -24,6 +25,10 @@ local minioLib = import 'minio.libsonnet';
   config:: import 'config.libsonnet',
 
   // Namespace object (consumers may skip it if the ns is managed elsewhere).
+  // When cfg.webui.tailscaleSidecar.enabled the namespace must be PodSecurity
+  // `privileged` (the kernel-mode sidecar needs NET_ADMIN + /dev/net/tun);
+  // that label is a cluster-posture decision left to the consumer — see
+  // deploy/README.md.
   namespace(cfg):: {
     apiVersion: 'v1',
     kind: 'Namespace',
@@ -48,7 +53,9 @@ local minioLib = import 'minio.libsonnet';
               { name: 'WEBUI', value: 'http://webui:8000' },
               // The backend's tailnet-only ingest listener (T5.5.3 bypass test).
               { name: 'WEBUI_INGEST', value: 'http://webui:' + std.toString(cfg.ingestPort) },
-              { name: 'MEDIA', value: 'http://mediamtx:8889' },
+              // WHEP signaling now lives on the webui public listener (the
+              // relay is in-process; mediamtx is gone).
+              { name: 'MEDIA', value: 'http://webui:8000' },
               { name: 'SUPERVISOR', value: 'http://supervisor:8443' },
               { name: 'FESSEL_PATH', value: 'pi' },
               { name: 'FESSEL_MODE', value: '640x480@30@1000000' },
@@ -68,18 +75,19 @@ local minioLib = import 'minio.libsonnet';
   // `withNamespace`: include the Namespace object (default true).
   // `withTestJob`: include the driver Job (integration env only).
   objects(cfg, withNamespace=true, withTestJob=false)::
-    local mtx = mediamtxLib(cfg);
     local web = webuiLib(cfg);
     local pi = piLib(cfg);
     local ts = tailscaleLib(cfg);
     local minio = minioLib(cfg);
     (if withNamespace then [$.namespace(cfg)] else [])
-    + [web.secret]
-    + [mtx.configMap, mtx.deployment, mtx.service, mtx.srtService]
-    + (if std.objectHas(mtx, 'webrtcService') then [mtx.webrtcService] else [])
-    + (if std.objectHas(mtx, 'ingress') then [mtx.ingress] else [])
     + (if std.objectHas(web, 'recordingsPvc') then [web.recordingsPvc] else [])
+    + (
+      if std.objectHas(web, 'serviceAccount')
+      then [web.serviceAccount, web.tsStateRole, web.tsStateRoleBinding]
+      else []
+    )
     + [web.deployment, web.service]
+    + (if std.objectHas(web, 'viewerMediaService') then [web.viewerMediaService] else [])
     + (if std.objectHas(web, 'ingress') then [web.ingress] else [])
     + (if cfg.includeTestPi then [pi.deployment, pi.service] else [])
     + (
@@ -88,6 +96,6 @@ local minioLib = import 'minio.libsonnet';
       else []
     )
     + (if cfg.includeMinio then [minio.deployment, minio.service, minio.bucketJob] else [])
-    + (if cfg.includeTailscale then [ts.srtIngress, ts.recordingIngress, ts.supervisorEgress] else [])
+    + (if cfg.includeTailscale then [ts.recordingIngress, ts.supervisorEgress] else [])
     + (if withTestJob then [$.testJob(cfg)] else []),
 }

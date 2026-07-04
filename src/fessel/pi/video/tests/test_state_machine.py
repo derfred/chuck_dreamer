@@ -8,11 +8,9 @@ disconnect-with-backoff.
 
 import time
 
-from fessel_schemas import LiveStateValue, ModeTriplet
+from fessel_schemas import LiveStateValue
 
 from video.state_machine import LiveStateMachine, PipelineHandle
-
-MODE = ModeTriplet(resolution="640x480", fps=30, bitrate_bps=1_000_000)
 
 
 class FakePipeline(PipelineHandle):
@@ -41,10 +39,10 @@ def make_sm():
   sm_box: list = [None]
   states: list[LiveStateValue] = []
 
-  def factory(mode, path):
+  def factory():
     return FakePipeline(live, sm_box)
 
-  def publish(state, path, mode):
+  def publish(state):
     states.append(state)
 
   sm = LiveStateMachine(
@@ -69,13 +67,13 @@ def wait_until(predicate, timeout=2.0):
 def test_activate_to_running_then_deactivate_to_off():
   sm, live, _ = make_sm()
   sm.start()
-  sm.request_activate(MODE, "pi")
+  sm.request_activate()
   assert wait_until(lambda: sm.state is LiveStateValue.starting)
   sm.on_connected()
   assert wait_until(lambda: sm.state is LiveStateValue.running)
   assert len(live) == 1 and live[0].started
 
-  sm.request_deactivate("pi")
+  sm.request_deactivate()
   assert wait_until(lambda: sm.state is LiveStateValue.off)
   assert live[0].stopped
   sm.shutdown()
@@ -84,7 +82,7 @@ def test_activate_to_running_then_deactivate_to_off():
 def test_connect_timeout_returns_to_off():
   sm, live, _ = make_sm()
   sm.start()
-  sm.request_activate(MODE, "pi")
+  sm.request_activate()
   assert wait_until(lambda: sm.state is LiveStateValue.starting)
   # Never call on_connected -> connect_timeout (0.3s) fires -> off.
   assert wait_until(lambda: sm.state is LiveStateValue.off, timeout=2.0)
@@ -95,8 +93,8 @@ def test_no_overlapping_pipelines_under_rapid_cycles():
   sm, live, _ = make_sm()
   sm.start()
   for _ in range(5):
-    sm.request_activate(MODE, "pi")
-    sm.request_deactivate("pi")
+    sm.request_activate()
+    sm.request_deactivate()
   # Settle.
   assert wait_until(lambda: sm.state in (LiveStateValue.off, LiveStateValue.starting))
   time.sleep(0.2)
@@ -107,19 +105,22 @@ def test_no_overlapping_pipelines_under_rapid_cycles():
   sm.shutdown()
 
 
-def test_force_idr_fired_once_per_connect():
-  # V2.2: IDR is forced exactly once when the publisher connects, and an
-  # idempotent re-activate in running does not re-fire it on the same
-  # pipeline (over-triggering can cause bitrate spikes).
+def test_force_idr_fired_once_per_attach():
+  # §2.2/§2.3: the IDR is forced exactly once when the WHIP sender branch is
+  # attached (off -> starting), so the warm encoder's stream starts with a
+  # decodable keyframe. Neither connect nor an idempotent re-activate in
+  # running re-fires it on the same pipeline (over-triggering can cause
+  # bitrate spikes).
   sm, live, _ = make_sm()
   sm.start()
-  sm.request_activate(MODE, "pi")
+  sm.request_activate()
   assert wait_until(lambda: sm.state is LiveStateValue.starting)
+  assert wait_until(lambda: live[0].idr_count == 1)
   sm.on_connected()
   assert wait_until(lambda: sm.state is LiveStateValue.running)
-  assert wait_until(lambda: live[0].idr_count == 1)
+  assert live[0].idr_count == 1
   # Idempotent activate while running must not re-force IDR.
-  sm.request_activate(MODE, "pi")
+  sm.request_activate()
   time.sleep(0.1)
   assert live[0].idr_count == 1
   sm.shutdown()
@@ -128,7 +129,7 @@ def test_force_idr_fired_once_per_connect():
 def test_disconnect_triggers_reconnect_to_starting():
   sm, live, _ = make_sm()
   sm.start()
-  sm.request_activate(MODE, "pi")
+  sm.request_activate()
   assert wait_until(lambda: sm.state is LiveStateValue.starting)
   sm.on_connected()
   assert wait_until(lambda: sm.state is LiveStateValue.running)

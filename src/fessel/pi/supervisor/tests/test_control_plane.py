@@ -151,64 +151,50 @@ def test_healthz(monkeypatch):
     assert "version" in body
 
 
-def test_activate_relays_to_mqtt(monkeypatch):
+def test_activate_relays_to_mqtt_parameterless(monkeypatch):
+  # Parameterless activation (§2.2/§2.9): no body needed, no mode anywhere.
   client, published = make_client(monkeypatch)
   with client:
-    r = client.post("/control/live/activate", json={"path": "pi", "mode": "1280x720@30@2500000"})
+    r = client.post("/control/live/activate")
     assert r.status_code == 200
+    assert r.json()["relayed"] == "activate"
   topics = [p[0] for p in published]
   assert "arm/video/cmd/live/activate" in topics
   activate = next(p for p in published if p[0] == "arm/video/cmd/live/activate")
-  # mode canonical string was parsed into the triplet object on the bus.
-  assert activate[1]["mode"]["resolution"] == "1280x720"
-  assert activate[1]["mode"]["bitrate_bps"] == 2_500_000
+  # The slimmed LiveActivate carries no mode.
+  assert "mode" not in activate[1]
   assert activate[3] is False  # commands not retained
 
 
-def test_activate_rejects_bad_mode(monkeypatch):
-  client, _ = make_client(monkeypatch)
-  with client:
-    r = client.post("/control/live/activate", json={"path": "pi", "mode": "garbage"})
-    assert r.status_code == 400
-
-
-def test_activate_extracts_mode_from_raw_query(monkeypatch):
-  # mediamtx runOnDemand posts the raw WHEP query; supervisor extracts mode.
+def test_activate_ignores_legacy_bodies(monkeypatch):
+  # Legacy callers must still get a 200 — the JSON body is accepted and
+  # IGNORED (the Go relay currently sends {"path": "pi"}; older callers sent
+  # mode / raw-query forms, including garbage).
   client, published = make_client(monkeypatch)
   with client:
-    r = client.post(
-      "/control/live/activate",
-      json={"path": "pi", "query": "mode=640x480@30@1000000&token=abc.def.ghi"},
-    )
-    assert r.status_code == 200
-  activate = next(p for p in published if p[0] == "arm/video/cmd/live/activate")
-  assert activate[1]["mode"]["resolution"] == "640x480"
-
-
-def test_activate_extracts_mode_from_url_encoded_query(monkeypatch):
-  # mediamtx 1.18.2 passes $MTX_QUERY url-encoded, and the browser's WHEP
-  # query is already encoded -> '@' arrives double-encoded as %2540.
-  # supervisor must recover the canonical mode regardless.
-  client, published = make_client(monkeypatch)
-  with client:
-    for q in (
-      "mode=640x480%4030%401000000&jwt=abc",  # value single-encoded
-      "mode=640x480%254030%25401000000&jwt=abc",  # value double-encoded
-      "mode%3D640x480%254030%25401000000%26jwt%3Dabc",  # whole query encoded (1.18.2)
+    for body in (
+      {"path": "pi"},
+      {"path": "pi", "mode": "1280x720@30@2500000"},
+      {"path": "pi", "query": "mode=640x480%4030%401000000&jwt=abc"},
+      {"path": "pi", "mode": "garbage"},
     ):
-      r = client.post("/control/live/activate", json={"path": "pi", "query": q})
-      assert r.status_code == 200, (q, r.json())
-  activate = [p for p in published if p[0] == "arm/video/cmd/live/activate"][-1]
-  assert activate[1]["mode"]["resolution"] == "640x480"
-  assert activate[1]["mode"]["bitrate_bps"] == 1_000_000
+      r = client.post("/control/live/activate", json=body)
+      assert r.status_code == 200, (body, r.json())
+  activates = [p for p in published if p[0] == "arm/video/cmd/live/activate"]
+  assert len(activates) == 4
+  for a in activates:
+    assert "mode" not in a[1]
 
 
 def test_deactivate_relays(monkeypatch):
   client, published = make_client(monkeypatch)
   with client:
+    # Parameterless; a legacy {"path": ...} body is tolerated too.
+    r = client.post("/control/live/deactivate")
+    assert r.status_code == 200
     r = client.post("/control/live/deactivate", json={"path": "pi"})
     assert r.status_code == 200
-  assert any(p[0] == "arm/video/cmd/live/deactivate" for p in published)
+  assert sum(p[0] == "arm/video/cmd/live/deactivate" for p in published) == 2
 
 
 def test_state_live_tracks_history(monkeypatch):

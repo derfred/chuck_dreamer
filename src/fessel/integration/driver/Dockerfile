@@ -1,17 +1,16 @@
-# Test Job image (T1.5): Playwright Chromium driver run HEADED under Xvfb
-# so the browser has an H.264 decoder (the bundled headless build does not;
-# mediamtx would reject the client with "codecs not supported").
+# Test Job image: the WHEP viewer is aiortc — a real Python ICE/DTLS/SRTP
+# peer with an H.264 decoder (via PyAV's bundled ffmpeg), so the driver can
+# assert decoded frames without any browser. The mediamtx-era Chrome/Xvfb
+# machinery is gone: in podip mode the in-process Pion relay and this pod
+# exchange plain pod-IP host candidates, so in-cluster ICE completes.
 #
 # Build context is src/fessel/integration/driver/.
-FROM mcr.microsoft.com/playwright/python:v1.48.0-noble
+FROM python:3.12-slim
 
 WORKDIR /driver
-# Install Google Chrome (has the proprietary H.264 decoder) in addition to
-# Chromium. The bundled Chromium lacks H.264, which mediamtx requires for
-# WHEP; the driver launches with channel=chrome.
-RUN pip install --no-cache-dir playwright==1.48.0 \
-    && python -m playwright install chromium \
-    && python -m playwright install chrome
+# aiortc + deps (av, pylibsrtp, cryptography, ...) all ship manylinux wheels;
+# no compiler or system ffmpeg needed.
+RUN pip install --no-cache-dir aiortc==1.9.0
 
 COPY run_tests.py /driver/run_tests.py
 COPY entrypoint.sh /driver/entrypoint.sh

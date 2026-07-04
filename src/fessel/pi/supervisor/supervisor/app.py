@@ -1,9 +1,10 @@
 """supervisor HTTP control plane + MQTT relay + heartbeat.
 
 Slice 1 gave supervisor a single control-plane job: relay live
-activate/deactivate from mediamtx (over Tailscale) onto the Pi-internal MQTT
-bus. It is NOT an authorization gate — authorization was settled upstream at
-mediamtx's token check.
+activate/deactivate from the cluster-side webui relay (over Tailscale) onto
+the Pi-internal MQTT bus. It is NOT an authorization gate — authorization was
+settled upstream (oauth2-proxy in front of webui); supervisor is a relay, not
+a gate (architecture §2.9).
 
 Slice 3 adds supervisor's *action surface* (§2.4): the operator control
 commands that take real-world action — pause/stop/resume the Jetson, cut and
@@ -15,8 +16,8 @@ Endpoints (authenticated at the network layer by Tailscale identity):
 
   GET  /healthz
   GET  /state                    -> aggregated control-plane state (S3.3)
-  POST /control/live/activate    body {path, mode}  -> arm/video/cmd/live/activate
-  POST /control/live/deactivate  body {path}        -> arm/video/cmd/live/deactivate
+  POST /control/live/activate    parameterless      -> arm/video/cmd/live/activate
+  POST /control/live/deactivate  parameterless      -> arm/video/cmd/live/deactivate
   POST /control/pause            -> Jetson POST /control/pause
   POST /control/stop             -> Jetson POST /control/stop
   POST /control/resume           -> Jetson POST /control/resume
@@ -69,48 +70,6 @@ log = logging.getLogger(__name__)
 # plus the shared `mqtt`/`storage` sections. FESSEL_CONFIG overrides the path.
 CONFIG_PATH = os.environ.get("FESSEL_CONFIG", "/etc/fessel/fessel.yaml")
 HEARTBEAT_INTERVAL_S = 5.0
-
-
-class ActivateRequest(BaseModel):
-  """mediamtx runOnDemand provides path + either the canonical mode string
-  or the raw WHEP query (from which we extract mode). Accepting the raw
-  query avoids fragile shell quote-parsing in the mediamtx runOnDemand
-  command."""
-
-  path: str
-  mode: str | None = None
-  query: str | None = None
-
-  def resolved_mode(self) -> str:
-    if self.mode:
-      return self.mode
-    if self.query:
-      from urllib.parse import parse_qs, unquote
-
-      # mediamtx 1.18.2 url-encodes the ENTIRE $MTX_QUERY string (the '='
-      # and '&' separators become %3D/%26), sometimes on top of the
-      # browser's already-encoded WHEP query. Unquote the whole string until
-      # it has literal separators (or stops changing), THEN parse, THEN
-      # unquote the value's remaining layers. Recovers the canonical mode
-      # ('<W>x<H>@<fps>@<bps>') regardless of how many times it was encoded.
-      q = self.query.lstrip("?")
-      for _ in range(4):
-        if "%3D" not in q.upper() and "%26" not in q.upper():
-          break
-        q = unquote(q)
-      vals = parse_qs(q).get("mode")
-      if vals:
-        v = vals[0]
-        for _ in range(4):
-          if "%" not in v:
-            break
-          v = unquote(v)
-        return v
-    raise ValueError("no mode in request (neither mode nor query[mode])")
-
-
-class DeactivateRequest(BaseModel):
-  path: str
 
 
 class RecordingStartBody(BaseModel):
@@ -433,22 +392,23 @@ def create_app(
     return relay.live_state()
 
   @app.post("/control/live/activate")
-  def live_activate(req: ActivateRequest) -> dict:
-    try:
-      mode = mode_from_canonical(req.resolved_mode())
-    except ValueError as e:
-      raise HTTPException(status_code=400, detail=str(e)) from e
-    cmd = LiveActivate(path=req.path, mode=mode)
-    log.info("relay activate path=%s mode=%s", cmd.path, cmd.mode)
+  def live_activate() -> dict:
+    # Parameterless (architecture §2.2/§2.9): no mode, no path. Any legacy
+    # JSON body a caller still sends ({"path": ...}, {"mode": ...}, the old
+    # raw-query form) is accepted and IGNORED — no body parameter is declared,
+    # so FastAPI never parses or validates it.
+    cmd = LiveActivate()
+    log.info("relay activate")
     relay.publish_activate(cmd)
-    return {"relayed": "activate", "path": cmd.path}
+    return {"relayed": "activate"}
 
   @app.post("/control/live/deactivate")
-  def live_deactivate(req: DeactivateRequest) -> dict:
-    cmd = LiveDeactivate(path=req.path)
-    log.info("relay deactivate path=%s", cmd.path)
+  def live_deactivate() -> dict:
+    # Parameterless; legacy bodies accepted and ignored (see activate).
+    cmd = LiveDeactivate()
+    log.info("relay deactivate")
     relay.publish_deactivate(cmd)
-    return {"relayed": "deactivate", "path": cmd.path}
+    return {"relayed": "deactivate"}
 
   # --- Slice 3 control surface (S3.3, S3.4) ---------------------------------
   # Authenticated at the network layer (Tailscale identity); no app-level auth,
