@@ -13,7 +13,7 @@ local hostnames = if hostnamesRaw == '' then [] else std.split(hostnamesRaw, ','
 
 local cfg = fessel.config + {
   namespace: std.extVar('ns'),
-  images+: { registry: std.extVar('registry'), tag: std.extVar('image_tag') },
+  images+: { registry: std.extVar('registry'), tag: std.extVar('image_tag'), pullPolicy: 'Always' },
   hosts: { webui: 'fessel-live.' + base },
   webrtc+: {
     mode: 'nodeport',
@@ -21,8 +21,16 @@ local cfg = fessel.config + {
     udpNodePort: std.parseInt(std.extVar('udp_nodeport')),
   },
   includeTestPi: true,
+  // The control-plane assertions exercise the Jetson forwarders; without the
+  // mock, pause/resume 503s against a Jetson that doesn't exist here.
+  includeControlMocks: true,
   includeTailscale: false,
-  webui+: { nodeHostnames: hostnames },
+  webui+: {
+    nodeHostnames: hostnames,
+    // No oauth2-proxy in the preview: a real browser sends no identity
+    // headers and would 401 everywhere. The preview is throwaway + TTL'd.
+    devIdentity: 'live-preview-operator',
+  },
 };
 
 {

@@ -26,12 +26,21 @@ type Headers struct {
 	User   string
 	Email  string
 	Groups string
+
+	// DevIdentity, when non-empty, is the identity assumed for requests that
+	// carry NO identity headers — an auth BYPASS for proxy-less throwaway
+	// environments (the live-preview harness). NEVER set in production: with
+	// oauth2-proxy in front, unauthenticated requests must stay 401.
+	DevIdentity string
 }
 
 // Read returns the forwarded operator identity, or nil if unauthenticated.
 func (h Headers) Read(r *http.Request) *Identity {
 	user := r.Header.Get(h.User)
 	if user == "" {
+		if h.DevIdentity != "" {
+			return &Identity{User: h.DevIdentity}
+		}
 		return nil
 	}
 	var groups []string

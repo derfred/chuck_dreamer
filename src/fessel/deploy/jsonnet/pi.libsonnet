@@ -31,6 +31,7 @@ function(cfg) {
           containers: [{
             name: 'pi',
             image: cfg.images.testPi,
+            [if cfg.images.pullPolicy != null then 'imagePullPolicy']: cfg.images.pullPolicy,
             ports: [{ name: 'control', containerPort: 8443, protocol: 'TCP' }],
             env: ingestEnv,
             readinessProbe: {

@@ -68,6 +68,7 @@ spec:
       containers:
         - name: driver
           image: ${REGISTRY}/fessel-test-driver:${IMAGE_TAG}
+          imagePullPolicy: Always  # stable tag, rebuilt each preview
           env:
             - { name: WEBUI, value: "http://webui:8000" }
             - { name: MEDIA, value: "http://webui:8000" }

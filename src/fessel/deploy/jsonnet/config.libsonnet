@@ -23,6 +23,10 @@
 
   images: {
     registry: 'ghcr.io/derfred',
+    // Container imagePullPolicy; null = cluster default (IfNotPresent for
+    // pinned tags). Environments that REUSE a stable tag across rebuilds
+    // (live-preview) must set 'Always' or nodes run stale cached images.
+    pullPolicy: null,
     // Default tag tracks the release version so production (which inherits these
     // defaults from bugzoo-infrastructure) pulls the released image. The test
     // envs still override images.tag via std.extVar('image_tag').
@@ -97,6 +101,10 @@
       // Role/RoleBinding that let the pod get/update it.
       stateSecret: 'fessel-webui-tsstate',
     },
+    // FESSEL_DEV_IDENTITY: auth bypass for PROXY-LESS THROWAWAY environments
+    // (the live-preview harness has no oauth2-proxy, so a real browser could
+    // never authenticate). null = strict header auth. NEVER set in production.
+    devIdentity: null,
     // Pin the webui pod to specific nodes (kubernetes.io/hostname In [...]).
     // Needed when only SOME nodes own the advertised viewer public IPs
     // (externalTrafficPolicy: Local drops media on the others — a pod on a

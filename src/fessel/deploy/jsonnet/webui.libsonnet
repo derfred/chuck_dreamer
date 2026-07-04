@@ -198,9 +198,15 @@ function(cfg)
           containers: [{
             name: 'webui',
             image: cfg.images.webui,
+            [if cfg.images.pullPolicy != null then 'imagePullPolicy']: cfg.images.pullPolicy,
             env: [
               { name: 'FESSEL_INGEST_PORT', value: std.toString(cfg.ingestPort) },
               { name: 'FESSEL_SUPERVISOR_BASE', value: cfg.supervisorBase },
+            ]
+            + (if cfg.webui.devIdentity != null then [
+                 { name: 'FESSEL_DEV_IDENTITY', value: cfg.webui.devIdentity },
+               ] else [])
+            + [
               { name: 'FESSEL_LIVE_ACTIVATION_TIMEOUT_S', value: std.toString(cfg.live.activationTimeoutS) },
               { name: 'FESSEL_LIVE_IDLE_TIMEOUT_S', value: std.toString(cfg.live.idleTimeoutS) },
             ]

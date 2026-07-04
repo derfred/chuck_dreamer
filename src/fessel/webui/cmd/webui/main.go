@@ -107,7 +107,14 @@ func main() {
 	}
 	rly.SetViewerCountHook(ctrl.ViewerCountChanged)
 
-	headers := auth.Headers{User: cfg.AuthUserHeader, Email: cfg.AuthEmailHeader, Groups: cfg.AuthGroupsHeader}
+	headers := auth.Headers{
+		User: cfg.AuthUserHeader, Email: cfg.AuthEmailHeader, Groups: cfg.AuthGroupsHeader,
+		DevIdentity: cfg.DevIdentity,
+	}
+	if cfg.DevIdentity != "" {
+		slog.Warn("AUTH BYPASS ACTIVE: FESSEL_DEV_IDENTITY set — header-less requests are treated as authenticated; never use in production",
+			"identity", cfg.DevIdentity)
+	}
 	public := &server.Public{
 		Auth:       headers,
 		Supervisor: sup,

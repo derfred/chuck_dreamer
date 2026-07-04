@@ -608,6 +608,15 @@ def main() -> int:
     time.sleep(5)  # capture a few segments
     st, _ = webui_post_json("/api/recording/stop")
     assert st == 200, f"recording/stop -> {st}"
+    # Stop is asynchronous: the recording state machine finalises
+    # (stopping -> copy-from-ring -> idle) after the 200. flag-upload guards
+    # with a 409 while the recording is still active, so wait for idle FIRST
+    # (listing alone races finalisation — seen on live-preview).
+    wait_api_state(
+      lambda s: (s.get("recording") or {}).get("state") == "idle",
+      "recording finalised (idle)",
+      timeout=30,
+    )
     wait_recordings(
       lambda recs: any(r["recording_id"] == rid for r in recs),
       f"recording {rid} listed",

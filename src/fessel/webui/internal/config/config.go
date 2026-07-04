@@ -24,6 +24,9 @@ type Config struct {
 	AuthUserHeader   string // FESSEL_AUTH_USER_HEADER, default X-Auth-Request-User
 	AuthEmailHeader  string // FESSEL_AUTH_EMAIL_HEADER, default X-Auth-Request-Email
 	AuthGroupsHeader string // FESSEL_AUTH_GROUPS_HEADER, default X-Auth-Request-Groups
+	// FESSEL_DEV_IDENTITY: assumed identity for header-less requests — an auth
+	// bypass for proxy-less preview environments only. Empty in production.
+	DevIdentity string
 
 	// Supervisor over the cluster->Pi Tailscale egress.
 	SupervisorBase    string        // FESSEL_SUPERVISOR_BASE, default http://supervisor:8443
@@ -64,6 +67,7 @@ func FromEnv() Config {
 		AuthUserHeader:        envStr("FESSEL_AUTH_USER_HEADER", "X-Auth-Request-User"),
 		AuthEmailHeader:       envStr("FESSEL_AUTH_EMAIL_HEADER", "X-Auth-Request-Email"),
 		AuthGroupsHeader:      envStr("FESSEL_AUTH_GROUPS_HEADER", "X-Auth-Request-Groups"),
+		DevIdentity:           strings.TrimSpace(os.Getenv("FESSEL_DEV_IDENTITY")),
 		SupervisorBase:        strings.TrimRight(envStr("FESSEL_SUPERVISOR_BASE", "http://supervisor:8443"), "/"),
 		SupervisorTimeout:     envSeconds("FESSEL_SUPERVISOR_TIMEOUT_S", 10*time.Second),
 		RecordingsBackend:     strings.ToLower(strings.TrimSpace(os.Getenv("FESSEL_RECORDINGS_BACKEND"))),

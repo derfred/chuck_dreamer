@@ -49,6 +49,7 @@ local minioLib = import 'minio.libsonnet';
           containers: [{
             name: 'driver',
             image: cfg.images.registry + '/fessel-test-driver:' + cfg.images.tag,
+            [if cfg.images.pullPolicy != null then 'imagePullPolicy']: cfg.images.pullPolicy,
             env: [
               { name: 'WEBUI', value: 'http://webui:8000' },
               // The backend's tailnet-only ingest listener (T5.5.3 bypass test).
