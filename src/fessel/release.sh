@@ -62,7 +62,9 @@ GREATEST="$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -n1)"
 cd "$FESSEL_ROOT"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 [ "$BRANCH" = "$RELEASE_BRANCH" ] || die "on branch '$BRANCH', expected '$RELEASE_BRANCH'"
-[ -z "$(git status --porcelain)" ] || die "working tree is dirty — commit or stash first"
+# -uno: untracked files can't affect the release (CI builds from the pushed
+# tag); only uncommitted changes to TRACKED content block a release.
+[ -z "$(git status --porcelain -uno)" ] || die "working tree is dirty — commit or stash first"
 TAG="v$VERSION"
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   die "tag $TAG already exists"
