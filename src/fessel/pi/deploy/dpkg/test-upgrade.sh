@@ -35,6 +35,28 @@ NEW_DEB="$FESSEL_ROOT/dist/fessel-monitor_${NEW_VER}_all.deb"
 [ -f "$OLD_DEB" ] || fail "N-1 package not built: $OLD_DEB"
 [ -f "$NEW_DEB" ] || fail "N package not built: $NEW_DEB"
 
+echo "== installing stub gstreamer1.0-plugins-rs-fessel =="
+# fessel-monitor hard-Depends on the cross-built gst-plugins-rs deb (the
+# fail-loud whipclientsink contract). That package is ours, not Debian's, so
+# the hermetic container can't resolve it from apt — install an empty stub
+# that satisfies the Depends. The upgrade test exercises dpkg config
+# semantics, not GStreamer; the real plugin install is covered by the test-pi
+# image build and the integration run.
+STUB_DIR="$(mktemp -d)"
+mkdir -p "$STUB_DIR/pkg/DEBIAN"
+cat > "$STUB_DIR/pkg/DEBIAN/control" <<'EOF'
+Package: gstreamer1.0-plugins-rs-fessel
+Version: 0.0.0-upgrade-test-stub
+Architecture: all
+Maintainer: fessel upgrade test <upgrade-test@invalid>
+Description: hermetic stand-in for the cross-built gst-plugins-rs deb
+ The real package ships libgstrswebrtc.so (whipclientsink) for the Pi; this
+ empty stub only satisfies fessel-monitor's Depends inside the upgrade test.
+EOF
+dpkg-deb --build "$STUB_DIR/pkg" "$STUB_DIR/stub.deb" >/dev/null
+dpkg -i "$STUB_DIR/stub.deb"
+ok "stub plugin package installed"
+
 echo "== installing N-1 =="
 # -f install pulls Depends if the base image lacks them (it has most).
 dpkg -i "$OLD_DEB" || apt-get update && apt-get -f install -y
