@@ -44,9 +44,21 @@ var h264Codec = webrtc.RTPCodecParameters{
 	PayloadType: 102,
 }
 
-// stunConfig is shared by ingest and viewer.
+// stunConfig is the default-gathering fallback (localhost / podip mode).
 var stunConfig = webrtc.Configuration{
 	ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
+}
+
+// pcConfig picks the PeerConnection configuration for a plane. With an
+// explicit NAT1To1 advertisement there is nothing STUN could add — its srflx
+// candidate is the node's SNAT egress on a random port (unreachable inbound,
+// the exact candidate that misleads off-cluster browsers) — and the STUN
+// round-trip delays every non-trickle answer by seconds. Skip it.
+func pcConfig(c ICEConfig) webrtc.Configuration {
+	if len(c.NAT1To1IPs) > 0 {
+		return webrtc.Configuration{}
+	}
+	return stunConfig
 }
 
 // ICEConfig captures how a plane advertises itself:
@@ -85,8 +97,10 @@ type Relay struct {
 
 	sessions atomic.Int64
 
-	ingestAPI *webrtc.API
-	viewerAPI *webrtc.API
+	ingestAPI  *webrtc.API
+	viewerAPI  *webrtc.API
+	ingestConf webrtc.Configuration
+	viewerConf webrtc.Configuration
 
 	metrics *Metrics
 
@@ -112,11 +126,13 @@ func New(ingestICE, viewerICE ICEConfig, metrics *Metrics) (*Relay, error) {
 		metrics = NopMetrics()
 	}
 	return &Relay{
-		ingestAPI: ingestAPI,
-		viewerAPI: viewerAPI,
-		track:     track,
-		viewers:   map[int64]*viewer{},
-		metrics:   metrics,
+		ingestAPI:  ingestAPI,
+		viewerAPI:  viewerAPI,
+		ingestConf: pcConfig(ingestICE),
+		viewerConf: pcConfig(viewerICE),
+		track:      track,
+		viewers:    map[int64]*viewer{},
+		metrics:    metrics,
 	}, nil
 }
 
@@ -173,7 +189,16 @@ func newAPI(se webrtc.SettingEngine) (*webrtc.API, error) {
 	if err := webrtc.RegisterDefaultInterceptors(m, i); err != nil {
 		return nil, err
 	}
-	return webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(i)), nil
+	// WithSettingEngine is what actually applies the NAT1To1 advertisement and
+	// the UDP mux. Omitting it (the prototype's silent bug) leaves every plane
+	// on default gathering — pod-IP host candidates + STUN srflx on ephemeral
+	// ports — which happens to work in-cluster and on loopback, so only a real
+	// off-cluster viewer ever notices.
+	return webrtc.NewAPI(
+		webrtc.WithMediaEngine(m),
+		webrtc.WithInterceptorRegistry(i),
+		webrtc.WithSettingEngine(se),
+	), nil
 }
 
 // --- observability ------------------------------------------------------------
@@ -241,7 +266,7 @@ func (r *Relay) HandleIngestOffer(offer, peer string) (answer string, id int64, 
 	l := slog.With("dir", "ingest", "session", id, "peer", peer)
 	l.Info("WHIP offer received", "bytes", len(offer))
 
-	pc, err := r.ingestAPI.NewPeerConnection(stunConfig)
+	pc, err := r.ingestAPI.NewPeerConnection(r.ingestConf)
 	if err != nil {
 		return "", 0, fmt.Errorf("peerconnection: %w", err)
 	}
@@ -401,7 +426,7 @@ func (r *Relay) HandleViewerOffer(offer, peer string) (answer string, id int64, 
 	l := slog.With("dir", "viewer", "session", id, "peer", peer)
 	l.Info("WHEP offer received", "bytes", len(offer), "ingest_live", r.IngestLive())
 
-	pc, err := r.viewerAPI.NewPeerConnection(stunConfig)
+	pc, err := r.viewerAPI.NewPeerConnection(r.viewerConf)
 	if err != nil {
 		return "", 0, fmt.Errorf("peerconnection: %w", err)
 	}

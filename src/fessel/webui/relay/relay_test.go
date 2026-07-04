@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -204,5 +205,60 @@ func TestWaitIngestTimesOutWithoutIngest(t *testing.T) {
 	defer cancel()
 	if r.WaitIngest(ctx) {
 		t.Fatal("WaitIngest reported live with no ingest")
+	}
+}
+
+// TestViewerAnswerAdvertisesConfiguredCandidates guards the SettingEngine
+// wiring (WithSettingEngine): with a NAT1To1 IP + UDP mux configured on the
+// viewer plane, the WHEP answer must advertise exactly that IP on exactly the
+// mux port as a host candidate — NOT the default-gathered interface addresses
+// on ephemeral ports. (The prototype dropped the SettingEngine silently; every
+// in-cluster path still worked, only real off-cluster browsers broke.)
+func TestViewerAnswerAdvertisesConfiguredCandidates(t *testing.T) {
+	r, err := New(ICEConfig{}, ICEConfig{NAT1To1IPs: []string{"203.0.113.7"}, UDPMuxPort: 39877}, NopMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo,
+		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gather := webrtc.GatheringCompletePromise(pc)
+	if err := pc.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	<-gather
+
+	answer, id, err := r.HandleViewerOffer(pc.LocalDescription().SDP, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.CloseViewer(id)
+	if !strings.Contains(answer, "203.0.113.7 39877 typ host") {
+		t.Fatalf("answer lacks the advertised host candidate on the mux port:\n%s", answer)
+	}
+	// SetNAT1To1IPs replaces IPv4 host candidates only; IPv6 hosts may remain
+	// (harmless extras). Assert no OTHER IPv4 host candidate leaks and that
+	// every candidate sits on the mux port.
+	for _, line := range strings.Split(answer, "\n") {
+		if !strings.HasPrefix(line, "a=candidate") {
+			continue
+		}
+		if strings.Contains(line, "typ host") && strings.Count(line, ".") >= 3 &&
+			!strings.Contains(line, "203.0.113.7") {
+			t.Fatalf("answer leaks a non-advertised IPv4 host candidate: %s", line)
+		}
+		if !strings.Contains(line, " 39877 typ") {
+			t.Fatalf("candidate not on the mux port: %s", line)
+		}
 	}
 }
