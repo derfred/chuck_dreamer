@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -410,5 +412,51 @@ func TestPublicListenerHasNoIngestRoute(t *testing.T) {
 	w = do(t, h, "POST", "/whip/ingest", "v=0", true)
 	if w.Code != 404 && w.Code != 405 {
 		t.Fatalf("whip ingest reachable on public listener: %d", w.Code)
+	}
+}
+
+// --- SPA static serving + client-route fallback --------------------------------
+
+// The frontend is a client-side-routed SPA (Monitor `/`, Footage `/footage`).
+// The static handler must serve real assets as-is but fall back to index.html
+// for unknown paths, so a hard refresh or deep-link on a client route (or
+// oauth2-proxy redirecting back to it) boots the SPA instead of 404ing.
+func TestSPAStaticFallback(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<!doctype html>SPA"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "assets", "app.js"), []byte("console.log(1)"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := newPublic(newFakeSupervisor(), nil)
+	p.StaticDir = dir
+	h := p.Handler()
+
+	// A client route that has no file on disk serves index.html (200), not 404.
+	w := do(t, h, "GET", "/footage", "", true)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "SPA") {
+		t.Fatalf("client route fallback: %d %q", w.Code, w.Body.String())
+	}
+
+	// The root serves index.html.
+	if w := do(t, h, "GET", "/", "", true); w.Code != 200 || !strings.Contains(w.Body.String(), "SPA") {
+		t.Fatalf("root: %d %q", w.Code, w.Body.String())
+	}
+
+	// A real asset is served as itself, not the index fallback.
+	w = do(t, h, "GET", "/assets/app.js", "", true)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "console.log") {
+		t.Fatalf("asset: %d %q", w.Code, w.Body.String())
+	}
+
+	// An unauthenticated API path still 401s — the SPA fallback must not swallow
+	// API routes (they are registered as more specific patterns and win).
+	if w := do(t, h, "GET", "/api/me", "", false); w.Code != 401 {
+		t.Fatalf("api route swallowed by SPA fallback: %d", w.Code)
 	}
 }

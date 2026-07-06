@@ -30,6 +30,7 @@ import {
   type ControlAction,
 } from "./api";
 import { config } from "./config";
+import { navigate } from "./nav";
 import { Sparkline } from "./Sparkline";
 
 type ButtonStatus =
@@ -78,7 +79,11 @@ const ACTIONS: ActionDef[] = [
   { action: "poweron/jetson", label: "Power on Jetson", destructive: false },
 ];
 
-export function Dashboard() {
+// `embedded` renders the sensing + controls without the standalone "Fessel"
+// heading and outer padding — used inside the Monitor side rail. Standalone
+// (default) keeps the original page chrome so the direct-render tests are
+// unaffected.
+export function Dashboard({ embedded = false }: { embedded?: boolean } = {}) {
   const [state, setState] = useState<StateResponse | null>(null);
   const [stateError, setStateError] = useState<boolean>(false);
   const [statuses, setStatuses] = useState<Record<string, ButtonStatus>>({});
@@ -166,8 +171,8 @@ export function Dashboard() {
   }, [pending, run]);
 
   return (
-    <div style={{ padding: 16 }}>
-      <h1>Fessel</h1>
+    <div style={{ padding: embedded ? 0 : 16 }}>
+      {!embedded && <h1>Fessel</h1>}
 
       {stateError && (
         <div
@@ -344,13 +349,6 @@ function fmtAge(seconds: number): string {
   return `${Math.floor(seconds / 3600)}h`;
 }
 
-// SPA navigation mirror of App.tsx's navigate (kept local to avoid a shared
-// router dependency for a two-route app).
-function navigate(to: string): void {
-  window.history.pushState({}, "", to);
-  window.dispatchEvent(new PopStateEvent("popstate"));
-}
-
 // --- sensing strip (F5.1) ----------------------------------------------------
 // Live activity score (sparkline of the last ~60s) + audio level meter +
 // vision/audio health pills. A quick-glance health strip, NOT the live video
@@ -508,8 +506,8 @@ function AnomalyRow({ entry }: { entry: AnomalyLogEntry }) {
       {entry.cleared ? <span style={{ color: "#999" }}>(cleared)</span> : null}
       {rid ? (
         <a
-          href="/recordings"
-          onClick={(e) => (e.preventDefault(), navigate("/recordings"))}
+          href="/footage"
+          onClick={(e) => (e.preventDefault(), navigate("/footage"))}
           style={{ marginLeft: "auto" }}
         >
           View recording →

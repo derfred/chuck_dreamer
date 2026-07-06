@@ -1,18 +1,19 @@
-// App shell + lightweight routing (F2.1). Two routes: `/` (dashboard
-// placeholder, filled in later slices) and `/live`. No router dependency —
-// the app is tiny; path-based switch is enough.
+// App shell + lightweight routing. Two routes: `/` (Monitor — live-view +
+// controls) and `/footage` (ring buffer + recordings). No router dependency —
+// the app is a two-route shell; a path-based switch is enough.
 //
 // The shell trusts that oauth2-proxy already authenticated the request that
 // served this page (the app is served from behind the proxy). It displays the
-// operator identity from /api/me; a 401 anywhere means the session lapsed, so
-// it hands off to the proxy's login flow rather than rendering a broken shell.
+// operator identity from /api/me and the Pi-connection health light; a 401
+// anywhere means the session lapsed, so it hands off to the proxy's login flow
+// rather than rendering a broken shell.
 
 import { useEffect, useState } from "react";
 import { AuthError, fetchMe, reauthenticate, type Identity } from "./api";
-import { Dashboard } from "./Dashboard";
-import { Live } from "./Live";
-import { Recordings } from "./Recordings";
-import { Ring } from "./Ring";
+import { Footage } from "./Footage";
+import { Monitor } from "./Monitor";
+import { navigate } from "./nav";
+import { PiHealthIndicator } from "./PiHealthIndicator";
 
 function usePath(): string {
   const [path, setPath] = useState<string>(window.location.pathname);
@@ -24,10 +25,10 @@ function usePath(): string {
   return path;
 }
 
-function navigate(to: string): void {
-  window.history.pushState({}, "", to);
-  window.dispatchEvent(new PopStateEvent("popstate"));
-}
+const NAV: { path: string; label: string }[] = [
+  { path: "/", label: "Monitor" },
+  { path: "/footage", label: "Footage" },
+];
 
 export function App() {
   const path = usePath();
@@ -48,27 +49,54 @@ export function App() {
       <header
         style={{
           display: "flex",
-          justifyContent: "space-between",
           alignItems: "center",
-          padding: "8px 16px",
+          gap: 18,
+          padding: "10px 16px",
           borderBottom: "1px solid #ddd",
         }}
       >
-        <nav style={{ display: "flex", gap: 12 }}>
-          <a href="/" onClick={(e) => (e.preventDefault(), navigate("/"))}>
-            Dashboard
-          </a>
-          <a href="/live" onClick={(e) => (e.preventDefault(), navigate("/live"))}>
-            Live
-          </a>
-          <a href="/ring" onClick={(e) => (e.preventDefault(), navigate("/ring"))}>
-            Ring
-          </a>
-          <a href="/recordings" onClick={(e) => (e.preventDefault(), navigate("/recordings"))}>
-            Recordings
-          </a>
+        <span style={{ display: "flex", alignItems: "center", gap: 9, fontWeight: 700 }}>
+          <span
+            style={{
+              width: 9,
+              height: 9,
+              borderRadius: "50%",
+              background: "#17967a",
+              boxShadow: "0 0 0 3px rgba(23,150,122,0.22)",
+            }}
+            aria-hidden
+          />
+          Fessel
+        </span>
+        <nav style={{ display: "flex", gap: 4 }}>
+          {NAV.map((n) => {
+            const active = n.path === "/" ? path === "/" : path.startsWith(n.path);
+            return (
+              <a
+                key={n.path}
+                href={n.path}
+                aria-current={active ? "page" : undefined}
+                onClick={(e) => (e.preventDefault(), navigate(n.path))}
+                style={{
+                  fontSize: 14,
+                  fontWeight: 550,
+                  textDecoration: "none",
+                  color: active ? "#16211f" : "#5a6b68",
+                  background: active ? "#eef1f3" : "transparent",
+                  padding: "7px 13px",
+                  borderRadius: 8,
+                }}
+              >
+                {n.label}
+              </a>
+            );
+          })}
         </nav>
-        <span style={{ color: "#666", fontSize: 13 }}>{identity ? identity.user : "…"}</span>
+        <span style={{ flex: 1 }} />
+        <PiHealthIndicator />
+        <span style={{ color: "#8a9895", fontSize: 13, fontFamily: "monospace" }}>
+          {identity ? identity.user : "…"}
+        </span>
       </header>
 
       {route(path)}
@@ -77,8 +105,6 @@ export function App() {
 }
 
 function route(path: string) {
-  if (path === "/live") return <Live />;
-  if (path === "/ring") return <Ring />;
-  if (path === "/recordings") return <Recordings />;
-  return <Dashboard />;
+  if (path.startsWith("/footage")) return <Footage />;
+  return <Monitor />;
 }

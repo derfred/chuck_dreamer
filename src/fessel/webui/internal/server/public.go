@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -224,12 +225,37 @@ func (p *Public) Handler() http.Handler {
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	// Serve the built React app at / when present (single-image deploy). The
-	// API routes above are more specific, so they take precedence.
+	// API routes above are more specific, so they take precedence. Unknown paths
+	// fall back to index.html so the client-side router owns them — a hard
+	// refresh or deep-link on /footage (or oauth2-proxy redirecting back to it)
+	// must serve the SPA, not 404.
 	if st, err := os.Stat(p.StaticDir); err == nil && st.IsDir() {
-		mux.Handle("/", http.FileServer(http.Dir(p.StaticDir)))
+		mux.Handle("/", spaFileServer(p.StaticDir))
 	}
 
 	return mux
+}
+
+// spaFileServer serves static assets from dir, falling back to index.html for
+// any path that doesn't map to an existing file. This makes client-side routes
+// (/footage) deep-linkable and refresh-safe. It only sees non-API paths: the
+// /api, /whep and /metrics routes are registered with more specific patterns,
+// so Go's mux dispatches those before this catch-all "/" handler.
+func spaFileServer(dir string) http.Handler {
+	fs := http.FileServer(http.Dir(dir))
+	index := filepath.Join(dir, "index.html")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Map the request path to an on-disk file. A real asset (index.html,
+		// /assets/*.js, favicon) is served as-is; anything else is a client
+		// route and gets index.html so the SPA boots and routes in the browser.
+		clean := filepath.Clean(r.URL.Path)
+		full := filepath.Join(dir, filepath.FromSlash(clean))
+		if info, err := os.Stat(full); err == nil && !info.IsDir() {
+			fs.ServeHTTP(w, r)
+			return
+		}
+		http.ServeFile(w, r, index)
+	})
 }
 
 // handleWHEP is the viewer signaling endpoint. It sits behind oauth2-proxy:

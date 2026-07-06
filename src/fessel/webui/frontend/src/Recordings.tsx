@@ -21,7 +21,10 @@ import {
 import { config } from "./config";
 import { useHls } from "./useHls";
 
-export function Recordings() {
+// `embedded` drops the standalone "Fessel — Recordings" heading and outer
+// padding so the table can sit inside the Footage page under its own heading.
+// Standalone (default) preserves the original chrome for the direct-render tests.
+export function Recordings({ embedded = false }: { embedded?: boolean } = {}) {
   const [items, setItems] = useState<RecordingItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState<RecordingItem | null>(null);
@@ -93,8 +96,8 @@ export function Recordings() {
   );
 
   return (
-    <div style={{ padding: 16 }}>
-      <h1>Fessel — Recordings</h1>
+    <div style={{ padding: embedded ? 0 : 16 }}>
+      {!embedded && <h1>Fessel — Recordings</h1>}
       {error && (
         <div style={{ background: "#f5deb3", padding: "4px 8px", fontSize: 13 }} role="status">
           Could not load recordings — retrying…
@@ -104,7 +107,7 @@ export function Recordings() {
         <p style={{ color: "#666" }}>Loading…</p>
       ) : items.length === 0 ? (
         <p style={{ color: "#666" }}>
-          No recordings yet. Start one from the dashboard with “Start recording”.
+          No recordings yet. Start one from Monitor with “Start recording”.
         </p>
       ) : (
         <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 960 }}>

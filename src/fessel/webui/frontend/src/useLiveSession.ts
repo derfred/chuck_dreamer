@@ -289,6 +289,22 @@ export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): Liv
     start();
   }, [start]);
 
+  // Bandwidth safeguard: stop the live stream when the tab is hidden. Live is
+  // the only surface that holds a dedicated WebRTC stream open, so a
+  // backgrounded tab must not keep paying for frames nobody is watching. Only
+  // fires when a session is actually active (not Idle/Error) — hiding the tab on
+  // the Ring/idle view is a no-op. Navigating away unmounts the component, which
+  // the unmount effect below already tears down.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden && stateRef.current !== "Idle" && stateRef.current !== "Error") {
+        stop();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [stop]);
+
   // Tear down on unmount so timers/PC don't leak.
   useEffect(() => () => teardown(), [teardown]);
 

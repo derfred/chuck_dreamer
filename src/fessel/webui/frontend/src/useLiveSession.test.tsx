@@ -280,3 +280,45 @@ describe("first-frame timeout + stop", () => {
     expect(h.result.current.state).toBe("Idle");
   });
 });
+
+// Fire a visibilitychange with document.hidden set to `hidden`.
+function setHidden(hidden: boolean) {
+  Object.defineProperty(document, "hidden", { value: hidden, configurable: true });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
+describe("bandwidth safeguard: stop live when the tab is hidden", () => {
+  it("tears the stream down on tab-hide and stays Idle", async () => {
+    const fetchMock = mockWhepOk("/whep/42");
+    const h = mountSession();
+    await reachPlaying(h);
+    const p = pc();
+
+    // Tab goes to the background: the dedicated WebRTC stream must not keep
+    // running for frames nobody is watching.
+    await act(async () => {
+      setHidden(true);
+    });
+    expect(h.result.current.state).toBe("Idle");
+    expect(p.closed).toBe(true);
+    // The WHEP viewer resource is released (DELETE), same as an explicit stop().
+    const deletes = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit | undefined)?.method === "DELETE",
+    );
+    expect(deletes.some((c) => c[0] === "/whep/42")).toBe(true);
+
+    setHidden(false);
+  });
+
+  it("is a no-op when idle (nothing to tear down)", async () => {
+    mockWhepOk();
+    const h = mountSession();
+    expect(h.result.current.state).toBe("Idle");
+    // Hiding the tab on the idle/Ring view must not do anything.
+    await act(async () => {
+      setHidden(true);
+    });
+    expect(h.result.current.state).toBe("Idle");
+    setHidden(false);
+  });
+});
