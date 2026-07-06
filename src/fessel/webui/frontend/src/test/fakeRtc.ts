@@ -24,7 +24,7 @@ export class FakeRTCPeerConnection {
   bytesReceived = 0;
   iceConnectionState: RTCIceConnectionState = "connected";
   closed = false;
-  ontrack: ((ev: { streams: MediaStream[] }) => void) | null = null;
+  ontrack: ((ev: { track: MediaStreamTrack; streams: MediaStream[] }) => void) | null = null;
 
   private localSdp = "v=0\r\n";
 
@@ -45,9 +45,19 @@ export class FakeRTCPeerConnection {
   }
 
   async setRemoteDescription(_d: RTCSessionDescriptionInit): Promise<void> {
-    // The track "arrives" once the answer is applied; deliver a stream so the
-    // caller wires up <video>.srcObject exactly as in production.
-    this.ontrack?.({ streams: [{} as MediaStream] });
+    // Tracks "arrive" once the answer is applied. Model the real answer shape:
+    // ontrack fires once per m-line — the video track AND the relay's inactive
+    // Opus section — with the video track FIRST, so an ontrack handler that
+    // lets any track claim <video>.srcObject ends up holding the audio-only
+    // stream (the production black-screen race; whep.ts must filter by kind).
+    this.ontrack?.({
+      track: { kind: "video" } as MediaStreamTrack,
+      streams: [{} as MediaStream],
+    });
+    this.ontrack?.({
+      track: { kind: "audio" } as MediaStreamTrack,
+      streams: [{} as MediaStream],
+    });
   }
 
   getStats(): Promise<Map<string, FakeStat>> {

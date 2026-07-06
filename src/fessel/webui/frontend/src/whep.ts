@@ -54,6 +54,14 @@ export async function startWhep(
   pc.addTransceiver("audio", { direction: "recvonly" });
 
   pc.ontrack = (ev) => {
+    // ontrack fires once per m-line — including the relay's inactive Opus
+    // section (present for WHEP-client compat; no audio is ever relayed).
+    // Only the video track may claim the element: srcObject is a single-track
+    // stream, so an unconditional assignment lets whichever track fires LAST
+    // win — when that's the audio track the element holds an audio-only
+    // stream and shows black (videoWidth 0, currentTime frozen). The firing
+    // order is unspecified, which made this a per-browser/per-run race.
+    if (ev.track.kind !== "video") return;
     // Wrap the receiver's track in a LOCALLY-constructed MediaStream instead
     // of using the remote-announced ev.streams[0]: Firefox decodes the track
     // either way (getStats framesDecoded advances) but never paints frames
