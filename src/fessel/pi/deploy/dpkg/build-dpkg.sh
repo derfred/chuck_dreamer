@@ -66,6 +66,9 @@ install -d "$STAGE/usr/bin"
 install -m 755 "$HERE/bin/fessel-supervisor" "$STAGE/usr/bin/fessel-supervisor"
 install -m 755 "$HERE/bin/fessel-video"      "$STAGE/usr/bin/fessel-video"
 install -m 755 "$HERE/bin/fessel-uploader"   "$STAGE/usr/bin/fessel-uploader"
+# Channel switch (stable <-> edge/prerelease); a POSIX shell script, not a
+# Python launcher. See pi/deploy/apt/README.md "Edge channel".
+install -m 755 "$HERE/bin/fessel-channel"    "$STAGE/usr/bin/fessel-channel"
 
 # --- systemd units (source filenames match the installed fessel-* names;
 # mosquitto ships from the .example which the package treats as the real unit) ---

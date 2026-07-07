@@ -6,7 +6,9 @@ plain files under `/opt/fessel/lib` and relies on Debian **trixie** `python3-*`
 packages (no venv, no pip).
 
 Repo URL: `https://derfred.github.io/chuck_dreamer`
-Layout: flat — suite `stable`, component `main`, architecture `all`.
+Layout: suite `stable`, components `main` (real releases) + `prerelease`
+(edge/rc builds — see [Edge channel](#edge-channel-prereleases)), architectures
+`all` + `arm64`.
 
 ## Pi onboarding (one-time)
 
@@ -44,12 +46,62 @@ sudo apt install fessel-monitor=0.1.0
   `pi/deploy/dpkg/build-dpkg.sh`), adds it to the repo's `pool/`, regenerates +
   GPG-signs `dists/stable/{Release,Release.gpg,InRelease}`, and pushes the
   updated tree to the `gh-pages` branch.
-- Manual fallback: run the workflow with an explicit `version` input.
+- Manual fallback: run the `fessel release` workflow with **no**
+  `prerelease_suffix` — it builds from the current `schemas/pyproject.toml`
+  version into `main`, same as a tag push.
 - `gstreamer1.0-plugins-rs-fessel` (the WHIP uplink plugins, arm64) is
   published into the SAME repo by its own workflow — it versions on
   gst-plugins-rs upstream + the Pi's GStreamer minor, not on Fessel releases.
   See `pi/deploy/gst-plugins-rs/README.md`. The two publish jobs share a
   `concurrency: fessel-apt-repo` group so gh-pages pushes never race.
+
+## Edge channel (prereleases)
+
+The **edge** channel lets you push a build to the Pi **and** the cluster without
+cutting a real release — no `pyproject` bump, no `vX.Y.Z` tag. It's the repo's
+second component, `prerelease`, kept entirely separate from `main` so a stable
+Pi never sees an edge build unless it opts in.
+
+### Cut a prerelease (maintainer)
+
+Actions → **fessel release** → *Run workflow* → set **`prerelease_suffix`**
+(e.g. `rc1`). The effective version is `<pyproject>-<suffix>`:
+
+- Pi dpkg: `fessel-monitor_0.5.0~rc1_all.deb`, published into the `prerelease`
+  component. The `~` makes `0.5.0~rc1` sort **below** the stable `0.5.0`, so the
+  eventual real release cleanly supersedes it.
+- Cluster image: `ghcr.io/<owner>/fessel-webui:0.5.0-rc1` (Docker tags forbid
+  `~`, so the image uses `-`). No `:latest`/stable pointer is moved. Deploy it
+  by pinning that tag in the cluster manifest.
+
+Leave `prerelease_suffix` empty for a normal release into `main`.
+
+### Opt a Pi into edge
+
+Use the `fessel-channel` helper (shipped in `/usr/bin` by the package):
+
+```sh
+sudo fessel-channel edge      # add the `prerelease` component + pin, apt update
+sudo apt upgrade              # now tracks the newest prerelease
+sudo fessel-channel status    # show active channel + installed version
+```
+
+`edge` installs `/etc/apt/preferences.d/fessel-edge` pinning the `prerelease`
+component to priority 1001. That pin — not the version number — is what makes
+`apt upgrade` prefer an rc (whose version sorts *below* stable); without it,
+merely listing the component would never pull one. So edge is a channel that
+**auto-tracks the newest prerelease**, not a per-version manual pin.
+
+### Return a Pi to stable
+
+```sh
+sudo fessel-channel stable    # remove the pin + component, apt update
+# if the box is currently on a prerelease, step it back down explicitly:
+sudo apt install --allow-downgrades fessel-monitor
+```
+
+(You can still pin one exact prerelease by hand without switching channels:
+`sudo apt install fessel-monitor=0.5.0~rc1` — note the `~`.)
 
 ## Signing key (one-time setup, done by a maintainer)
 

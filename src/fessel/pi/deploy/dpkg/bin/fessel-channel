@@ -1,0 +1,107 @@
+#!/bin/sh
+# fessel-channel — switch a Pi between the `stable` and `edge` (prerelease)
+# release channels of the Fessel apt repo, installed to /usr/bin by the dpkg.
+#
+#   fessel-channel edge     opt into edge: add the `prerelease` component to the
+#                           apt source AND install a pin so `apt upgrade`
+#                           auto-tracks the newest prerelease, then apt update.
+#   fessel-channel stable   leave edge: remove the pin and the `prerelease`
+#                           component, then apt update. `apt upgrade` falls back
+#                           to the newest stable release.
+#   fessel-channel status   print the active channel + installed version.
+#
+# WHY A PIN, not just the component: a prerelease version sorts BELOW its
+# stable (dpkg: 0.5.0~rc1 < 0.5.0), so merely listing `prerelease` would never
+# make apt prefer an rc. /etc/apt/preferences.d/fessel-edge raises the
+# prerelease component to priority 1001 (> the default 990), so it wins
+# regardless of version order — that is what makes "edge" a channel that
+# auto-tracks the newest build instead of a per-version manual pin. Removing
+# the file restores normal priority and the box returns to stable.
+set -eu
+
+SOURCE_LIST="/etc/apt/sources.list.d/fessel.list"
+PIN_FILE="/etc/apt/preferences.d/fessel-edge"
+PKG="fessel-monitor"
+
+require_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "fessel-channel: must run as root (try: sudo fessel-channel $*)" >&2
+    exit 1
+  fi
+}
+
+# Does the fessel source line currently list the `prerelease` component?
+has_prerelease_component() {
+  [ -f "$SOURCE_LIST" ] && grep -Eq '(^|[[:space:]])prerelease([[:space:]]|$)' "$SOURCE_LIST"
+}
+
+# Append `prerelease` to the component list of every `deb ...` line that
+# doesn't already have it. The components are the whitespace-separated tokens
+# after the URL and suite; appending one more is a safe, idempotent edit.
+add_prerelease_component() {
+  [ -f "$SOURCE_LIST" ] || {
+    echo "fessel-channel: $SOURCE_LIST not found — onboard the Pi first (see apt/README.md)" >&2
+    exit 1
+  }
+  has_prerelease_component && return 0
+  # Append the word to each active (non-comment) deb line.
+  sed -i -E '/^[[:space:]]*deb[[:space:]]/{/(^|[[:space:]])prerelease([[:space:]]|$)/!s/[[:space:]]*$/ prerelease/}' "$SOURCE_LIST"
+}
+
+remove_prerelease_component() {
+  [ -f "$SOURCE_LIST" ] || return 0
+  # Drop a standalone `prerelease` token (with surrounding spaces) from deb lines.
+  sed -i -E 's/([[:space:]])prerelease([[:space:]]|$)/\1/g; s/[[:space:]]+$//' "$SOURCE_LIST"
+}
+
+write_pin() {
+  cat > "$PIN_FILE" <<EOF
+# Installed by \`fessel-channel edge\`. Makes the Fessel apt repo's
+# \`prerelease\` component win over \`stable\` so \`apt upgrade\` auto-tracks the
+# newest prerelease of $PKG, even though a prerelease version sorts below its
+# stable release. Remove this file (or run \`fessel-channel stable\`) to return
+# to the stable channel.
+Package: $PKG
+Pin: release c=prerelease
+Pin-Priority: 1001
+EOF
+}
+
+case "${1:-}" in
+  edge)
+    require_root "$@"
+    add_prerelease_component
+    write_pin
+    echo "fessel-channel: switched to EDGE. Updating apt…"
+    apt-get update
+    echo "fessel-channel: now on edge. 'apt upgrade' will track the newest prerelease."
+    echo "  apt-get upgrade        # pull the latest edge build now"
+    ;;
+  stable)
+    require_root "$@"
+    rm -f "$PIN_FILE"
+    remove_prerelease_component
+    echo "fessel-channel: switched to STABLE. Updating apt…"
+    apt-get update
+    echo "fessel-channel: now on stable. 'apt upgrade' tracks stable releases."
+    echo "  # to move a box already on a prerelease back down to stable:"
+    echo "  apt-get install --allow-downgrades $PKG"
+    ;;
+  status)
+    if [ -f "$PIN_FILE" ] && has_prerelease_component; then
+      echo "channel: edge (prerelease pin active)"
+    elif [ -f "$PIN_FILE" ] || has_prerelease_component; then
+      echo "channel: edge (INCONSISTENT — run 'fessel-channel edge' or 'stable' to reconcile)"
+    else
+      echo "channel: stable"
+    fi
+    if command -v dpkg-query >/dev/null 2>&1; then
+      ver="$(dpkg-query -W -f='${Version}' "$PKG" 2>/dev/null || true)"
+      [ -n "$ver" ] && echo "installed: $PKG $ver" || echo "installed: $PKG (not installed)"
+    fi
+    ;;
+  *)
+    echo "usage: fessel-channel {edge|stable|status}" >&2
+    exit 2
+    ;;
+esac

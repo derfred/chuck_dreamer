@@ -8,4 +8,15 @@ if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
   systemctl stop fessel-mosquitto.service || true
 fi
 
+# On full removal, drop the edge pin `fessel-channel edge` may have written at
+# runtime (it isn't a packaged file, so dpkg won't clean it up). Leave it in
+# place on upgrade ($1 = "upgrade") so an edge box stays on edge across
+# upgrades. The `prerelease` source-list component is an operator edit to a
+# conffile-adjacent file; we don't touch it.
+case "${1:-}" in
+  remove|purge)
+    rm -f /etc/apt/preferences.d/fessel-edge
+    ;;
+esac
+
 exit 0
