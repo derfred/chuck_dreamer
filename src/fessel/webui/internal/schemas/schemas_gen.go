@@ -12,7 +12,8 @@ type ModeTriplet struct {
 }
 
 type Capabilities struct {
-	Modes []ModeTriplet `json:"modes"`
+	RecordingMode      ModeTriplet `json:"recording_mode"`
+	MaxLookbackSeconds float64     `json:"max_lookback_seconds"`
 }
 
 type LiveViewError struct {

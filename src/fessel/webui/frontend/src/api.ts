@@ -224,13 +224,25 @@ export function fetchAnomalies(): Promise<AnomalyLogEntry[]> {
   return getJson<AnomalyLogEntry[]>("/api/anomalies");
 }
 
-// Start an explicit recording at the given mode. Returns the recording id the
-// supervisor minted. Throws AuthError on 401, ControlError otherwise (F4.5).
-export async function startRecording(mode: ModeTriplet): Promise<string> {
+// Options for starting an explicit recording. Recording resolution is a deploy
+// setting (recordings reuse the ring encode), so there is no mode here.
+// `lookbackSeconds` reaches the recording's start back into the ring buffer
+// (0 = start now); `uploadWhenDone` flags it for upload on finalise.
+export interface StartRecordingOpts {
+  lookbackSeconds?: number;
+  uploadWhenDone?: boolean;
+}
+
+// Start an explicit recording. Returns the recording id the supervisor minted.
+// Throws AuthError on 401, ControlError otherwise (F4.5).
+export async function startRecording(opts: StartRecordingOpts = {}): Promise<string> {
   const res = await fetch("/api/recording/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode: modeToCanonical(mode) }),
+    body: JSON.stringify({
+      lookback_seconds: opts.lookbackSeconds ?? 0,
+      upload_when_done: opts.uploadWhenDone ?? false,
+    }),
   });
   if (res.status === 401) throw new AuthError();
   if (!res.ok) throw new ControlError(await diagnostic(res), res.status);

@@ -52,11 +52,10 @@ from fessel_schemas import (
   UploadBacklog,
   UploadProgress,
   fessel_version,
-  mode_from_canonical,
 )
 from fessel_shared import ConfigReloader, MqttClient, Storage, load_component_config
 from fessel_shared import topics
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .bandwidth import BandwidthCoordinator
 from .control import ControlPlane, build_control_plane
@@ -74,10 +73,13 @@ HEARTBEAT_INTERVAL_S = 5.0
 
 class RecordingStartBody(BaseModel):
   """Body of supervisor POST /recording/start (S4.1). webui-backend is the only
-  caller; the canonical mode string + operator pass-through are enough (no
-  raw-query flexibility needed)."""
+  caller. Recording resolution is a deploy setting (recordings reuse the ring
+  encode), so there is no mode: `lookback_seconds` reaches the recording's start
+  back into the ring (0 = now), `upload_when_done` flags it for upload on
+  finalise, and `operator` is passed through for metadata."""
 
-  mode: str
+  lookback_seconds: float = Field(default=0.0, ge=0)
+  upload_when_done: bool = False
   operator: str | None = None
 
 
@@ -506,13 +508,16 @@ def create_app(
   @app.post("/recording/start")
   def recording_start(body: RecordingStartBody, request: Request) -> dict:
     # Mint a fresh recording-id here (S4.1) and return it; video records under
-    # it. 200 means "command published", not "recording active".
-    try:
-      mode = mode_from_canonical(body.mode)
-    except ValueError as e:
-      raise HTTPException(status_code=400, detail=str(e)) from e
+    # it. 200 means "command published", not "recording active". Recording
+    # resolution is a deploy setting resolved on video (recordings reuse the ring
+    # encode), so there is no mode here — just look-back + upload-on-done.
     recording_id = str(uuid.uuid4())
-    cmd = RecordingStartCmd(recording_id=recording_id, mode=mode, operator=body.operator)
+    cmd = RecordingStartCmd(
+      recording_id=recording_id,
+      lookback_seconds=body.lookback_seconds,
+      upload_when_done=body.upload_when_done,
+      operator=body.operator,
+    )
     _log_control("recording/start", _caller(request), "published", time.monotonic())
     relay.publish_recording_start(cmd)
     return {"recording_id": recording_id}

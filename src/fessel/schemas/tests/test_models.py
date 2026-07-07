@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from fessel_schemas import (
   Capabilities,
@@ -7,6 +8,7 @@ from fessel_schemas import (
   LiveStateValue,
   ModeTriplet,
   PlugState,
+  RecordingStartCmd,
   SafetyState,
   StateResponse,
   mode_from_canonical,
@@ -29,9 +31,28 @@ def test_mode_from_canonical_rejects_garbage():
 
 
 def test_capabilities_payload():
-  caps = Capabilities(modes=[ModeTriplet(resolution="640x480", fps=15, bitrate_bps=800_000)])
+  mode = ModeTriplet(resolution="640x480", fps=15, bitrate_bps=800_000)
+  caps = Capabilities(recording_mode=mode, max_lookback_seconds=120.0)
   dumped = caps.model_dump()
-  assert dumped["modes"][0]["resolution"] == "640x480"
+  # Recording resolution is a deploy setting carried in capabilities, and the
+  # look-back bound tells the UI how far a recording can reach into the ring.
+  # There is no `modes` list — the UI no longer picks a mode.
+  assert dumped["recording_mode"]["resolution"] == "640x480"
+  assert dumped["max_lookback_seconds"] == 120.0
+  assert "modes" not in dumped
+
+
+def test_recording_start_cmd_lookback_and_upload():
+  # No per-recording mode (recording reuses the ring encode); look-back defaults
+  # to 0 (start now) and upload_when_done defaults false.
+  cmd = RecordingStartCmd(recording_id="r1")
+  assert cmd.lookback_seconds == 0.0
+  assert cmd.upload_when_done is False
+  assert not hasattr(cmd, "mode")
+  cmd2 = RecordingStartCmd(recording_id="r2", lookback_seconds=45.0, upload_when_done=True)
+  assert cmd2.lookback_seconds == 45.0 and cmd2.upload_when_done is True
+  with pytest.raises(ValidationError):
+    RecordingStartCmd(recording_id="r3", lookback_seconds=-1.0)
 
 
 def test_live_activate_is_parameterless():

@@ -123,15 +123,24 @@ func TestMeRequiresIdentity(t *testing.T) {
 	}
 }
 
-func TestCapabilitiesRequiresIdentityAndListsModes(t *testing.T) {
+func TestCapabilitiesRequiresIdentityAndReportsRecordingModeAndLookback(t *testing.T) {
 	h := newPublic(newFakeSupervisor(), nil).Handler()
 	if w := do(t, h, "GET", "/api/capabilities", "", false); w.Code != 401 {
 		t.Fatalf("unauth: %d", w.Code)
 	}
 	w := do(t, h, "GET", "/api/capabilities", "", true)
-	modes := decode(t, w)["modes"].([]any)
-	if len(modes) != 3 {
-		t.Fatalf("modes: %v", modes)
+	body := decode(t, w)
+	// No mode list any more (the UI doesn't pick a mode); the deploy's recording
+	// mode + the look-back bound are what the record dialog reads.
+	if _, ok := body["modes"]; ok {
+		t.Fatalf("capabilities must not carry a modes list: %v", body)
+	}
+	rec, ok := body["recording_mode"].(map[string]any)
+	if !ok || rec["resolution"] != "1280x720" {
+		t.Fatalf("recording_mode: %v", body["recording_mode"])
+	}
+	if body["max_lookback_seconds"].(float64) != 120 {
+		t.Fatalf("max_lookback_seconds: %v", body["max_lookback_seconds"])
 	}
 }
 

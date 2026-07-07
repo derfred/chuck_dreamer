@@ -89,19 +89,36 @@ def _seed_anomaly_recording(storage: Storage, aid: str, started: str, **kw) -> N
 
 def test_recording_start_mints_id_and_publishes(client):
   with client:
-    r = client.post("/recording/start", json={"mode": "1920x1080@30@8000000", "operator": "octocat"})
+    # No mode: recording resolution is a deploy setting resolved on video.
+    r = client.post(
+      "/recording/start",
+      json={"lookback_seconds": 45.0, "upload_when_done": True, "operator": "octocat"},
+    )
     assert r.status_code == 200
     rid = r.json()["recording_id"]
     assert rid
   pub = [p for p in client._published if p[0] == "arm/video/cmd/recording/start"]
   assert pub and pub[-1][1]["recording_id"] == rid
   assert pub[-1][1]["operator"] == "octocat"
-  assert pub[-1][1]["mode"]["resolution"] == "1920x1080"
+  assert pub[-1][1]["lookback_seconds"] == 45.0
+  assert pub[-1][1]["upload_when_done"] is True
+  # No per-recording mode is published.
+  assert "mode" not in pub[-1][1]
 
 
-def test_recording_start_rejects_bad_mode(client):
+def test_recording_start_defaults_lookback_and_upload(client):
   with client:
-    assert client.post("/recording/start", json={"mode": "garbage"}).status_code == 400
+    r = client.post("/recording/start", json={"operator": "octocat"})
+    assert r.status_code == 200
+  pub = [p for p in client._published if p[0] == "arm/video/cmd/recording/start"]
+  assert pub[-1][1]["lookback_seconds"] == 0.0
+  assert pub[-1][1]["upload_when_done"] is False
+
+
+def test_recording_start_rejects_negative_lookback(client):
+  with client:
+    # ge=0 on the body -> pydantic 422 (FastAPI validation), not a 200.
+    assert client.post("/recording/start", json={"lookback_seconds": -5}).status_code == 422
 
 
 def test_recording_stop_publishes(client):

@@ -6,7 +6,7 @@
 export type Resolution = string;
 export type Fps = number;
 export type BitrateBps = number;
-export type Modes = ModeTriplet[];
+export type MaxLookbackSeconds = number;
 export type LiveStateValue = "off" | "starting" | "running" | "stopping";
 export type Path = string | null;
 /**
@@ -161,9 +161,17 @@ export interface ModeTriplet {
 }
 /**
  * Retained payload on arm/video/capabilities.
+ *
+ * `recording_mode` is the operating point the deploy is configured to record
+ * with (from `video.recording` config, §2.2) — recording resolution is a deploy
+ * setting, not a per-request choice, so the operator UI no longer picks it.
+ * `max_lookback_seconds` is how far a recording can reach back into the always-on
+ * ring buffer (= the ring window); the record dialog uses it to bound its
+ * look-back timeline.
  */
 export interface Capabilities {
-  modes: Modes;
+  recording_mode: ModeTriplet;
+  max_lookback_seconds: MaxLookbackSeconds;
   [k: string]: unknown;
 }
 /**

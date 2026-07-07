@@ -13,7 +13,7 @@ Transition table:
 
 | From      | Event                  | To        | Action                                       |
 |-----------|------------------------|-----------|----------------------------------------------|
-| idle      | start(id, mode, op)    | starting  | create dir, spawn recording branch, arm tmo  |
+| idle      | start(id, lookback)    | starting  | create dir, spawn recording branch, arm tmo  |
 | starting  | first segment written  | recording | publish state                                |
 | starting  | error / timeout        | idle      | tear down; leave partial output on disk      |
 | starting  | stop                   | stopping  | cancel pending start; tear down              |
@@ -66,7 +66,10 @@ class _EventKind(Enum):
 class _Event:
   kind: _EventKind
   recording_id: str | None = None
-  mode: ModeTriplet | None = None
+  # Look-back reaches the recording's start back into the ring (0 = start now).
+  lookback_seconds: float = 0.0
+  # Flag the finished recording for upload automatically on finalise.
+  upload_when_done: bool = False
   operator: str | None = None
 
 
@@ -83,12 +86,17 @@ class RecordingPipelineHandle:
     raise NotImplementedError
 
 
-# factory(recording_id, mode) -> handle. The handle reports back to the SM.
-RecordingPipelineFactory = Callable[[str, ModeTriplet], RecordingPipelineHandle]
+# factory(recording_id, lookback_seconds) -> handle. Recording reuses the ring
+# encode, so there is no per-recording mode; the handle reports back to the SM.
+RecordingPipelineFactory = Callable[[str, float], RecordingPipelineHandle]
 # publish_state(state, recording_id, started_at) -> None
 RecordingStatePublisher = Callable[[RecordingStateValue, str | None, str | None], None]
-# finalise(metadata) -> None  (write metadata.json; called on clean finalisation)
-RecordingFinaliser = Callable[[RecordingMetadata], None]
+# finalise(metadata, upload_when_done) -> None  (write metadata.json; called on
+# clean finalisation; upload_when_done flags it for upload).
+RecordingFinaliser = Callable[[RecordingMetadata, bool], None]
+# mode_provider() -> ModeTriplet  (the deploy's recording operating point, for
+# metadata; recording resolution is a config setting, not a per-request choice).
+RecordingModeProvider = Callable[[], ModeTriplet]
 
 
 class RecordingStateMachine:
@@ -98,12 +106,14 @@ class RecordingStateMachine:
     pipeline_factory: RecordingPipelineFactory,
     publish_state: RecordingStatePublisher,
     finalise: RecordingFinaliser,
+    mode_provider: RecordingModeProvider,
     start_timeout_s: float,
     count_segments: Callable[[str], int] | None = None,
   ) -> None:
     self._make_pipeline = pipeline_factory
     self._publish_state = publish_state
     self._finalise = finalise
+    self._mode_provider = mode_provider
     self._start_timeout_s = start_timeout_s
     # Used to stamp metadata.segments on finalisation; defaults to 0 (the count
     # is best-effort metadata, not load-bearing).
@@ -116,8 +126,8 @@ class RecordingStateMachine:
 
     self._pipeline: RecordingPipelineHandle | None = None
     self._cur_id: str | None = None
-    self._cur_mode: ModeTriplet | None = None
     self._cur_operator: str | None = None
+    self._cur_upload_when_done: bool = False
     self._started_at: str | None = None
     self._start_deadline: float | None = None
 
@@ -144,15 +154,31 @@ class RecordingStateMachine:
   def active_recording_id(self) -> str | None:
     return self._cur_id if self._state is not RecordingStateValue.idle else None
 
-  def request_start(self, recording_id: str, mode: ModeTriplet, operator: str | None) -> bool:
+  def request_start(
+    self,
+    recording_id: str,
+    *,
+    lookback_seconds: float = 0.0,
+    upload_when_done: bool = False,
+    operator: str | None = None,
+  ) -> bool:
     """Request a recording start. Returns False *synchronously* if a recording
     is already active (idle is required), so the HTTP caller can 409 without
-    waiting for the async transition. Otherwise enqueues and returns True."""
+    waiting for the async transition. Otherwise enqueues and returns True.
+
+    `lookback_seconds` reaches the recording's start back into the ring buffer;
+    `upload_when_done` flags the finished recording for upload on finalise."""
     if self._state is not RecordingStateValue.idle:
       log.info("recording start rejected: state=%s active=%s", self._state, self._cur_id)
       return False
     self._events.put(
-      _Event(_EventKind.START, recording_id=recording_id, mode=mode, operator=operator)
+      _Event(
+        _EventKind.START,
+        recording_id=recording_id,
+        lookback_seconds=lookback_seconds,
+        upload_when_done=upload_when_done,
+        operator=operator,
+      )
     )
     return True
 
@@ -201,7 +227,7 @@ class RecordingStateMachine:
 
   def _on_idle(self, ev: _Event) -> None:
     if ev.kind is _EventKind.START:
-      self._spawn(ev.recording_id, ev.mode, ev.operator)
+      self._spawn(ev.recording_id, ev.lookback_seconds, ev.upload_when_done, ev.operator)
     # stop/segment/etc. in idle: ignore.
 
   def _on_starting(self, ev: _Event) -> None:
@@ -235,13 +261,19 @@ class RecordingStateMachine:
 
   # --- helpers ---------------------------------------------------------------
 
-  def _spawn(self, recording_id: str | None, mode: ModeTriplet | None, operator: str | None) -> None:
-    assert recording_id is not None and mode is not None
+  def _spawn(
+    self,
+    recording_id: str | None,
+    lookback_seconds: float,
+    upload_when_done: bool,
+    operator: str | None,
+  ) -> None:
+    assert recording_id is not None
     self._cur_id = recording_id
-    self._cur_mode = mode
     self._cur_operator = operator
+    self._cur_upload_when_done = upload_when_done
     self._started_at = _now_iso()
-    self._pipeline = self._make_pipeline(recording_id, mode)
+    self._pipeline = self._make_pipeline(recording_id, lookback_seconds)
     self._start_deadline = time.monotonic() + self._start_timeout_s
     self._set_state(RecordingStateValue.starting)
     self._pipeline.start()
@@ -273,19 +305,21 @@ class RecordingStateMachine:
       started_at=self._started_at,
       ended_at=ended_at,
       operator=self._cur_operator,
-      mode=self._cur_mode,
+      # Recording resolution is a deploy setting (recordings reuse the ring
+      # encode); stamp the configured recording mode.
+      mode=self._mode_provider(),
       duration_seconds=duration,
       segments=self._count_segments(self._cur_id),
     )
     try:
-      self._finalise(meta)
+      self._finalise(meta, self._cur_upload_when_done)
     except Exception:  # noqa: BLE001 — a metadata write failure must not crash the SM
       log.exception("failed to write recording metadata for %s", self._cur_id)
 
   def _reset_current(self) -> None:
     self._cur_id = None
-    self._cur_mode = None
     self._cur_operator = None
+    self._cur_upload_when_done = False
     self._started_at = None
 
   def _set_state(self, state: RecordingStateValue) -> None:

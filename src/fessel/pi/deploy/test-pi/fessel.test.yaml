@@ -32,17 +32,18 @@ video:
     fps: 15
     bitrate_bps: 1000000
     connect_timeout_s: 15.0
-  ring:
+  recording:
+    # The always-on ring IS the recording buffer (a recording is copy-from-ring),
+    # so one section describes both. resolution/fps/bitrate are the camera
+    # operating point the ring encodes at — a deploy setting, not a per-request
+    # choice.
     resolution: 640x480
     fps: 30
     bitrate_bps: 1000000
     segment_seconds: 2
-    playlist_length: 10
-    max_files: 12
-  recording:
-    bitrate_bps: 1500000
-    segment_seconds: 2
     start_timeout_s: 15.0
+    # How far a recording can reach back into the ring (= the ring window).
+    max_lookback_seconds: 30.0
 
 # --- supervisor -------------------------------------------------------------
 

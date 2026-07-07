@@ -101,15 +101,14 @@ func (p *Public) Handler() http.Handler {
 		if p.requireIdentity(w, r) == nil {
 			return
 		}
-		// Static dev set. Capabilities are out of the live path (fixed live
-		// profile); this feeds the recording-start mode selector until the
-		// supervisor /capabilities proxy lands.
+		// Static dev set until the supervisor /capabilities proxy lands.
+		// RecordingMode is the deploy's configured recording operating point (the
+		// UI no longer picks resolution — recording resolution is a deploy
+		// setting); MaxLookbackSeconds bounds how far the record dialog can reach
+		// back into the ring buffer.
 		writeJSON(w, http.StatusOK, schemas.Capabilities{
-			Modes: []schemas.ModeTriplet{
-				{Resolution: "640x480", Fps: 30, BitrateBps: 1_000_000},
-				{Resolution: "1280x720", Fps: 30, BitrateBps: 2_500_000},
-				{Resolution: "1280x720", Fps: 15, BitrateBps: 1_500_000},
-			},
+			RecordingMode:      schemas.ModeTriplet{Resolution: "1280x720", Fps: 30, BitrateBps: 2_500_000},
+			MaxLookbackSeconds: 120,
 		})
 	})
 

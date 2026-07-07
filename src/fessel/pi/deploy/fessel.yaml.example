@@ -43,26 +43,24 @@ video:
     # Pi-side complement of the relay's live_activation_timeout.
     connect_timeout_s: 15.0
 
-  ring:
-    # Always-on ring buffer (V4.1). Review-quality, short window. GOP is derived
-    # so every HLS segment starts on a keyframe (= fps * segment_seconds).
+  recording:
+    # The always-on ring buffer IS the recording buffer (V4.1/V4.2): a recording
+    # copies the relevant window out of the ring, so one section describes both.
+    # resolution/fps/bitrate are the camera operating point the ring encodes at —
+    # a deploy setting, not a per-request choice. GOP is derived so every HLS
+    # segment starts on a keyframe (= fps * segment_seconds).
     resolution: 1280x720
     fps: 30
     bitrate_bps: 2000000
     segment_seconds: 2
-    # playlist_length * segment_seconds ~= the scrubbable window (here ~5 min).
-    playlist_length: 150
-    # Slightly larger than playlist_length so rotated segments are deleted, not
-    # retained indefinitely (hlssink2 deletes past max_files).
-    max_files: 160
-
-  recording:
-    # Explicit (operator) recordings (V4.2). Retention-quality, finite.
-    bitrate_bps: 8000000
-    segment_seconds: 2
     # How long the recording state machine waits for the first segment before
     # giving up to idle (V4.3).
     start_timeout_s: 15.0
+    # How far a recording may reach BACK into the ring (0 = start now). This also
+    # sizes the ring window: the Pi keeps ceil(max_lookback / segment_seconds)
+    # segments (plus a little slack) so a look-back of up to this many seconds is
+    # always available. Here ~2 min.
+    max_lookback_seconds: 120.0
 
   # Slice 5 vision analysis (V5.5). Runs on the always-on appsink branch
   # (640x360). All values are starting points; tune against the real scene by

@@ -10,19 +10,13 @@
 // failure mode guarded against is "clicked Stop by accident, hit Enter".
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type {
-  AnomalyLogEntry,
-  Capabilities,
-  ModeTriplet,
-  StateResponse,
-} from "../../shared/schemas";
+import type { AnomalyLogEntry, Capabilities, StateResponse } from "../../shared/schemas";
 import {
   AuthError,
   ControlError,
   fetchAnomalies,
   fetchCapabilities,
   fetchState,
-  modeToCanonical,
   postControl,
   reauthenticate,
   startRecording,
@@ -31,7 +25,9 @@ import {
 } from "./api";
 import { config } from "./config";
 import { navigate } from "./nav";
+import { RecordModal } from "./RecordModal";
 import { Sparkline } from "./Sparkline";
+import { useAnomalies } from "./useAnomalies";
 
 type ButtonStatus =
   | { kind: "idle" }
@@ -214,21 +210,22 @@ export function Dashboard({ embedded = false }: { embedded?: boolean } = {}) {
   );
 }
 
-// --- recording controls (F4.5) ----------------------------------------------
-// Start/Stop derived from /api/state's `recording` field. Idle -> pick a mode +
-// "Start recording"; recording -> "Stop recording" (red, no confirmation modal
-// — stopping a recording is not destructive in the Slice-3 modal sense).
-// starting/stopping -> a disabled spinner.
+// --- recording controls (F4.5 + ring-buffer look-back reframe) ---------------
+// Start/Stop derived from /api/state's `recording` field. Idle -> "Record…"
+// opens the look-back dialog (RecordModal: pick how far to reach back into the
+// on-Pi ring + upload-when-done; NO resolution picker — that's a deploy
+// setting). recording -> "Stop recording" (red). starting/stopping -> disabled.
 
 function RecordingControls({ recording }: { recording: StateResponse["recording"] | undefined }) {
-  const [modes, setModes] = useState<ModeTriplet[]>([]);
-  const [selected, setSelected] = useState<number>(0);
+  const [maxLookback, setMaxLookback] = useState<number>(0);
+  const [modalOpen, setModalOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const anomalies = useAnomalies();
 
   useEffect(() => {
     fetchCapabilities()
-      .then((c: Capabilities) => setModes(c.modes))
+      .then((c: Capabilities) => setMaxLookback(c.max_lookback_seconds))
       .catch((e) => {
         if (e instanceof AuthError) reauthenticate();
       });
@@ -236,22 +233,26 @@ function RecordingControls({ recording }: { recording: StateResponse["recording"
 
   const state = recording?.state ?? "idle";
 
-  const onStart = useCallback(() => {
-    const mode = modes[selected];
-    if (!mode) return;
-    setBusy(true);
-    setError(null);
-    startRecording(mode)
-      .then(() => setBusy(false))
-      .catch((e) => {
-        if (e instanceof AuthError) {
-          reauthenticate();
-          return;
-        }
-        setBusy(false);
-        setError(e instanceof ControlError ? e.message : String(e));
-      });
-  }, [modes, selected]);
+  const onConfirm = useCallback(
+    (opts: { lookbackSeconds: number; uploadWhenDone: boolean }) => {
+      setBusy(true);
+      setError(null);
+      startRecording(opts)
+        .then(() => {
+          setBusy(false);
+          setModalOpen(false);
+        })
+        .catch((e) => {
+          if (e instanceof AuthError) {
+            reauthenticate();
+            return;
+          }
+          setBusy(false);
+          setError(e instanceof ControlError ? e.message : String(e));
+        });
+    },
+    [],
+  );
 
   const onStop = useCallback(() => {
     setBusy(true);
@@ -273,25 +274,9 @@ function RecordingControls({ recording }: { recording: StateResponse["recording"
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
       {state === "idle" ? (
-        <>
-          <label>
-            Mode:{" "}
-            <select
-              value={selected}
-              onChange={(e) => setSelected(Number(e.target.value))}
-              disabled={transitioning || modes.length === 0}
-            >
-              {modes.map((m, i) => (
-                <option key={i} value={i}>
-                  {modeToCanonical(m)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button onClick={onStart} disabled={transitioning || modes.length === 0}>
-            {busy ? "…" : "Start recording"}
-          </button>
-        </>
+        <button onClick={() => setModalOpen(true)} disabled={maxLookback <= 0}>
+          Record…
+        </button>
       ) : state === "recording" ? (
         <button
           onClick={onStop}
@@ -310,6 +295,16 @@ function RecordingControls({ recording }: { recording: StateResponse["recording"
         {recording?.active_recording_id ? ` (${recording.active_recording_id})` : ""}
       </span>
       {error && <span style={{ color: "crimson", fontSize: 12 }}>{error}</span>}
+
+      {modalOpen && (
+        <RecordModal
+          maxLookbackSeconds={maxLookback}
+          anomalies={anomalies}
+          busy={busy}
+          onCancel={() => setModalOpen(false)}
+          onConfirm={onConfirm}
+        />
+      )}
     </div>
   );
 }

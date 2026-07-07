@@ -37,9 +37,18 @@ class LiveStateValue(str, Enum):
 
 
 class Capabilities(BaseModel):
-  """Retained payload on arm/video/capabilities."""
+  """Retained payload on arm/video/capabilities.
 
-  modes: list[ModeTriplet]
+  `recording_mode` is the operating point the deploy is configured to record
+  with (from `video.recording` config, §2.2) — recording resolution is a deploy
+  setting, not a per-request choice, so the operator UI no longer picks it.
+  `max_lookback_seconds` is how far a recording can reach back into the always-on
+  ring buffer (= the ring window); the record dialog uses it to bound its
+  look-back timeline.
+  """
+
+  recording_mode: ModeTriplet
+  max_lookback_seconds: float
 
 
 class LiveActivate(BaseModel):
@@ -169,13 +178,19 @@ class UploadStateValue(str, Enum):
 class RecordingStartCmd(BaseModel):
   """Payload of arm/video/cmd/recording/start (V4.5).
 
-  `recording_id` is a UUID chosen by the caller (supervisor); `mode` is the
-  triplet to encode with; `operator` is the GitHub user passed through from
-  webui-backend so metadata.json (V4.4) records who started the recording.
+  `recording_id` is a UUID chosen by the caller (supervisor). Recording reuses
+  the always-on ring's encode (§2.2), so there is no per-recording `mode`: the
+  resolution/bitrate come from the deploy's `video.recording` config, not the
+  request. `lookback_seconds` reaches the recording's start BACK into the ring
+  buffer (0 = start now); it is clamped by video to what the ring holds.
+  `upload_when_done` flags the finished recording for upload automatically on
+  finalise. `operator` is the GitHub user passed through from webui-backend so
+  metadata.json (V4.4) records who started the recording.
   """
 
   recording_id: str
-  mode: ModeTriplet
+  lookback_seconds: float = Field(default=0.0, ge=0)
+  upload_when_done: bool = False
   operator: str | None = None
 
 

@@ -43,25 +43,30 @@ def make_sm(start_timeout_s=0.3, defer_exit=False):
   sm_box = [None]
   states = []
   finals = []
+  # Records (rid, lookback_seconds) each factory call saw, so look-back
+  # propagation start -> factory can be asserted.
+  spawns = []
 
-  def factory(rid, mode):
+  def factory(rid, lookback_seconds):
+    spawns.append((rid, lookback_seconds))
     return FakeRec(live, sm_box, defer_exit=defer_exit)
 
   def publish(state, rid, started):
     states.append((state, rid))
 
-  def finalise(meta):
-    finals.append(meta)
+  def finalise(meta, upload_when_done):
+    finals.append((meta, upload_when_done))
 
   sm = RecordingStateMachine(
     pipeline_factory=factory,
     publish_state=publish,
     finalise=finalise,
+    mode_provider=lambda: MODE,
     start_timeout_s=start_timeout_s,
     count_segments=lambda _id: 4,
   )
   sm_box[0] = sm
-  return sm, live, states, finals
+  return sm, live, states, finals, spawns
 
 
 def wait_until(predicate, timeout=2.0):
@@ -74,9 +79,9 @@ def wait_until(predicate, timeout=2.0):
 
 
 def test_start_to_recording_then_stop_finalises():
-  sm, live, _, finals = make_sm()
+  sm, live, _, finals, spawns = make_sm()
   sm.start()
-  assert sm.request_start("r1", MODE, "octocat") is True
+  assert sm.request_start("r1", operator="octocat") is True
   assert wait_until(lambda: sm.state is RecordingStateValue.starting)
   sm.on_segment()
   assert wait_until(lambda: sm.state is RecordingStateValue.recording)
@@ -87,31 +92,49 @@ def test_start_to_recording_then_stop_finalises():
   assert wait_until(lambda: sm.state is RecordingStateValue.idle)
   assert live[0].stopped
   assert len(finals) == 1
-  meta = finals[0]
+  meta, upload = finals[0]
   assert meta.id == "r1" and meta.operator == "octocat" and meta.segments == 4
+  # Mode comes from the mode_provider (a deploy setting), not the request.
   assert meta.mode.resolution == "1920x1080" and meta.ended_at is not None
+  assert upload is False  # not requested
+  sm.shutdown()
+
+
+def test_lookback_and_upload_propagate():
+  sm, live, _, finals, spawns = make_sm()
+  sm.start()
+  assert sm.request_start("r1", lookback_seconds=45.0, upload_when_done=True) is True
+  assert wait_until(lambda: sm.state is RecordingStateValue.starting)
+  # The look-back reached the factory (-> the recording handle).
+  assert spawns == [("r1", 45.0)]
+  sm.on_segment()
+  assert wait_until(lambda: sm.state is RecordingStateValue.recording)
+  sm.request_stop()
+  assert wait_until(lambda: len(finals) == 1)
+  _meta, upload = finals[0]
+  assert upload is True  # flagged for upload on finalise
   sm.shutdown()
 
 
 def test_only_one_recording_at_a_time():
-  sm, _, _, _ = make_sm()
+  sm, _, _, _, _ = make_sm()
   sm.start()
-  assert sm.request_start("r1", MODE, None) is True
+  assert sm.request_start("r1") is True
   assert wait_until(
     lambda: sm.state is RecordingStateValue.recording or sm.state is RecordingStateValue.starting
   )
   sm.on_segment()
   assert wait_until(lambda: sm.state is RecordingStateValue.recording)
   # A start while recording is rejected SYNCHRONOUSLY (so the HTTP layer 409s).
-  assert sm.request_start("r2", MODE, None) is False
+  assert sm.request_start("r2") is False
   assert sm.active_recording_id == "r1"
   sm.shutdown()
 
 
 def test_start_timeout_returns_idle_without_finalise():
-  sm, _, _, finals = make_sm(start_timeout_s=0.2)
+  sm, _, _, finals, _ = make_sm(start_timeout_s=0.2)
   sm.start()
-  assert sm.request_start("r1", MODE, None) is True
+  assert sm.request_start("r1") is True
   assert wait_until(lambda: sm.state is RecordingStateValue.starting)
   # Never call on_segment -> timeout fires -> idle. Partial output stays on disk
   # but NO metadata is written (the recording never finalised, V4.3).
@@ -121,9 +144,9 @@ def test_start_timeout_returns_idle_without_finalise():
 
 
 def test_failed_start_returns_idle_without_finalise():
-  sm, _, _, finals = make_sm()
+  sm, _, _, finals, _ = make_sm()
   sm.start()
-  assert sm.request_start("r1", MODE, None) is True
+  assert sm.request_start("r1") is True
   assert wait_until(lambda: sm.state is RecordingStateValue.starting)
   sm.on_failed()
   assert wait_until(lambda: sm.state is RecordingStateValue.idle)
@@ -139,16 +162,16 @@ def test_start_during_stopping_is_rejected_then_runs_once_idle():
   # stop", not "queued across teardown".
   # defer_exit keeps the SM in `stopping` until we drive emit_exit(), so the
   # reject-during-stopping window is deterministically observable.
-  sm, live, _, finals = make_sm(defer_exit=True)
+  sm, live, _, finals, _ = make_sm(defer_exit=True)
   sm.start()
-  sm.request_start("r1", MODE, None)
+  sm.request_start("r1")
   assert wait_until(lambda: sm.state is RecordingStateValue.starting)
   sm.on_segment()
   assert wait_until(lambda: sm.state is RecordingStateValue.recording)
   sm.request_stop()
   assert wait_until(lambda: sm.state is RecordingStateValue.stopping)
   # A start arriving WHILE stopping is rejected (not queued).
-  assert sm.request_start("r2", MODE, None) is False
+  assert sm.request_start("r2") is False
   # Now let the prior recording finalise cleanly.
   live[0].emit_exit()
   assert wait_until(lambda: len(finals) == 1)  # r1 finalised
@@ -156,7 +179,7 @@ def test_start_during_stopping_is_rejected_then_runs_once_idle():
   # Once idle, the retried start proceeds (reaching `recording` needs only the
   # first segment; the deferred fake's stop-without-exit is harmless on
   # shutdown's bounded join).
-  assert sm.request_start("r2", MODE, None) is True
+  assert sm.request_start("r2") is True
   assert wait_until(lambda: sm.state is RecordingStateValue.starting)
   sm.on_segment()
   assert wait_until(lambda: sm.state is RecordingStateValue.recording)

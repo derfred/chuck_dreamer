@@ -35,7 +35,7 @@ def _app_for_factory(tmp_path) -> VideoApp:
   app = object.__new__(VideoApp)
   app._capture = FakeCapture()
   app._storage = Storage(str(tmp_path))
-  app._ring_cfg = {"segment_seconds": 2}
+  app._rec_cfg = {"segment_seconds": 2}
   app._rec_sm = object()  # the handle only stores sm; never called here
   return app
 
@@ -43,12 +43,16 @@ def _app_for_factory(tmp_path) -> VideoApp:
 def test_make_recording_pipeline_matches_constructor(tmp_path):
   # The regression guard: _make_recording_pipeline must pass exactly the kwargs
   # GstRecordingPipeline accepts (a stale/missing kwarg raises TypeError here).
+  # The factory takes (recording_id, lookback_seconds) — recording has no mode
+  # (it reuses the ring encode).
   app = _app_for_factory(tmp_path)
-  handle = VideoApp._make_recording_pipeline(app, "rec-abc", MODE)
+  handle = VideoApp._make_recording_pipeline(app, "rec-abc", 30.0)
   assert isinstance(handle, GstRecordingPipeline)
   # Wired to the shared capture and pointed at the ring it copies from.
   assert handle._capture is app._capture
   assert handle._ring_dir == app._storage.ring_dir
+  # Look-back reached the handle.
+  assert handle._lookback_seconds == 30.0
   # And the factory created the on-disk recording dir as a side effect.
   assert app._storage.recording_dir("rec-abc").is_dir()
 
@@ -58,13 +62,14 @@ def test_recording_handle_rejects_legacy_source_kwargs(tmp_path):
   # (copy-from-ring), so the old source kwargs must NOT be accepted.
   import pytest
 
-  for bad in ("device", "use_test_source"):
+  # `mode` is also gone now — recording resolution is a deploy setting, not a
+  # per-recording kwarg.
+  for bad in ("device", "use_test_source", "mode"):
     with pytest.raises(TypeError):
       GstRecordingPipeline(
         sm=object(),
         capture=FakeCapture(),
         ring_dir=str(tmp_path / "ring"),
-        mode=MODE,
         recording_dir=str(tmp_path),
         segment_seconds=2,
         **{bad: "anything"},

@@ -27,7 +27,6 @@ import time
 from pathlib import Path
 
 import gi
-from fessel_schemas import ModeTriplet
 from fessel_shared import assemble_recording_playlist
 
 from .anomaly_recording import select_ring_segments
@@ -51,29 +50,38 @@ class GstRecordingPipeline(RecordingPipelineHandle):
     sm: RecordingStateMachine,
     capture: GstCapturePipeline,
     ring_dir: str,
-    mode: ModeTriplet,
     recording_dir: str,
     segment_seconds: int,
-    bitrate_bps: int = 0,
-    allow_software_encoder: bool = False,
+    lookback_seconds: float = 0.0,
   ) -> None:
     self._sm = sm
     self._capture = capture
     self._ring_dir = Path(ring_dir)
     self._recording_dir = Path(recording_dir)
-    # mode/bitrate_bps/allow_software_encoder are vestigial (recording reuses the
-    # ring's encode); segment_seconds sets the assembled playlist's EXTINF.
+    # segment_seconds sets the assembled playlist's EXTINF. lookback_seconds
+    # reaches the recording's start back into the ring (0 = start now); it is
+    # clamped at copy time to the oldest segment the ring still holds.
     self._segment_seconds = int(segment_seconds)
+    self._lookback_seconds = max(0.0, float(lookback_seconds))
     self._start_epoch: float | None = None
     self._lock = threading.Lock()
     self._stopped = False
 
   def start(self) -> None:
     # The ring is always recording, so "start" is just marking the window open.
-    # There is no encoder to spin up, so the recording is live immediately:
-    # report a segment so the state machine advances idle -> recording.
-    self._start_epoch = time.time()
-    log.info("recording window opened at %.3f -> %s", self._start_epoch, self._recording_dir)
+    # Look-back reaches the window's start BACK in time by lookback_seconds so
+    # the recording includes footage from before now (the ring segments covering
+    # that span already exist on disk). There is no encoder to spin up, so the
+    # recording is live immediately: report a segment so the state machine
+    # advances idle -> recording. The actual copy (incl. the clamp to what the
+    # ring holds) runs on stop, in _copy_window_from_ring.
+    self._start_epoch = time.time() - self._lookback_seconds
+    log.info(
+      "recording window opened at %.3f (lookback %.1fs) -> %s",
+      self._start_epoch,
+      self._lookback_seconds,
+      self._recording_dir,
+    )
     self._sm.on_segment()
 
   def stop(self) -> None:

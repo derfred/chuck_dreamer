@@ -38,7 +38,15 @@ const ANOMALIES = [
 function installFetch(anomalies: unknown = ANOMALIES) {
   const fn = vi.fn((url: string) => {
     if (url.startsWith("/api/capabilities")) {
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ modes: [] }) });
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          modes: [],
+          recording_mode: { resolution: "1280x720", fps: 30, bitrate_bps: 2500000 },
+          max_lookback_seconds: 120,
+        }),
+      });
     }
     if (url.startsWith("/api/anomalies")) {
       return Promise.resolve({ ok: true, status: 200, json: async () => anomalies });

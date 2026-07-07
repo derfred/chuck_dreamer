@@ -130,7 +130,9 @@ def test_shipped_example_loads_per_component():
   video = load_component_config(example, "video")
   assert video["mqtt"]["port"] == 1883
   assert video["storage"]["ssd_path"] == "/mnt/ssd"
-  assert video["ring"]["fps"] == 30 and video["recording"]["bitrate_bps"] == 8_000_000
+  # The ring IS the recording buffer: one `recording` section, no `ring` block.
+  assert "ring" not in video
+  assert video["recording"]["fps"] == 30 and video["recording"]["max_lookback_seconds"] == 120.0
   assert "control" not in video and "ingest_url_base" not in video
   sup = load_component_config(example, "supervisor")
   assert sup["http"]["port"] == 8443 and sup["control"]["plugs"]["arm"]["address"]

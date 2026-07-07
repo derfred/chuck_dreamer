@@ -22,6 +22,14 @@ const STATE = {
   camera: { up: false },
 };
 
+// Valid (empty-mode) capabilities shape, incl. the look-back fields the record
+// dialog reads. Used wherever a test doesn't care about recording modes.
+const EMPTY_CAPS = {
+  modes: [],
+  recording_mode: { resolution: "1280x720", fps: 30, bitrate_bps: 2500000 },
+  max_lookback_seconds: 120,
+};
+
 // A fetch mock that answers GET /api/state with STATE and lets each test
 // decide what POST /api/control/* returns (default 200).
 function installFetch(controlResponder?: (url: string) => { status: number; body: unknown }) {
@@ -30,7 +38,7 @@ function installFetch(controlResponder?: (url: string) => { status: number; body
       // The dashboard's recording mode selector fetches capabilities on mount;
       // answer it with an empty mode list so it doesn't consume the STATE body.
       if (url.startsWith("/api/capabilities")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => ({ modes: [] }) });
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_CAPS });
       }
       // Slice 5: the recent-anomalies panel polls /api/anomalies; answer with an
       // empty log so it doesn't consume the STATE body.
@@ -159,11 +167,6 @@ describe("action failure (F3.2)", () => {
   });
 });
 
-// The dashboard also fetches /api/capabilities on mount (Slice-4 recording
-// mode selector). These tests target the /api/state poll specifically, so they
-// answer the capabilities call with an empty mode list and key the state
-// behaviour off the /api/state URL.
-const EMPTY_CAPS = { modes: [] };
 
 describe("re-auth escalation (F3.4)", () => {
   it("re-authenticates (reload) on a 401 from the state poll", async () => {
@@ -223,7 +226,12 @@ describe("state poll resilience (F3.4)", () => {
 
 // --- Slice 4: recording controls + backlog (F4.5) ---------------------------
 
-const CAPS = { modes: [{ resolution: "1280x720", fps: 30, bitrate_bps: 2500000 }] };
+const RECORDING_MODE = { resolution: "1280x720", fps: 30, bitrate_bps: 2500000 };
+const CAPS = {
+  modes: [RECORDING_MODE],
+  recording_mode: RECORDING_MODE,
+  max_lookback_seconds: 120,
+};
 
 function installFetchWithRecording(
   recording: unknown,
@@ -253,7 +261,7 @@ function installFetchWithRecording(
 }
 
 describe("recording controls (F4.5)", () => {
-  it("shows Start recording + mode selector when idle and POSTs on click", async () => {
+  it("opens the look-back dialog when idle and POSTs lookback+upload on confirm", async () => {
     const fn = installFetchWithRecording(
       { state: "idle", active_recording_id: null, started_at: null },
       { count: 0, oldest_pending_seconds: null },
@@ -262,12 +270,22 @@ describe("recording controls (F4.5)", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    const start = screen.getByText("Start recording");
+    // No inline mode selector any more — recording opens a dialog.
+    expect(screen.queryByText("Mode:")).toBeNull();
     await act(async () => {
-      fireEvent.click(start);
+      fireEvent.click(screen.getByText("Record…"));
+    });
+    expect(screen.getByRole("dialog", { name: "Start recording" })).toBeTruthy();
+    // Confirm starts the recording; the POST carries look-back + upload, no mode.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Start recording" }));
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(fn.mock.calls.some((c) => c[0] === "/api/recording/start")).toBe(true);
+    const post = fn.mock.calls.find((c) => c[0] === "/api/recording/start");
+    expect(post).toBeTruthy();
+    const body = JSON.parse((post![1] as RequestInit).body as string);
+    expect(body).toEqual({ lookback_seconds: 0, upload_when_done: false });
+    expect(body.mode).toBeUndefined();
   });
 
   it("shows Stop recording when a recording is active", async () => {
