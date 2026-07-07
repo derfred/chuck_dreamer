@@ -39,40 +39,69 @@ interface ActionDef {
   action: ControlAction;
   label: string;
   destructive: boolean;
+  // Span both columns of the group grid (Stop).
+  fullWidth?: boolean;
   // Modal copy for destructive actions: names the specific action + target and
   // makes the operator responsible for the resulting safe state (F3.3).
   confirm?: string;
 }
 
-const ACTIONS: ActionDef[] = [
-  { action: "pause", label: "Pause", destructive: false },
-  { action: "resume", label: "Resume", destructive: false },
+// Control actions grouped by function so the panel reads as three labelled
+// clusters (motion / power-arm / power-jetson) rather than a flat button soup.
+// Button labels stay fully-qualified ("Power off arm", not "Power off") — the
+// group label is a visual aid, but each button remains self-describing (and the
+// tests + audit log key off these exact labels).
+interface ActionGroup {
+  // Optional small caps label above the group; motion has none (it's the lead).
+  label?: string;
+  // Full-width actions render across both columns (Stop); the rest pair up.
+  actions: ActionDef[];
+}
+
+const ACTION_GROUPS: ActionGroup[] = [
   {
-    action: "stop",
-    label: "Stop",
-    destructive: true,
-    confirm:
-      "Stop the arm? The current episode ends and the arm returns home and idles. " +
-      "You are responsible for confirming the arm is in a safe state afterwards.",
+    actions: [
+      { action: "pause", label: "Pause", destructive: false },
+      { action: "resume", label: "Resume", destructive: false },
+      {
+        action: "stop",
+        label: "Stop",
+        destructive: true,
+        fullWidth: true,
+        confirm:
+          "Stop the arm? The current episode ends and the arm returns home and idles. " +
+          "You are responsible for confirming the arm is in a safe state afterwards.",
+      },
+    ],
   },
   {
-    action: "shutdown/arm",
-    label: "Power off arm",
-    destructive: true,
-    confirm:
-      "Cut power to the arm? The arm will lose power immediately and the operator " +
-      "who initiated this is responsible for confirming the arm is in a safe state.",
+    label: "Power — arm",
+    actions: [
+      { action: "poweron/arm", label: "Power on arm", destructive: false },
+      {
+        action: "shutdown/arm",
+        label: "Power off arm",
+        destructive: true,
+        confirm:
+          "Cut power to the arm? The arm will lose power immediately and the operator " +
+          "who initiated this is responsible for confirming the arm is in a safe state.",
+      },
+    ],
   },
   {
-    action: "shutdown/jetson",
-    label: "Power off Jetson",
-    destructive: true,
-    confirm:
-      "Cut power to the Jetson? Control and learning software stop immediately. " +
-      "You are responsible for confirming this is safe.",
+    label: "Power — Jetson",
+    actions: [
+      { action: "poweron/jetson", label: "Power on Jetson", destructive: false },
+      {
+        action: "shutdown/jetson",
+        label: "Power off Jetson",
+        destructive: true,
+        confirm:
+          "Cut power to the Jetson? Control and learning software stop immediately. " +
+          "You are responsible for confirming this is safe.",
+      },
+    ],
   },
-  { action: "poweron/arm", label: "Power on arm", destructive: false },
-  { action: "poweron/jetson", label: "Power on Jetson", destructive: false },
 ];
 
 // `embedded` renders the sensing + controls without the standalone "Fessel"
@@ -188,14 +217,34 @@ export function Dashboard({ embedded = false }: { embedded?: boolean } = {}) {
       <RecentAnomaliesPanel />
 
       <h2 style={{ fontSize: 16, marginTop: 24 }}>Controls</h2>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
-        {ACTIONS.map((def) => (
-          <ControlButton
-            key={def.action}
-            def={def}
-            status={statuses[def.action] ?? { kind: "idle" }}
-            onClick={() => onClick(def)}
-          />
+      <div style={{ display: "flex", flexDirection: "column", gap: 14, maxWidth: 320 }}>
+        {ACTION_GROUPS.map((group, i) => (
+          <div key={group.label ?? i}>
+            {group.label && (
+              <div
+                style={{
+                  fontSize: 11,
+                  letterSpacing: "0.05em",
+                  textTransform: "uppercase",
+                  color: "#8a9895",
+                  fontWeight: 650,
+                  marginBottom: 7,
+                }}
+              >
+                {group.label}
+              </div>
+            )}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              {group.actions.map((def) => (
+                <ControlButton
+                  key={def.action}
+                  def={def}
+                  status={statuses[def.action] ?? { kind: "idle" }}
+                  onClick={() => onClick(def)}
+                />
+              ))}
+            </div>
+          </div>
         ))}
       </div>
 
@@ -532,8 +581,28 @@ function ControlButton({
 }) {
   const inflight = status.kind === "inflight";
   return (
-    <div style={{ display: "flex", flexDirection: "column", minWidth: 140 }}>
-      <button onClick={onClick} disabled={inflight} style={{ padding: "8px 12px" }}>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gridColumn: def.fullWidth ? "1 / -1" : undefined,
+      }}
+    >
+      <button
+        onClick={onClick}
+        disabled={inflight}
+        style={{
+          font: "inherit",
+          fontSize: 13,
+          fontWeight: 550,
+          padding: "9px 10px",
+          borderRadius: 9,
+          border: `1px solid ${def.destructive ? "#e3b7b1" : "#dde3e6"}`,
+          background: "#fff",
+          color: def.destructive ? "#c0392b" : "#16211f",
+          cursor: inflight ? "default" : "pointer",
+        }}
+      >
         {inflight ? "…" : def.label}
         {status.kind === "success" ? " ✓" : ""}
       </button>

@@ -370,44 +370,16 @@ func TestRecordingAbsentFromStoreProxiesSupervisor(t *testing.T) {
 
 func TestPlaybackRequiresAuth(t *testing.T) {
 	h := newPublic(newFakeSupervisor(), nil).Handler()
-	for _, p := range []string{"/api/recordings", "/api/recordings/r1/playlist", "/api/ring/playlist"} {
+	for _, p := range []string{"/api/recordings", "/api/recordings/r1/playlist"} {
 		if w := do(t, h, "GET", p, "", false); w.Code != 401 {
 			t.Fatalf("%s: %d", p, w.Code)
 		}
 	}
 }
 
-// --- ring proxy ------------------------------------------------------------------------
-
-func TestRingProxyForwardsRangeAndHeaders(t *testing.T) {
-	sup := newFakeSupervisor()
-	sup.proxies["/ring/index.m3u8"] = supervisor.ProxyResult{
-		StatusCode: 206, Body: []byte("part"),
-		Headers: map[string]string{"Content-Range": "bytes 0-3/100", "Content-Type": "application/vnd.apple.mpegurl"},
-	}
-	h := newPublic(sup, nil).Handler()
-	req := httptest.NewRequest("GET", "/api/ring/playlist", nil)
-	req.Header.Set("X-Auth-Request-User", "alice")
-	req.Header.Set("Range", "bytes=0-3")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != 206 || rec.Header().Get("Content-Range") != "bytes 0-3/100" {
-		t.Fatalf("%d %v", rec.Code, rec.Header())
-	}
-	if sup.lastHdrs["Range"] != "bytes=0-3" {
-		t.Fatalf("range not forwarded: %v", sup.lastHdrs)
-	}
-}
-
-func TestRingProxyUnreachableIs502(t *testing.T) {
-	sup := newFakeSupervisor()
-	sup.proxies["/ring/index.m3u8"] = supervisor.ProxyResult{StatusCode: 502, Err: "dial timeout"}
-	h := newPublic(sup, nil).Handler()
-	w := do(t, h, "GET", "/api/ring/playlist", "", true)
-	if w.Code != 502 || decode(t, w)["error"] != "supervisor_unreachable" {
-		t.Fatalf("%d %s", w.Code, w.Body.String())
-	}
-}
+// (No ring-proxy tests: the ring is never streamed back for viewing — see the
+// note where the /api/ring routes used to be registered. Recording playback's
+// range/header proxying is covered by the recordings-playback tests above.)
 
 // --- listener separation (T5.5.3) --------------------------------------------------------
 

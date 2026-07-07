@@ -231,8 +231,8 @@ function Row({
 
 function PlayerModal({ rec, onClose }: { rec: RecordingItem; onClose: () => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  // A finite recording: live=false so the operator can scrub from the start.
-  useHls(videoRef, recordingPlaylistUrl(rec.recording_id), { live: false });
+  // A finite recording — the operator scrubs from the start.
+  useHls(videoRef, recordingPlaylistUrl(rec.recording_id));
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

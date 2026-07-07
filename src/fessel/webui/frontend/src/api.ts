@@ -275,9 +275,6 @@ export function recordingPlaylistUrl(recordingId: string): string {
   return `/api/recordings/${encodeURIComponent(recordingId)}/playlist`;
 }
 
-// The always-live ring playlist URL (B4.5 / F4.1).
-export const RING_PLAYLIST_URL = "/api/ring/playlist";
-
 async function diagnostic(res: Response): Promise<string> {
   let body: unknown = null;
   try {

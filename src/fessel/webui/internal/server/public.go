@@ -192,21 +192,10 @@ func (p *Public) Handler() http.Handler {
 		writeJSON(w, result.StatusCode, result.Body)
 	})
 
-	mux.HandleFunc("GET /api/ring/playlist", func(w http.ResponseWriter, r *http.Request) {
-		if p.requireIdentity(w, r) == nil {
-			return
-		}
-		// The ring is always local — no store path. Range support is
-		// end-to-end (frontend -> here -> supervisor -> file).
-		p.proxyBinary(w, r, "/ring/index.m3u8")
-	})
-
-	mux.HandleFunc("GET /api/ring/segment/{name}", func(w http.ResponseWriter, r *http.Request) {
-		if p.requireIdentity(w, r) == nil {
-			return
-		}
-		p.proxyBinary(w, r, "/ring/"+r.PathValue("name"))
-	})
+	// (No ring-playback endpoints: the ring buffer lives on the Pi behind the
+	// cellular link and is never streamed back for viewing — its only role is
+	// retroactive capture, exposed through the recording look-back, not an HLS
+	// viewer. Recording playback is served by the /api/recordings routes above.)
 
 	// --- live WHEP viewer signaling (architecture §2.3/§4.2) ------------------
 	mux.HandleFunc("POST /whep", p.handleWHEP)

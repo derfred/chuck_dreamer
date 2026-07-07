@@ -1,30 +1,15 @@
-// Monitor video panel: a single stage with a Ring/Live source toggle (the
-// bandwidth-aware heart of the redesign).
+// Monitor video panel: the live WebRTC view with a Stream On/Off toggle above it.
 //
-// Two sources, two very different costs:
-//   - Ring (default): HLS replay of the rolling ring buffer the recorder is
-//     already writing to disk. Cheap, buffered, always safe to leave running.
-//   - Live: a dedicated WebRTC/WHEP stream with sub-second latency. Expensive —
-//     it is the ONLY surface that opens a real-time stream, so it never
-//     auto-starts and tears itself down on tab-hide (useLiveSession) and on
-//     switch-back-to-Ring (here) and on navigate-away (unmount).
-//
-// Each source owns its own <video> element so switching is a clean stop/start,
-// never a src/srcObject swap on a shared element. The inactive source's element
-// is unmounted, which stops its playback (HLS destroy / live teardown).
+// The ring buffer lives on the Pi behind the cellular link, so it is NEVER
+// streamed back for viewing — its only role is retroactive capture (the record
+// dialog's look-back). The one viewable surface here is the dedicated
+// WebRTC/WHEP live stream, and the toggle controls whether that stream is
+// active at all. It defaults to OFF (0 bandwidth): the operator turns it on
+// deliberately, and it tears itself down on tab-hide (useLiveSession) and on
+// navigate-away (unmount).
 
 import { useEffect, useRef, useState } from "react";
-import { AnomalyLane } from "./AnomalyLane";
-import { RING_PLAYLIST_URL } from "./api";
-import { useHls } from "./useHls";
 import { useLiveSession } from "./useLiveSession";
-import type { AnomalyLogEntry } from "../../shared/schemas";
-
-type Source = "ring" | "live";
-
-// Ring window length (ms) for the anomaly lane's time mapping. Matches the
-// backend ring buffer (~120s); a knob only if the buffer length changes.
-const RING_WINDOW_MS = 120_000;
 
 const SPINNER: Partial<Record<string, string>> = {
   Requesting: "Connecting…",
@@ -32,8 +17,10 @@ const SPINNER: Partial<Record<string, string>> = {
   WaitingForVideo: "Waiting for video…",
 };
 
-export function MonitorVideo({ anomalies }: { anomalies: AnomalyLogEntry[] }) {
-  const [source, setSource] = useState<Source>("ring");
+export function MonitorVideo() {
+  // Default OFF: opening Monitor must not open a stream. The operator turns the
+  // live view on when they want it (and pays the bandwidth then, not before).
+  const [streamOn, setStreamOn] = useState(false);
   return (
     <div style={{ border: "1px solid #dde3e6", borderRadius: 14, overflow: "hidden", background: "#fff" }}>
       <div
@@ -45,25 +32,21 @@ export function MonitorVideo({ anomalies }: { anomalies: AnomalyLogEntry[] }) {
           borderBottom: "1px solid #eaeef0",
         }}
       >
-        <SourceToggle source={source} onChange={setSource} />
-        <CostTag source={source} />
+        <StreamToggle on={streamOn} onChange={setStreamOn} />
+        <CostTag on={streamOn} />
       </div>
-      {source === "ring" ? (
-        <RingStage anomalies={anomalies} onGoLive={() => setSource("live")} />
-      ) : (
-        <LiveStage onFellBack={() => setSource("ring")} />
-      )}
+      {streamOn ? <LiveStage /> : <StreamOffStage onTurnOn={() => setStreamOn(true)} />}
     </div>
   );
 }
 
-// --- source toggle -----------------------------------------------------------
+// --- stream on/off toggle ----------------------------------------------------
 
-function SourceToggle({ source, onChange }: { source: Source; onChange: (s: Source) => void }) {
+function StreamToggle({ on, onChange }: { on: boolean; onChange: (on: boolean) => void }) {
   return (
     <div
       role="group"
-      aria-label="Video source"
+      aria-label="Live stream"
       style={{
         display: "inline-flex",
         background: "#eef1f3",
@@ -72,16 +55,27 @@ function SourceToggle({ source, onChange }: { source: Source; onChange: (s: Sour
         border: "1px solid #dde3e6",
       }}
     >
-      <SegButton on="ring" active={source === "ring"} onClick={() => onChange("ring")} />
-      <SegButton on="live" active={source === "live"} onClick={() => onChange("live")} />
+      <SegButton label="Stream On" mode="on" active={on} onClick={() => onChange(true)} />
+      <SegButton label="Stream Off" mode="off" active={!on} onClick={() => onChange(false)} />
     </div>
   );
 }
 
-function SegButton({ on, active, onClick }: { on: Source; active: boolean; onClick: () => void }) {
-  const label = on === "ring" ? "Ring" : "Live";
-  const activeBg = on === "live" ? "#c2410c" : "#fff";
-  const activeColor = on === "live" ? "#fff" : "#0d6b57";
+function SegButton({
+  label,
+  mode,
+  active,
+  onClick,
+}: {
+  label: string;
+  mode: "on" | "off";
+  active: boolean;
+  onClick: () => void;
+}) {
+  // Active "On" is the warm live colour (streaming = costs bandwidth); active
+  // "Off" is a neutral raised chip (the safe resting state).
+  const activeBg = mode === "on" ? "#c2410c" : "#fff";
+  const activeColor = mode === "on" ? "#fff" : "#16211f";
   return (
     <button
       type="button"
@@ -97,7 +91,7 @@ function SegButton({ on, active, onClick }: { on: Source; active: boolean; onCli
         color: active ? activeColor : "#5a6b68",
         padding: "6px 14px",
         borderRadius: 7,
-        boxShadow: active && on === "ring" ? "0 1px 2px rgba(0,0,0,.06)" : "none",
+        boxShadow: active && mode === "off" ? "0 1px 2px rgba(0,0,0,.06)" : "none",
       }}
     >
       {label}
@@ -105,8 +99,7 @@ function SegButton({ on, active, onClick }: { on: Source; active: boolean; onCli
   );
 }
 
-function CostTag({ source }: { source: Source }) {
-  const cheap = source === "ring";
+function CostTag({ on }: { on: boolean }) {
   return (
     <span
       style={{
@@ -115,85 +108,64 @@ function CostTag({ source }: { source: Source }) {
         fontWeight: 600,
         padding: "3px 9px",
         borderRadius: 999,
-        color: cheap ? "#0d6b57" : "#c2410c",
-        background: cheap ? "rgba(23,150,122,0.12)" : "#fdf1ec",
+        color: on ? "#c2410c" : "#8a9895",
+        background: on ? "#fdf1ec" : "#eef1f3",
       }}
     >
-      {cheap ? "◇ Buffered · low bandwidth" : "⚡ WebRTC · dedicated stream"}
+      {on ? "⚡ WebRTC · live" : "◇ stream off · 0 bandwidth"}
     </span>
   );
 }
 
-// --- ring stage (cheap, default) --------------------------------------------
+// --- stream-off resting stage ------------------------------------------------
 
-function RingStage({
-  anomalies,
-  onGoLive,
-}: {
-  anomalies: AnomalyLogEntry[];
-  onGoLive: () => void;
-}) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  useHls(videoRef, RING_PLAYLIST_URL, { live: true });
-
-  const seek = (entry: AnomalyLogEntry) => {
-    // Best-effort playhead jump: map the anomaly's age onto the buffered range.
-    const video = videoRef.current;
-    if (!video) return;
-    const ageMs = Date.now() - Date.parse(entry.ts);
-    if (!Number.isFinite(ageMs)) return;
-    const buffered = video.buffered;
-    if (buffered.length === 0) return;
-    const end = buffered.end(buffered.length - 1);
-    video.currentTime = Math.max(0, end - ageMs / 1000);
-  };
-
+function StreamOffStage({ onTurnOn }: { onTurnOn: () => void }) {
   return (
-    <div>
-      <video
-        ref={videoRef}
-        controls
-        autoPlay
-        playsInline
-        muted
-        style={{ width: "100%", display: "block", background: "#000", aspectRatio: "16 / 10" }}
-      />
-      <div style={{ display: "flex", justifyContent: "flex-end", padding: "8px 12px 0" }}>
-        <button
-          type="button"
-          onClick={onGoLive}
-          style={{
-            font: "inherit",
-            fontSize: 12.5,
-            fontWeight: 650,
-            cursor: "pointer",
-            color: "#fff",
-            background: "#c2410c",
-            border: "none",
-            padding: "6px 12px",
-            borderRadius: 8,
-          }}
-        >
-          Go Live ⚡
-        </button>
-      </div>
-      <div style={{ padding: "8px 12px 12px" }}>
-        <AnomalyLane anomalies={anomalies} windowMs={RING_WINDOW_MS} onSeek={seek} />
-      </div>
+    <div
+      style={{
+        position: "relative",
+        background: "#05100e",
+        aspectRatio: "16 / 10",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 12,
+        color: "#cfe0db",
+      }}
+    >
+      <div style={{ fontSize: 13.5 }}>Stream is off — no bandwidth in use.</div>
+      <button
+        type="button"
+        onClick={onTurnOn}
+        style={{
+          font: "inherit",
+          fontSize: 13,
+          fontWeight: 650,
+          cursor: "pointer",
+          color: "#fff",
+          background: "#c2410c",
+          border: "none",
+          padding: "8px 16px",
+          borderRadius: 9,
+        }}
+      >
+        Turn stream on
+      </button>
     </div>
   );
 }
 
-// --- live stage (expensive, explicit) ---------------------------------------
+// --- live stage (WebRTC) -----------------------------------------------------
 
-function LiveStage({ onFellBack }: { onFellBack: () => void }) {
+function LiveStage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const session = useLiveSession(videoRef);
   const { state, detail, attempt } = session;
 
-  // Start the WebRTC session as soon as the Live source is selected (mounted).
-  // Stop it on unmount (switching back to Ring / leaving Monitor) — the
-  // useLiveSession unmount effect tears the stream down.
+  // Start the WebRTC session as soon as the stream is turned on (mounted). Stop
+  // it on unmount (toggled off / left Monitor) — useLiveSession's unmount effect
+  // tears the stream down and releases the WHEP viewer.
   useEffect(() => {
     session.start();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -203,47 +175,40 @@ function LiveStage({ onFellBack }: { onFellBack: () => void }) {
   const showVideo = state === "Playing" || state === "WaitingForVideo" || state === "Stalled";
 
   return (
-    <div>
-      <div style={{ position: "relative", background: "#000", aspectRatio: "16 / 10" }}>
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          style={{
-            width: "100%",
-            height: "100%",
-            objectFit: "contain",
-            display: showVideo ? "block" : "none",
-          }}
-        />
-        {spinner && (
-          <Overlay>
-            <Spinner />
-            <div>{spinner}</div>
-          </Overlay>
-        )}
-        {state === "Stalled" && (
-          <Banner color="#b8860b">
-            Stream stalled — reconnecting… (attempt {attempt}){detail ? ` — ${detail}` : ""}
-          </Banner>
-        )}
-        {state === "Error" && (
-          <Overlay>
-            <p style={{ color: "#ffb4a4", margin: 0, textAlign: "center", padding: "0 16px" }}>
-              {detail || "Something went wrong."}
-            </p>
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button type="button" onClick={session.retry} style={liveBtn}>
-                Retry
-              </button>
-              <button type="button" onClick={onFellBack} style={liveBtnGhost}>
-                Back to Ring
-              </button>
-            </div>
-          </Overlay>
-        )}
-      </div>
+    <div style={{ position: "relative", background: "#000", aspectRatio: "16 / 10" }}>
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        style={{
+          width: "100%",
+          height: "100%",
+          objectFit: "contain",
+          display: showVideo ? "block" : "none",
+        }}
+      />
+      {spinner && (
+        <Overlay>
+          <Spinner />
+          <div>{spinner}</div>
+        </Overlay>
+      )}
+      {state === "Stalled" && (
+        <Banner color="#b8860b">
+          Stream stalled — reconnecting… (attempt {attempt}){detail ? ` — ${detail}` : ""}
+        </Banner>
+      )}
+      {state === "Error" && (
+        <Overlay>
+          <p style={{ color: "#ffb4a4", margin: 0, textAlign: "center", padding: "0 16px" }}>
+            {detail || "Something went wrong."}
+          </p>
+          <button type="button" onClick={session.retry} style={liveBtn}>
+            Retry
+          </button>
+        </Overlay>
+      )}
     </div>
   );
 }
@@ -258,12 +223,7 @@ const liveBtn: React.CSSProperties = {
   border: "none",
   padding: "7px 14px",
   borderRadius: 8,
-};
-
-const liveBtnGhost: React.CSSProperties = {
-  ...liveBtn,
-  background: "transparent",
-  border: "1px solid rgba(255,255,255,0.4)",
+  marginTop: 12,
 };
 
 function Overlay({ children }: { children: React.ReactNode }) {

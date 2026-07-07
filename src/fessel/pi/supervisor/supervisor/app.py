@@ -60,7 +60,7 @@ from pydantic import BaseModel, Field
 from .bandwidth import BandwidthCoordinator
 from .control import ControlPlane, build_control_plane
 from .jetson import JetsonError
-from .recordings import RingProxy
+from .recordings import RecordingProxy
 from .wiz import PlugError
 
 log = logging.getLogger(__name__)
@@ -344,10 +344,8 @@ def create_app(
   # enforces traversal protection. ssd_path is the shared `storage` section of
   # fessel.yaml (same value video + uploader read).
   storage = Storage((cfg.get("storage") or {}).get("ssd_path", "/mnt/ssd"))
-  ring_proxy = RingProxy(
-    storage.ring_dir,
+  rec_proxy = RecordingProxy(
     storage.explicit_dir,
-    on_ring_read=bw.note_ring_read,
     anomaly_dir=storage.anomaly_dir,
   )
 
@@ -577,23 +575,15 @@ def create_app(
 
   @app.get("/recordings/{recording_id}/index.m3u8")
   def recording_playlist(recording_id: str):  # noqa: ANN202
-    # Local playback proxy for an unflagged/not-yet-uploaded recording (B4.3
-    # open seam: symmetric with the ring proxy).
-    return ring_proxy.recording_playlist(recording_id)
+    # Local playback proxy for an unflagged/not-yet-uploaded recording (B4.3).
+    return rec_proxy.recording_playlist(recording_id)
 
   @app.get("/recordings/{recording_id}/{segment}")
   def recording_segment(recording_id: str, segment: str):  # noqa: ANN202
-    return ring_proxy.recording_segment(recording_id, segment)
+    return rec_proxy.recording_segment(recording_id, segment)
 
-  @app.get("/ring/index.m3u8")
-  def ring_playlist():  # noqa: ANN202
-    # Serve the ring playlist as-is (S4.3). Range requests + traversal guard are
-    # handled in RingProxy.
-    return ring_proxy.ring_playlist()
-
-  @app.get("/ring/{segment}")
-  def ring_segment(segment: str):  # noqa: ANN202
-    return ring_proxy.ring_segment(segment)
+  # No /ring/* routes: the ring buffer is never served for viewing (it lives on
+  # the Pi behind the cellular link). It only backs recording look-back.
 
   return app
 

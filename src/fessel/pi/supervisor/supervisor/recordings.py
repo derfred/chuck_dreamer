@@ -18,7 +18,6 @@ write-once segments.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -52,48 +51,26 @@ def _serve(path: Path) -> FileResponse:
   return FileResponse(path, media_type=media_type, headers={"Cache-Control": cache})
 
 
-class RingProxy:
-  """Serves the ring playlist + segments and explicit-recording files from the
-  SSD, with traversal protection (S4.3, B4.3/B4.4 open seam).
+class RecordingProxy:
+  """Serves explicit- and anomaly-recording files from the SSD, with traversal
+  protection (S4.3, B4.3/B4.4 open seam).
 
-  `on_ring_read` (set by create_app to the bandwidth coordinator's
-  `note_ring_read`) fires whenever a ring file is served, so the coordinator
-  knows a ring viewer is active and suspends uploads (§2.12). It is the explicit
-  presence signal HLS needs (WebRTC would have provided it implicitly). Only
-  ring reads fire it — explicit-recording review is out of the §2.12 "start
-  simple" scope.
+  The ring buffer itself is never served for viewing: it lives on the Pi behind
+  the cellular link, so streaming it back would burn scarce uplink. Its only role
+  is retroactive capture (a recording copies a look-back window out of it). What
+  this serves is finalised recordings the operator plays back on demand.
   """
 
   def __init__(
     self,
-    ring_dir: Path,
     explicit_dir: Path,
-    on_ring_read: Callable[[], None] | None = None,
     anomaly_dir: Path | None = None,
   ) -> None:
-    self._ring_dir = ring_dir
     self._explicit_dir = explicit_dir
     # Slice 5: anomaly recordings live under recordings/anomaly/<id>/ with the
     # same on-disk shape; playback resolves a recording id in either dir (S5.4 /
     # B5.3 — playback works unchanged for both types).
     self._anomaly_dir = anomaly_dir
-    self._on_ring_read = on_ring_read
-
-  def _note_read(self) -> None:
-    if self._on_ring_read is not None:
-      self._on_ring_read()
-
-  def ring_playlist(self) -> FileResponse:
-    path = self._ring_dir / "index.m3u8"
-    if not path.is_file():
-      raise HTTPException(status_code=404, detail="ring playlist not available")
-    self._note_read()
-    return _serve(path)
-
-  def ring_segment(self, name: str) -> FileResponse:
-    resp = _serve(_safe_child(self._ring_dir, name))
-    self._note_read()
-    return resp
 
   def recording_playlist(self, recording_id: str) -> FileResponse:
     rec_dir = self._resolve_recording_dir(recording_id)

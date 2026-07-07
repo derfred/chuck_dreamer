@@ -1,6 +1,6 @@
-// A tiny inline SVG sparkline (F5.1/F5.4). Plots a series of values in [0,1]
+// A tiny inline SVG sparkline (F5.1). Plots a series of values in [0,1]
 // (or auto-scaled) as a polyline. No dependency, no axes — a quick-glance trend.
-// Shared by the dashboard sensing strip and the /ring activity view.
+// Used by the dashboard sensing strip.
 
 interface SparklineProps {
   values: number[];

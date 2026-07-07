@@ -1,11 +1,11 @@
-// MonitorVideo tests: the Ring/Live source toggle and its bandwidth framing.
-//   - defaults to Ring (cheap) with the low-bandwidth cost tag + a Go Live CTA;
-//   - selecting Live flips to the dedicated-stream cost tag and mounts the live
-//     stage (which opens the WebRTC session);
-//   - switching back to Ring tears the live session down (the PC is closed).
+// MonitorVideo tests: the Stream On/Off toggle and its bandwidth framing.
+//   - defaults to OFF (0 bandwidth) — opening Monitor must not open a stream;
+//   - turning the stream on flips to the live cost tag and opens a WebRTC
+//     session (the PC is created);
+//   - turning it back off tears the live session down (the PC is closed).
 //
-// jsdom has no HLS/MSE (useHls no-ops) and no WebRTC, so we install the fake
-// RTC peer + a WHEP-shaped fetch; the assertions stay on the toggle/cost DOM.
+// jsdom has no WebRTC, so we install the fake RTC peer + a WHEP-shaped fetch;
+// the assertions stay on the toggle/cost DOM + PC lifecycle.
 
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -39,42 +39,56 @@ async function tick(ms = 0) {
   });
 }
 
-describe("source toggle", () => {
-  it("defaults to Ring with the low-bandwidth cost tag and a Go Live CTA", () => {
-    render(<MonitorVideo anomalies={[]} />);
-    const ring = screen.getByRole("button", { name: "Ring" });
-    const live = screen.getByRole("button", { name: "Live" });
-    expect(ring.getAttribute("aria-pressed")).toBe("true");
-    expect(live.getAttribute("aria-pressed")).toBe("false");
-    expect(screen.getByText(/low bandwidth/)).toBeTruthy();
-    expect(screen.getByText("Go Live ⚡")).toBeTruthy();
+describe("stream on/off toggle", () => {
+  it("defaults to Stream Off (0 bandwidth) and opens NO WebRTC session", () => {
+    render(<MonitorVideo />);
+    expect(screen.getByRole("button", { name: "Stream Off" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Stream On" }).getAttribute("aria-pressed")).toBe(
+      "false",
+    );
+    expect(screen.getByText(/0 bandwidth/)).toBeTruthy();
+    // The resting stage offers to turn the stream on; no stream is running.
+    expect(screen.getByText("Turn stream on")).toBeTruthy();
+    expect(createdPcs.length).toBe(0);
   });
 
-  it("selecting Live shows the dedicated-stream cost tag and opens a WebRTC session", async () => {
-    render(<MonitorVideo anomalies={[]} />);
+  it("turning the stream on shows the live cost tag and opens a WebRTC session", async () => {
+    render(<MonitorVideo />);
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Live" }));
+      fireEvent.click(screen.getByRole("button", { name: "Stream On" }));
     });
     await tick(0); // drain the WHEP POST
-    expect(screen.getByRole("button", { name: "Live" }).getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByText(/dedicated stream/)).toBeTruthy();
-    // The live stage mounted and started a peer connection.
+    expect(screen.getByRole("button", { name: "Stream On" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    expect(screen.getByText(/WebRTC · live/)).toBeTruthy();
     expect(createdPcs.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("switching Live -> Ring tears the live session down (PC closed)", async () => {
-    render(<MonitorVideo anomalies={[]} />);
+  it("the resting 'Turn stream on' button also starts the stream", async () => {
+    render(<MonitorVideo />);
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Live" }));
+      fireEvent.click(screen.getByText("Turn stream on"));
+    });
+    await tick(0);
+    expect(createdPcs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("turning the stream off tears the live session down (PC closed)", async () => {
+    render(<MonitorVideo />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stream On" }));
     });
     await tick(0);
     const pc = createdPcs[createdPcs.length - 1];
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Ring" }));
+      fireEvent.click(screen.getByRole("button", { name: "Stream Off" }));
     });
     await tick(0);
-    // Back on Ring: cheap tag restored, and the WebRTC PC was closed on unmount.
-    expect(screen.getByText(/low bandwidth/)).toBeTruthy();
+    // Back off: 0-bandwidth tag restored, and the WebRTC PC was closed on unmount.
+    expect(screen.getByText(/0 bandwidth/)).toBeTruthy();
     expect(pc.closed).toBe(true);
   });
 });

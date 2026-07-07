@@ -196,34 +196,27 @@ def test_list_recordings_newest_first(client):
 # --- S4.3 ring proxy + traversal protection ----------------------------------
 
 
-def test_ring_playlist_and_segment(client):
-  (client._ssd.ring_dir / "index.m3u8").write_text("#EXTM3U\nseg-00000.ts\n")
-  (client._ssd.ring_dir / "seg-00000.ts").write_bytes(b"X" * 50)
-  with client:
-    assert client.get("/ring/index.m3u8").status_code == 200
-    seg = client.get("/ring/seg-00000.ts")
-    assert seg.status_code == 200 and len(seg.content) == 50
-    # Range request -> 206 (HLS scrubbing).
-    rng = client.get("/ring/seg-00000.ts", headers={"Range": "bytes=0-9"})
-    assert rng.status_code == 206
-
-
-def test_ring_missing_playlist_is_404(client):
-  with client:
-    assert client.get("/ring/index.m3u8").status_code == 404
-
-
-def test_ring_traversal_blocked(client):
-  with client:
-    assert client.get("/ring/..%2F..%2Fetc%2Fpasswd").status_code == 404
+# (No ring playback endpoints: the ring buffer is never served for viewing — it
+# lives on the Pi behind the cellular link and only backs recording look-back.
+# Recording playback + its Range/traversal handling are covered below.)
 
 
 def test_recording_segment_proxy(client):
   _seed_recording(client._ssd, "r1")
   with client:
     assert client.get("/recordings/r1/index.m3u8").status_code == 200
-    assert client.get("/recordings/r1/seg-00000.ts").status_code == 200
+    seg = client.get("/recordings/r1/seg-00000.ts")
+    assert seg.status_code == 200
+    # Range request -> 206 (HLS scrubbing).
+    rng = client.get("/recordings/r1/seg-00000.ts", headers={"Range": "bytes=0-9"})
+    assert rng.status_code == 206
     assert client.get("/recordings/unknown/index.m3u8").status_code == 404
+
+
+def test_recording_traversal_blocked(client):
+  with client:
+    # A traversal segment in the recording id must not escape the recordings dir.
+    assert client.get("/recordings/..%2F..%2Fetc/index.m3u8").status_code == 404
 
 
 # --- B4.6 upload-progress cache ----------------------------------------------

@@ -1,21 +1,17 @@
-// Shared HLS playback hook (F4.1, F4.3). Attaches hls.js to a <video> element,
-// or uses the browser's native HLS when available (Safari / iOS, the
-// iPhone-primary access pattern). Tearing down is clean: the hls.js instance is
-// destroyed on URL change / unmount so a closed player frees its buffers.
+// Shared HLS playback hook (F4.3). Attaches hls.js to a <video> element, or uses
+// the browser's native HLS when available (Safari / iOS, the iPhone-primary
+// access pattern). Tearing down is clean: the hls.js instance is destroyed on
+// URL change / unmount so a closed player frees its buffers.
 //
-// `src` null means "no source" (player idle). When `live` is true the player
-// seeks to the live edge as new segments arrive (the ring is rolling, F4.1);
-// for a finite recording it is false so the operator can scrub from the start.
+// `src` null means "no source" (player idle). Playback is for finite recordings
+// (the recordings playback modal) — the operator scrubs from the start. The ring
+// buffer is never played back in the UI (it lives on the Pi behind cellular), so
+// there is no live-edge-following mode here.
 
 import { useEffect } from "react";
 import Hls from "hls.js";
 
-export function useHls(
-  videoRef: React.RefObject<HTMLVideoElement>,
-  src: string | null,
-  opts: { live?: boolean } = {},
-): void {
-  const live = opts.live ?? false;
+export function useHls(videoRef: React.RefObject<HTMLVideoElement>, src: string | null): void {
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !src) return;
@@ -34,24 +30,11 @@ export function useHls(
       return;
     }
 
-    const hls = new Hls({
-      // For the live ring, keep the player near the edge; for a finite
-      // recording these are inert.
-      liveSyncDurationCount: 3,
-      lowLatencyMode: false,
-    });
+    const hls = new Hls({ lowLatencyMode: false });
     hls.loadSource(src);
     hls.attachMedia(video);
-    if (live) {
-      hls.on(Hls.Events.LEVEL_LOADED, () => {
-        // Nudge toward the live edge when fresh segments land (F4.1).
-        if (hls.liveSyncPosition != null && video.currentTime < hls.liveSyncPosition - 5) {
-          video.currentTime = hls.liveSyncPosition;
-        }
-      });
-    }
     return () => {
       hls.destroy();
     };
-  }, [videoRef, src, live]);
+  }, [videoRef, src]);
 }

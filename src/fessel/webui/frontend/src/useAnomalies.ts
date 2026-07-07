@@ -1,6 +1,6 @@
-// Poll the anomaly log (/api/anomalies) on the dashboard cadence. Shared by the
-// Monitor video's anomaly lane and the Footage ring hero. A 401 escalates to
-// re-auth; other errors keep the last-known list (informational overlay).
+// Poll the anomaly log (/api/anomalies) on the dashboard cadence. Feeds the
+// record dialog's look-back timeline (anchor a recording to an anomaly). A 401
+// escalates to re-auth; other errors keep the last-known list.
 
 import { useEffect, useState } from "react";
 import { AuthError, fetchAnomalies, reauthenticate } from "./api";
