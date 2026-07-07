@@ -21,8 +21,8 @@ jobs:
       matrix:
         project: [schemas, pi/shared, pi/supervisor, pi/uploader]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
       - run: uv sync
         working-directory: src/fessel/${{ matrix.project }}
       - run: uv run pytest -q
@@ -35,7 +35,7 @@ jobs:
     # branch) in the runner image; its venv is --system-site-packages.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install system GStreamer + PyGObject + OpenCV
         run: |
           sudo apt-get update
@@ -56,8 +56,8 @@ jobs:
   webui-go:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: src/fessel/webui/go.mod
       - run: go vet ./...
@@ -68,8 +68,8 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
       - run: npm ci
@@ -87,12 +87,12 @@ jobs:
   types-in-sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
-      - uses: actions/setup-go@v5 # gofmt for the generated Go structs
+      - uses: actions/setup-go@v6 # gofmt for the generated Go structs
         with:
           go-version-file: src/fessel/webui/go.mod
       - run: make check-types
@@ -105,7 +105,7 @@ jobs:
   dpkg-upgrade:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: dpkg N-1 -> N upgrade test (config preservation)
         run: |
           docker run --rm -v "$PWD/src/fessel":/src -w /src debian:trixie bash -c '

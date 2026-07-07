@@ -36,7 +36,7 @@ jobs:
   build-deb:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
@@ -55,7 +55,7 @@ jobs:
           cache-from: type=gha,scope=gst-plugins-rs-deb
           cache-to: type=gha,scope=gst-plugins-rs-deb,mode=max
       - run: ls -la dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: gst-plugins-rs-dpkg
           path: dist/*.deb
@@ -68,16 +68,16 @@ jobs:
     # gh-pages apt repo, and a concurrent push would race.
     concurrency: fessel-apt-repo
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: src-repo
       - name: Checkout gh-pages (the apt repo; preserves prior pool versions)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: gh-pages
           path: gh-pages
       - name: Download the built .deb
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: gst-plugins-rs-dpkg
           path: deb
