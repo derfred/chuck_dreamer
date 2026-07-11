@@ -384,6 +384,38 @@ def test_build_leader_decoupled_from_policy(tmp_path):
   assert rt.leader is not None
 
 
+def test_build_leader_survives_params_leaked_from_target_swap(tmp_path):
+  # Regression (B2): `--leader-port` swaps runtime.leader.target to the real
+  # reader, but OmegaConf's key-wise merge leaves the fake's `pose: null` in
+  # params. from_config must absorb the leaked key (warn, not crash), and the
+  # jaw bounds must be injected on the from_config path too.
+  rt = Runtime(_build_only_cfg(
+    tmp_path,
+    source={"kind": "manual"},
+    leader={"enabled": True,
+            "target": "chuck_dreamer.runtime.teleop:LerobotLeaderReader",
+            "params": {"pose": None, "port": "/dev/ttyFAKE"}},
+  ))
+  assert isinstance(rt.leader, LerobotLeaderReader)
+  assert rt.leader._port == "/dev/ttyFAKE"
+  # Jaw bounds come from the resolved safety envelope, not config params.
+  assert rt.leader._jaw_lower == pytest.approx(float(rt._limits.lower[-1]))
+  assert rt.leader._jaw_upper == pytest.approx(float(rt._limits.upper[-1]))
+
+
+def test_build_leader_real_reader_requires_port(tmp_path):
+  # Without a port the real reader must fail loudly at build time, not at
+  # start() on the bench.
+  with pytest.raises(ValueError, match="port"):
+    Runtime(_build_only_cfg(
+      tmp_path,
+      source={"kind": "manual"},
+      leader={"enabled": True,
+              "target": "chuck_dreamer.runtime.teleop:LerobotLeaderReader",
+              "params": {}},
+    ))
+
+
 def test_manual_source_without_leader_holds(tmp_path):
   # source.kind=manual no longer requires a leader; ManualPolicy just holds.
   rt = Runtime(_build_only_cfg(tmp_path, source={"kind": "manual"}))

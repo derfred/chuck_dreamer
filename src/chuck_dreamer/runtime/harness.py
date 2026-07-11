@@ -296,13 +296,16 @@ class Runtime:
     jaw_hi               = float(self._limits.upper[-1])
     spec: dict[str, Any] = {"target": target, "params": params}
 
-    # A config-aware reader (e.g. FakeLeaderReader, which ignores the injected
-    # jaw bounds) exposes a from_config classmethod; prefer it. Otherwise
-    # construct directly, injecting the jaw bounds the real reader needs.
+    # One construction contract (LeaderReader docstring): the resolved jaw
+    # bounds are injected on *every* path, so a config-aware reader can never
+    # silently miss the safety envelope. from_config is preferred (it also
+    # absorbs params leaked from a previous target after a config merge);
+    # readers without one get a direct construct with the same injection.
     factory     = import_symbol(target)
     from_config = getattr(factory, "from_config", None)
     if callable(from_config):
-      return cast("LeaderReader", from_config(self.cfg, **params))
+      return cast("LeaderReader",
+                  from_config(self.cfg, jaw_lower=jaw_lo, jaw_upper=jaw_hi, **params))
     return cast("LeaderReader", construct(spec, jaw_lower=jaw_lo, jaw_upper=jaw_hi))
 
   def _build_sensors(self, rt: DictConfig) -> "list[Sensor]":

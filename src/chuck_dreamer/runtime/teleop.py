@@ -119,7 +119,15 @@ def follower_qpos_to_action(
 
 @runtime_checkable
 class LeaderReader(Protocol):
-  """Background source of leader joint state in follower-ordered radians."""
+  """Background source of leader joint state in follower-ordered radians.
+
+  Construction convention: readers expose a ``from_config(cfg, *, jaw_lower,
+  jaw_upper, **params)`` classmethod. The runtime always injects the resolved
+  follower jaw bounds (radians) alongside ``runtime.leader.params``; readers
+  take what they need and ignore (with a warning) params meant for another
+  implementation, so swapping ``runtime.leader.target`` never crashes on
+  leftover keys merged from the previous target's params.
+  """
 
   def start(self) -> None:
     """Open the leader and begin polling (idempotent)."""
@@ -178,6 +186,38 @@ class LerobotLeaderReader:
     self._stop                            = threading.Event()
     self._thread: threading.Thread | None = None
     self._leader: Any = None  # lerobot SO101Leader (untyped), constructed in start()
+
+  @classmethod
+  def from_config(
+    cls,
+    cfg,
+    *,
+    jaw_lower:      float,
+    jaw_upper:      float,
+    port:           str | None = None,
+    calibration_id: str | None = None,
+    use_degrees:    bool = True,
+    poll_rate_hz:   float = 100.0,
+    calibrate:      bool = True,
+    **ignored,
+  ) -> "LerobotLeaderReader":
+    """Config factory (see :class:`LeaderReader` construction convention).
+
+    Params meant for another reader (e.g. ``FakeLeaderReader``'s ``pose``
+    surviving a target swap in the merged config) are ignored with a warning
+    rather than crashing ``__init__``.
+    """
+    if ignored:
+      logger.warning(
+        "LerobotLeaderReader ignoring leader params it does not use: %s",
+        sorted(ignored))
+    if not port:
+      raise ValueError(
+        "LerobotLeaderReader needs runtime.leader.params.port (or --leader-port)")
+    return cls(
+      port=port, jaw_lower=jaw_lower, jaw_upper=jaw_upper,
+      calibration_id=calibration_id, use_degrees=use_degrees,
+      poll_rate_hz=poll_rate_hz, calibrate=calibrate)
 
   def start(self) -> None:
     # Lazy import: keeps module import hardware-free (no serial libs loaded
@@ -264,10 +304,10 @@ class FakeLeaderReader:
 
   @classmethod
   def from_config(cls, cfg, *, pose=None, **_) -> "FakeLeaderReader":
-    """Config / test factory: ``runtime.leader`` targets this with ``params.pose``.
+    """Config factory (see :class:`LeaderReader` construction convention).
 
-    Swallows the runtime-injected ``jaw_lower`` / ``jaw_upper`` (irrelevant to a
-    fake that returns a pose verbatim) so the construction path matches the real
-    reader's.
+    Swallows the always-injected ``jaw_lower`` / ``jaw_upper`` (irrelevant to a
+    fake that returns a pose verbatim) along with any params meant for another
+    reader.
     """
     return cls(pose=pose)
