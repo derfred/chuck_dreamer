@@ -220,6 +220,7 @@ class FeetechBackend:
     if self._follower is None:
       raise RuntimeError("FeetechBackend.last_positions before start()")
     with self._lock:
+      assert self._cached is not None, "start() must prime the cache"
       return self._cached.copy()
 
   def write_positions(self, q: np.ndarray) -> None:
