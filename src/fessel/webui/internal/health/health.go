@@ -3,19 +3,20 @@
 // latest snapshot. The corner light in the frontend is a *rollup* — the worst
 // state across a set of independently observable facts.
 //
-// The five facts (root-cause-first display order):
+// The six facts (root-cause-first display order):
 //
 //	pi_control    reachability of supervisor over the cluster->Pi control path
 //	relay         the in-process live relay (nothing to reach over the
 //	              network — the fact reports ingest/viewer state)
 //	video         video process liveness, read from /state.vision.healthy
 //	camera        camera presence, read from /state.camera.up
+//	uploader      recording-upload queue depth, read from /state.upload_backlog
 //	version_sync  cluster vs Pi MAJOR.MINOR must-match (spec §3.4)
 //
 // Masking (spec §1.5): facts observed *through* supervisor (video, camera,
-// version_sync) become `unknown` when pi_control is red — painting them red
-// would manufacture a cascade obscuring the single root cause. relay is
-// in-process and is never masked.
+// uploader, version_sync) become `unknown` when pi_control is red — painting
+// them red would manufacture a cascade obscuring the single root cause. relay
+// is in-process and is never masked.
 //
 // The snapshot is also the relay's fast-reject gate on /whep (architecture
 // §4.3): GateLiveView applies the confidently-bad table; ambiguous states fall
@@ -36,13 +37,14 @@ type State = string // "green" | "yellow" | "red" | "unknown"
 
 // FactOrder is the fixed display order — reachability first so a red
 // pi_control is seen first.
-var FactOrder = []string{"pi_control", "relay", "video", "camera", "version_sync"}
+var FactOrder = []string{"pi_control", "relay", "video", "camera", "uploader", "version_sync"}
 
 var factLabels = map[string]string{
 	"pi_control":   "Pi control",
 	"relay":        "live relay",
 	"video":        "video process",
 	"camera":       "camera",
+	"uploader":     "recording uploader",
 	"version_sync": "Component versions",
 }
 
@@ -206,6 +208,45 @@ func cameraFact(body map[string]any, now time.Time) Fact {
 	return Fact{"camera", "red", "not detected", now}
 }
 
+// uploaderFact reports the Pi-side recording uploader's activity from
+// upload_backlog (StateResponse.upload_backlog, V4.8 gauges): how many
+// recordings are queued and how old the oldest pending one is. An empty
+// backlog is the uploader idle, not down — there is no separate liveness
+// signal for the uploader process itself, so this fact is a queue-depth
+// gauge, not a process-up check.
+func uploaderFact(body map[string]any, now time.Time) Fact {
+	backlog, ok := body["upload_backlog"].(map[string]any)
+	if !ok {
+		return Fact{"uploader", "unknown", "not reported", now}
+	}
+	count := intOf(backlog["count"])
+	if count == 0 {
+		return Fact{"uploader", "green", "idle — nothing queued", now}
+	}
+	oldest, hasOldest := backlog["oldest_pending_seconds"].(float64)
+	detail := fmt.Sprintf("%d queued", count)
+	if hasOldest {
+		detail = fmt.Sprintf("%d queued, oldest pending %s", count, ageStr(time.Duration(oldest)*time.Second))
+	}
+	// Mirrors the Slice 7 backlog alert threshold (docs: >3h P2): a backlog
+	// that has been sitting for hours is a stuck uploader, not a busy one.
+	if hasOldest && oldest > 3*3600 {
+		return Fact{"uploader", "red", detail, now}
+	}
+	return Fact{"uploader", "yellow", detail, now}
+}
+
+func intOf(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	default:
+		return 0
+	}
+}
+
 func (m *Monitor) versionSyncFact(body map[string]any, now time.Time) Fact {
 	versionObj, _ := body["version"].(map[string]any)
 	component, _ := versionObj["component"].(string)
@@ -235,20 +276,22 @@ func (m *Monitor) compute(stateOK bool, stateBody map[string]any) ([]Fact, map[s
 	piControl := m.piControlFact(stateOK, now)
 	relay := m.relayFact(now)
 
-	var video, camera, versionSync Fact
+	var video, camera, uploader, versionSync Fact
 	if piControl.State == "red" {
 		// Masking (spec §1.5): everything observed *through* supervisor is
 		// unknown, not red. The relay is in-process and stays as observed.
 		video = Fact{"video", "unknown", "unknown — Pi unreachable", now}
 		camera = Fact{"camera", "unknown", "unknown — Pi unreachable", now}
+		uploader = Fact{"uploader", "unknown", "unknown — Pi unreachable", now}
 		versionSync = Fact{"version_sync", "unknown", "unknown — can't read Pi version", now}
 	} else {
 		video = videoFact(stateBody, now)
 		camera = cameraFact(stateBody, now)
+		uploader = uploaderFact(stateBody, now)
 		versionSync = m.versionSyncFact(stateBody, now)
 	}
 
-	facts := []Fact{piControl, relay, video, camera, versionSync}
+	facts := []Fact{piControl, relay, video, camera, uploader, versionSync}
 	dicts := make([]any, 0, len(facts))
 	for _, f := range facts {
 		dicts = append(dicts, f.toDict())

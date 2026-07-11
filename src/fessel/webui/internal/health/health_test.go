@@ -23,9 +23,10 @@ func (f *fakeRelay) ViewerCount() int { return f.viewers }
 
 func healthyState() map[string]any {
 	return map[string]any{
-		"vision":  map[string]any{"healthy": true},
-		"camera":  map[string]any{"up": true},
-		"version": map[string]any{"component": "1.4.2"},
+		"vision":         map[string]any{"healthy": true},
+		"camera":         map[string]any{"up": true},
+		"upload_backlog": map[string]any{"count": float64(0)},
+		"version":        map[string]any{"component": "1.4.2"},
 	}
 }
 
@@ -55,8 +56,8 @@ func TestSnapshotBeforeFirstRefreshIsAllUnknown(t *testing.T) {
 	if snap["light"] != "unknown" {
 		t.Fatalf("light %v", snap["light"])
 	}
-	if len(snap["facts"].([]any)) != 5 {
-		t.Fatalf("want 5 facts")
+	if len(snap["facts"].([]any)) != 6 {
+		t.Fatalf("want 6 facts")
 	}
 }
 
@@ -84,7 +85,7 @@ func TestMaskingOnUnreachablePi(t *testing.T) {
 		t.Fatalf("pi_control %v", f)
 	}
 	// Facts observed through supervisor become unknown, not red.
-	for _, id := range []string{"video", "camera", "version_sync"} {
+	for _, id := range []string{"video", "camera", "uploader", "version_sync"} {
 		if f := factByID(snap, id); f["state"] != "unknown" {
 			t.Fatalf("%s should be masked unknown: %v", id, f)
 		}
@@ -117,6 +118,32 @@ func TestVersionSyncStates(t *testing.T) {
 		snap := m.RefreshOnce()
 		if f := factByID(snap, "version_sync"); f["state"] != tc.want {
 			t.Fatalf("%s: version_sync %v want %s", tc.name, f, tc.want)
+		}
+	}
+}
+
+func TestUploaderStates(t *testing.T) {
+	cases := []struct {
+		name    string
+		backlog any
+		want    string
+	}{
+		{"not reported", nil, "unknown"},
+		{"empty", map[string]any{"count": float64(0)}, "green"},
+		{"queued recent", map[string]any{"count": float64(2), "oldest_pending_seconds": float64(60)}, "yellow"},
+		{"queued stuck", map[string]any{"count": float64(2), "oldest_pending_seconds": float64(4 * 3600)}, "red"},
+	}
+	for _, tc := range cases {
+		body := healthyState()
+		if tc.backlog == nil {
+			delete(body, "upload_backlog")
+		} else {
+			body["upload_backlog"] = tc.backlog
+		}
+		m := newTestMonitor(&fakeSup{supervisor.ForwardResult{StatusCode: 200, Body: body}}, &fakeRelay{})
+		snap := m.RefreshOnce()
+		if f := factByID(snap, "uploader"); f["state"] != tc.want {
+			t.Fatalf("%s: uploader %v want %s", tc.name, f, tc.want)
 		}
 	}
 }
