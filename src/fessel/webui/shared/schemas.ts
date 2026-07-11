@@ -13,11 +13,7 @@ export type Path = string | null;
  * Error codes of a rejected POST /whep (webui relay, architecture §2.3).
  */
 export type LiveViewErrorCode =
-  | "live_unavailable"
-  | "live_timeout"
-  | "live_activation_failed"
-  | "live_error"
-  | "whep_negotiate_failed";
+  "live_unavailable" | "live_timeout" | "live_activation_failed" | "live_error" | "whep_negotiate_failed";
 export type Reason = string;
 export type On = boolean | null;
 export type Verified = boolean;
@@ -63,6 +59,7 @@ export type LastAttemptAt = string | null;
 export type LastError = string | null;
 export type Count = number;
 export type OldestPendingSeconds = number | null;
+export type Healthy = boolean | null;
 export type RecordingId1 = string;
 export type StartedAt2 = string;
 export type EndedAt1 = string | null;
@@ -79,9 +76,9 @@ export type FlaggedForUpload1 = boolean;
 export type UploadStateValue2 = "none" | "queued" | "uploading" | "uploaded" | "failed";
 export type ActivityScoreEma = number;
 export type LastFrameAt = string | null;
-export type Healthy = boolean;
-export type LevelDb = number | null;
 export type Healthy1 = boolean;
+export type LevelDb = number | null;
+export type Healthy2 = boolean;
 export type Ts = string;
 /**
  * The discrete anomaly events the Slice-5 detectors emit (and clear).
@@ -112,14 +109,7 @@ export type Video = string | null;
  * enum doesn't have to change later.
  */
 export type SafetyState =
-  | "INIT"
-  | "IDLE"
-  | "RUNNING"
-  | "PAUSED"
-  | "STOPPED"
-  | "SHUTDOWN_ARM"
-  | "SHUTDOWN_JETSON"
-  | "DEGRADED";
+  "INIT" | "IDLE" | "RUNNING" | "PAUSED" | "STOPPED" | "SHUTDOWN_ARM" | "SHUTDOWN_JETSON" | "DEGRADED";
 export type Jetson = {
   [k: string]: unknown;
 } | null;
@@ -279,10 +269,17 @@ export interface UploadProgress {
 /**
  * Upload-queue health gauges (V4.8): how many markers are pending and how
  * old the oldest one is. The Slice 7 ">3h" P2 alert lands against these.
+ *
+ * `healthy` is the uploader's own liveness, derived from heartbeat freshness
+ * (arm/video/upload/heartbeat), NOT from queue depth: an uploader that never
+ * started (or is crash-looping before it ever publishes anything) has
+ * count=0/oldest=None too, indistinguishable from a genuinely idle uploader
+ * unless liveness is tracked separately. None = no heartbeat ever received.
  */
 export interface UploadBacklog {
   count?: Count;
   oldest_pending_seconds?: OldestPendingSeconds;
+  healthy?: Healthy;
   [k: string]: unknown;
 }
 /**
@@ -310,7 +307,7 @@ export interface RecordingListItem {
 export interface VisionState {
   activity_score_ema?: ActivityScoreEma;
   last_frame_at?: LastFrameAt;
-  healthy?: Healthy;
+  healthy?: Healthy1;
   [k: string]: unknown;
 }
 /**
@@ -318,7 +315,7 @@ export interface VisionState {
  */
 export interface AudioState {
   level_db?: LevelDb;
-  healthy?: Healthy1;
+  healthy?: Healthy2;
   [k: string]: unknown;
 }
 /**

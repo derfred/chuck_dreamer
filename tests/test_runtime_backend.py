@@ -284,6 +284,7 @@ def test_feetech_bus_transactions_never_interleave(stub_follower):
   f.send_action     = _guard(f.send_action)
 
   q = b.last_positions()
+
   def control():
     for _ in range(50):
       b.write_positions(q)
@@ -294,8 +295,10 @@ def test_feetech_bus_transactions_never_interleave(stub_follower):
       b.read_positions()
 
   threads = [threading.Thread(target=control), threading.Thread(target=rogue_reader)]
-  for t in threads: t.start()
-  for t in threads: t.join()
+  for t in threads:
+    t.start()
+  for t in threads:
+    t.join()
   assert overlap == []               # the backend lock serialized every transaction
   b.stop()
 
