@@ -42,7 +42,7 @@ interface Sample {
 // Drive the live session for a given <video> element. The caller owns the
 // element ref. There is no mode: the live profile is fixed (§4.4 — no
 // resolution selector).
-export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement>): LiveSession {
+export function useLiveSession(videoRef: React.RefObject<HTMLVideoElement | null>): LiveSession {
   const [state, setState] = useState<LiveState>("Idle");
   const [detail, setDetail] = useState<string>("");
   const [attempt, setAttempt] = useState<number>(0);

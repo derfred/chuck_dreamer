@@ -11,7 +11,7 @@
 import { useEffect } from "react";
 import Hls from "hls.js";
 
-export function useHls(videoRef: React.RefObject<HTMLVideoElement>, src: string | null): void {
+export function useHls(videoRef: React.RefObject<HTMLVideoElement | null>, src: string | null): void {
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !src) return;

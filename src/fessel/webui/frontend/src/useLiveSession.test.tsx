@@ -39,7 +39,6 @@ const MAX_ATTEMPTS = 6;
 function mountSession() {
   const ref = createRef<HTMLVideoElement>();
   const video = document.createElement("video");
-  // @ts-expect-error test-only: assign the readonly ref to our element.
   ref.current = video;
   const { result } = renderHook(() => useLiveSession(ref));
   return { result, video };
