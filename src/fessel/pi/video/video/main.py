@@ -22,6 +22,10 @@ into the shape below:
               max_lookback_seconds}   # the always-on ring IS the recording
                                       # buffer (copy-from-ring), so one section
                                       # describes both; window from max_lookback
+  snapshot: {ingest_url_base, interval_s, timeout_s, verify_tls}
+      # Monitor freeze-frame push (best-effort, like vision/audio): PUTs the
+      # latest JPEG to webui's tailnet ingest listener at most once per
+      # interval_s. Reuses the uploader's ingest_url_base convention/host.
 """
 
 from __future__ import annotations
@@ -106,6 +110,18 @@ DEFAULT_ANOMALY = {
   "before_seconds": 30.0,
   "after_seconds": 60.0,
   "auto_upload": False,
+}
+# Freeze-frame push defaults (Monitor UX): a low-rate JPEG PUT to webui's
+# tailnet ingest listener, so the Monitor page has something to show before
+# Stream On without ever costing WebRTC bandwidth. `interval_s` bounds how
+# stale the shown frame can be (up to ~30s is the documented tolerance);
+# `ingest_url_base` reuses the same tailnet ingest endpoint the uploader PUTs
+# recordings to.
+DEFAULT_SNAPSHOT = {
+  "ingest_url_base": "",
+  "interval_s": 25.0,
+  "timeout_s": 10.0,
+  "verify_tls": True,
 }
 
 
@@ -210,6 +226,12 @@ class VideoApp:
     )
     self._gst_vision = None  # GstVisionPipeline (best-effort spawn in run())
     self._gst_audio = None  # GstAudioPipeline
+
+    # --- Monitor freeze-frame (best-effort, like vision/audio) ---------------
+    self._snapshot_cfg = {**DEFAULT_SNAPSHOT, **(config.get("snapshot") or {})}
+    self._gst_snapshot = None  # GstSnapshotPipeline
+    self._snapshot_pusher = None  # SnapshotPusher
+    self._last_snapshot_push = 0.0
 
   def _make_pipeline(self) -> GstLivePipeline:
     # The WHIP sender attaches to the shared capture pipeline's tee_live
@@ -496,6 +518,53 @@ class VideoApp:
       log.exception("audio analysis failed to start (continuing without it)")
       self._gst_audio = None
 
+  def _start_snapshot(self) -> None:
+    """Attach the freeze-frame cache to the shared capture pipeline's snapshot
+    appsink (Monitor UX). Best-effort, like vision/audio: a failure here must
+    never take down live/recording — the Monitor page just falls back to its
+    "no snapshot yet" state."""
+    try:
+      from .gst_snapshot_handle import GstSnapshotPipeline
+
+      self._gst_snapshot = GstSnapshotPipeline(capture=self._capture)
+      self._gst_snapshot.start()
+      log.info("snapshot capture started")
+    except Exception:  # noqa: BLE001
+      log.exception("snapshot capture failed to start (continuing without it)")
+      self._gst_snapshot = None
+
+    url_base = str(self._snapshot_cfg.get("ingest_url_base") or "")
+    if not url_base:
+      log.info("video.snapshot.ingest_url_base not set; freeze-frame push disabled")
+      self._snapshot_pusher = None
+      return
+    try:
+      from .snapshot_push import SnapshotPusher
+
+      self._snapshot_pusher = SnapshotPusher(
+        ingest_url_base=url_base,
+        timeout_s=float(self._snapshot_cfg.get("timeout_s", 10.0)),
+        verify_tls=bool(self._snapshot_cfg.get("verify_tls", True)),
+      )
+    except Exception:  # noqa: BLE001
+      log.exception("snapshot pusher failed to start (continuing without it)")
+      self._snapshot_pusher = None
+
+  def _maybe_push_snapshot(self, now_monotonic: float) -> None:
+    """Push the cached freeze-frame at most once per `interval_s` (Monitor UX).
+    Runs on the main loop tick, not a separate thread — the push itself is a
+    quick best-effort HTTP PUT (SnapshotPusher swallows its own errors)."""
+    if self._gst_snapshot is None or self._snapshot_pusher is None:
+      return
+    interval = float(self._snapshot_cfg.get("interval_s", 10.0))
+    if now_monotonic - self._last_snapshot_push < interval:
+      return
+    jpeg = self._gst_snapshot.latest()
+    if jpeg is None:
+      return
+    self._last_snapshot_push = now_monotonic
+    self._snapshot_pusher.push(jpeg)
+
   def _publish_vision_heartbeat(self) -> None:
     """Publish the vision thread heartbeat (V5.1). Absence -> supervisor marks
     vision degraded. Built from the GstVision handle's live counters; if vision
@@ -682,6 +751,7 @@ class VideoApp:
     # add branches onto its tee.
     self._start_capture()
     self._start_vision_audio()
+    self._start_snapshot()
     self._publish_capabilities()
 
     signal.signal(signal.SIGTERM, lambda *_: self._stop.set())
@@ -707,6 +777,7 @@ class VideoApp:
         )
         last_proc_hb = now
       self._publish_vision_heartbeat()
+      self._maybe_push_snapshot(now)
       self._stop.wait(VISION_HEARTBEAT_INTERVAL_S)
 
     log.info("video shutting down")
@@ -720,6 +791,8 @@ class VideoApp:
       self._gst_vision.stop()
     if self._gst_audio is not None:
       self._gst_audio.stop()
+    if self._gst_snapshot is not None:
+      self._gst_snapshot.stop()
     if self._capture is not None:
       self._capture.stop()
       # Clean shutdown: retract the retained camera-up so a stopped video

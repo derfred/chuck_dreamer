@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/derfred/fessel/webui/internal/auth"
+	"github.com/derfred/fessel/webui/internal/snapshot"
 	"github.com/derfred/fessel/webui/internal/storage"
 	"github.com/derfred/fessel/webui/internal/supervisor"
 )
@@ -258,6 +259,66 @@ func TestConnectionCheckUnreachableIs502(t *testing.T) {
 	w := do(t, h, "POST", "/api/connection-check", "", true)
 	if w.Code != 502 {
 		t.Fatalf("%d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- Monitor freeze-frame ------------------------------------------------------------
+
+func TestSnapshotRequiresAuth(t *testing.T) {
+	p := newPublic(newFakeSupervisor(), nil)
+	p.Snapshot = &snapshot.Holder{}
+	h := p.Handler()
+	if w := do(t, h, "GET", "/api/snapshot", "", false); w.Code != 401 {
+		t.Fatalf("unauth: %d", w.Code)
+	}
+	if w := do(t, h, "GET", "/api/snapshot/meta", "", false); w.Code != 401 {
+		t.Fatalf("unauth meta: %d", w.Code)
+	}
+}
+
+func TestSnapshotNotYetAvailable(t *testing.T) {
+	p := newPublic(newFakeSupervisor(), nil)
+	p.Snapshot = &snapshot.Holder{}
+	h := p.Handler()
+
+	w := do(t, h, "GET", "/api/snapshot", "", true)
+	if w.Code != 404 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	w = do(t, h, "GET", "/api/snapshot/meta", "", true)
+	if w.Code != 200 || decode(t, w)["available"] != false {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSnapshotServesLatestJPEGAndMeta(t *testing.T) {
+	p := newPublic(newFakeSupervisor(), nil)
+	snap := &snapshot.Holder{}
+	snap.Store([]byte("jpeg-bytes"))
+	p.Snapshot = snap
+	h := p.Handler()
+
+	w := do(t, h, "GET", "/api/snapshot", "", true)
+	if w.Code != 200 || w.Body.String() != "jpeg-bytes" || w.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("%d %q %q", w.Code, w.Body.String(), w.Header().Get("Content-Type"))
+	}
+
+	w = do(t, h, "GET", "/api/snapshot/meta", "", true)
+	body := decode(t, w)
+	if w.Code != 200 || body["available"] != true || body["received_at"] == nil {
+		t.Fatalf("%d %v", w.Code, body)
+	}
+}
+
+func TestSnapshotWithoutHolderIsNotFound(t *testing.T) {
+	h := newPublic(newFakeSupervisor(), nil).Handler()
+	w := do(t, h, "GET", "/api/snapshot", "", true)
+	if w.Code != 404 {
+		t.Fatalf("%d", w.Code)
+	}
+	w = do(t, h, "GET", "/api/snapshot/meta", "", true)
+	if w.Code != 200 || decode(t, w)["available"] != false {
+		t.Fatalf("%d %v", w.Code, decode(t, w))
 	}
 }
 

@@ -26,6 +26,7 @@ import (
 
 	"github.com/derfred/fessel/webui/internal/auth"
 	"github.com/derfred/fessel/webui/internal/schemas"
+	"github.com/derfred/fessel/webui/internal/snapshot"
 	"github.com/derfred/fessel/webui/internal/storage"
 	"github.com/derfred/fessel/webui/internal/supervisor"
 	"github.com/derfred/fessel/webui/internal/version"
@@ -71,6 +72,7 @@ type Public struct {
 	Health     HealthAPI
 	Relay      ViewerRelay       // nil -> /whep returns 503 "relay disabled"
 	Controller *relay.Controller // nil -> no gate/activation (tests)
+	Snapshot   *snapshot.Holder  // nil -> /api/snapshot* returns 404
 	StaticDir  string
 }
 
@@ -179,6 +181,47 @@ func (p *Public) Handler() http.Handler {
 		}
 		result := p.Supervisor.Get("/anomalies")
 		writeJSON(w, result.StatusCode, result.Body)
+	})
+
+	// --- Monitor freeze-frame (Monitor UX: a recent still before Stream On,
+	// so opening Monitor never costs WebRTC bandwidth) -----------------------
+	mux.HandleFunc("GET /api/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		if p.requireIdentity(w, r) == nil {
+			return
+		}
+		if p.Snapshot == nil {
+			writeDetail(w, http.StatusNotFound, "no snapshot available")
+			return
+		}
+		data, _, ok := p.Snapshot.Get()
+		if !ok {
+			writeDetail(w, http.StatusNotFound, "no snapshot available")
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	})
+
+	mux.HandleFunc("GET /api/snapshot/meta", func(w http.ResponseWriter, r *http.Request) {
+		if p.requireIdentity(w, r) == nil {
+			return
+		}
+		if p.Snapshot == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"available": false})
+			return
+		}
+		_, receivedAt, ok := p.Snapshot.Get()
+		if !ok {
+			writeJSON(w, http.StatusOK, map[string]any{"available": false})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"available":   true,
+			"received_at": receivedAt.UTC().Format(time.RFC3339Nano),
+		})
 	})
 
 	// --- recording control + recordings/ring API (B4.1–B4.6, B5.5.4/5) -------

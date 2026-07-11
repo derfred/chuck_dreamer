@@ -9,6 +9,8 @@
 // navigate-away (unmount).
 
 import { useEffect, useRef, useState } from "react";
+import { AuthError, fetchSnapshotMeta, reauthenticate } from "./api";
+import { config } from "./config";
 import { useLiveSession } from "./useLiveSession";
 
 const SPINNER: Partial<Record<string, string>> = {
@@ -119,7 +121,62 @@ function CostTag({ on }: { on: boolean }) {
 
 // --- stream-off resting stage ------------------------------------------------
 
+// Cache-bust the <img> src on every successful meta poll, so the browser
+// re-fetches the JPEG each time a fresher one has landed rather than serving
+// its own cached copy of an older frame.
+function snapshotUrl(receivedAt: string): string {
+  return `/api/snapshot?t=${encodeURIComponent(receivedAt)}`;
+}
+
+function ageStr(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h`;
+}
+
 function StreamOffStage({ onTurnOn }: { onTurnOn: () => void }) {
+  const [meta, setMeta] = useState<{ receivedAt: string } | null>(null);
+  const [now, setNow] = useState<number>(() => Date.now());
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = () => {
+      fetchSnapshotMeta()
+        .then((m) => {
+          if (cancelled) return;
+          setMeta(m.available && m.received_at ? { receivedAt: m.received_at } : null);
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          if (e instanceof AuthError) {
+            reauthenticate();
+            return;
+          }
+          // Network / 5xx: keep showing the last-known snapshot
+        });
+    };
+    poll();
+    const id = window.setInterval(poll, config.snapshotPollMs);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // Ticks "now" every second so the age label advances between polls.
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const ageMs = meta ? now - Date.parse(meta.receivedAt) : null;
+  // Colour-shift toward amber as the frame approaches the documented ~30s
+  // staleness bound, so a stuck Pi push (not just a normal 10s-old frame) is
+  // visually distinct.
+  const stale = ageMs != null && ageMs > 25_000;
+
   return (
     <div
       style={{
@@ -134,24 +191,156 @@ function StreamOffStage({ onTurnOn }: { onTurnOn: () => void }) {
         color: "#cfe0db",
       }}
     >
-      <div style={{ fontSize: 13.5 }}>Stream is off — no bandwidth in use.</div>
-      <button
-        type="button"
-        onClick={onTurnOn}
+      {meta && (
+        <button
+          type="button"
+          onClick={() => setLightboxOpen(true)}
+          aria-label="View full-size snapshot"
+          style={{
+            position: "absolute",
+            inset: 0,
+            padding: 0,
+            border: "none",
+            cursor: "zoom-in",
+            background: "transparent",
+          }}
+        >
+          <img
+            src={snapshotUrl(meta.receivedAt)}
+            alt="Recent camera snapshot (not live)"
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+          />
+        </button>
+      )}
+      <div
         style={{
-          font: "inherit",
-          fontSize: 13,
-          fontWeight: 650,
-          cursor: "pointer",
-          color: "#fff",
-          background: "#c2410c",
-          border: "none",
-          padding: "8px 16px",
-          borderRadius: 9,
+          position: "relative",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 10,
+          padding: meta ? "10px 14px" : 0,
+          borderRadius: 12,
+          background: meta ? "rgba(5,16,14,0.72)" : "transparent",
         }}
       >
-        Turn stream on
-      </button>
+        {meta ? (
+          <span
+            style={{
+              fontSize: 12,
+              fontWeight: 650,
+              padding: "3px 9px",
+              borderRadius: 999,
+              color: stale ? "#2a1600" : "#0a2e26",
+              background: stale ? "#e0a955" : "#9fe0cf",
+            }}
+          >
+            ● snapshot · {ageStr(ageMs!)} ago — not live
+          </span>
+        ) : (
+          <div style={{ fontSize: 13.5 }}>Stream is off — no bandwidth in use.</div>
+        )}
+        <button
+          type="button"
+          onClick={onTurnOn}
+          style={{
+            font: "inherit",
+            fontSize: 13,
+            fontWeight: 650,
+            cursor: "pointer",
+            color: "#fff",
+            background: "#c2410c",
+            border: "none",
+            padding: "8px 16px",
+            borderRadius: 9,
+          }}
+        >
+          Turn stream on
+        </button>
+      </div>
+      {lightboxOpen && meta && (
+        <SnapshotLightbox receivedAt={meta.receivedAt} ageMs={ageMs!} onClose={() => setLightboxOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// Full-size view (click-to-enlarge without starting the live stream). A
+// custom lightbox mirroring RecordModal's dialog pattern (no UI library in
+// this codebase): Escape/outside-click to close, full-viewport overlay.
+function SnapshotLightbox({
+  receivedAt,
+  ageMs,
+  onClose,
+}: {
+  receivedAt: string;
+  ageMs: number;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Full-size snapshot"
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(6,12,11,0.85)",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 12,
+        padding: 20,
+        zIndex: 60,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span
+          style={{
+            fontSize: 12,
+            fontWeight: 650,
+            padding: "3px 9px",
+            borderRadius: 999,
+            color: "#0a2e26",
+            background: "#9fe0cf",
+          }}
+        >
+          ● snapshot · {ageStr(ageMs)} ago — not live
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          style={{
+            font: "inherit",
+            fontSize: 18,
+            lineHeight: 1,
+            color: "#fff",
+            background: "none",
+            border: 0,
+            cursor: "pointer",
+            padding: "2px 6px",
+          }}
+        >
+          ✕
+        </button>
+      </div>
+      <img
+        src={snapshotUrl(receivedAt)}
+        alt="Recent camera snapshot (not live), full size"
+        onClick={(e) => e.stopPropagation()}
+        style={{ maxWidth: "100%", maxHeight: "80vh", objectFit: "contain", borderRadius: 8 }}
+      />
     </div>
   );
 }

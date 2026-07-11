@@ -9,6 +9,7 @@
 
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { config } from "./config";
 import { MonitorVideo } from "./MonitorVideo";
 import { createdPcs, installFakeRtc } from "./test/fakeRtc";
 
@@ -40,8 +41,11 @@ async function tick(ms = 0) {
 }
 
 describe("stream on/off toggle", () => {
-  it("defaults to Stream Off (0 bandwidth) and opens NO WebRTC session", () => {
+  it("defaults to Stream Off (0 bandwidth) and opens NO WebRTC session", async () => {
     render(<MonitorVideo />);
+    // Drain the resting stage's snapshot-meta poll (fires on mount) so its
+    // state update lands inside act() rather than after the test returns.
+    await tick(0);
     expect(screen.getByRole("button", { name: "Stream Off" }).getAttribute("aria-pressed")).toBe(
       "true",
     );
@@ -90,5 +94,43 @@ describe("stream on/off toggle", () => {
     // Back off: 0-bandwidth tag restored, and the WebRTC PC was closed on unmount.
     expect(screen.getByText(/0 bandwidth/)).toBeTruthy();
     expect(pc.closed).toBe(true);
+  });
+});
+
+describe("resting-stage freeze-frame", () => {
+  it("shows no snapshot chip when the backend has none yet", async () => {
+    render(<MonitorVideo />);
+    await tick(0);
+    expect(screen.getByText("Stream is off — no bandwidth in use.")).toBeTruthy();
+    expect(screen.queryByText(/ago — not live/)).toBeNull();
+  });
+
+  it("shows the snapshot age chip and a click-to-enlarge lightbox once a snapshot exists", async () => {
+    const receivedAt = new Date().toISOString();
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes("/api/snapshot/meta")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ available: true, received_at: receivedAt }),
+        });
+      }
+      return Promise.resolve(whepResponse(201));
+    });
+
+    render(<MonitorVideo />);
+    await tick(0);
+    expect(screen.getByText(/ago — not live/)).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "View full-size snapshot" }));
+    });
+    expect(screen.getByRole("dialog", { name: "Full-size snapshot" })).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+    expect(screen.queryByRole("dialog", { name: "Full-size snapshot" })).toBeNull();
+    await tick(config.snapshotPollMs); // drain the next scheduled poll before unmount
   });
 });

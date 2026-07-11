@@ -73,6 +73,12 @@ RECORDING_HLS_NAME = "rec_hls"
 VISION_APPSINK_NAME = "vision_sink"
 AUDIO_LEVEL_NAME = "audio_level"
 
+# Freeze-frame branch (Monitor UX): a low-rate JPEG-encoded appsink so the
+# webui can show a recent still without paying for a WHIP activation. Mirrors
+# the vision appsink's tee_v idiom (max-buffers=1 drop=true): a slow/absent
+# puller must never back-pressure the shared tee.
+SNAPSHOT_APPSINK_NAME = "snapshot_sink"
+
 # The downscaled resolution the vision branch analyses at (architecture §2.2:
 # "videoscale ! video/x-raw,width=640,height=360 ! appsink"). Fixed, not a
 # config value — the detectors and the safe_box config are in this coord space.
@@ -311,6 +317,12 @@ def build_capture_launch(
     f"video/x-raw,width={VISION_WIDTH},height={VISION_HEIGHT},format=I420 ! "
     f"appsink name={VISION_APPSINK_NAME} emit-signals=true max-buffers=1 drop=true sync=false"
   )
+  snapshot_branch = (
+    f"{VIDEO_TEE_NAME}. ! queue ! videoscale ! "
+    f"video/x-raw,width={VISION_WIDTH},height={VISION_HEIGHT},format=I420 ! "
+    f"jpegenc ! "
+    f"appsink name={SNAPSHOT_APPSINK_NAME} emit-signals=true max-buffers=1 drop=true sync=false"
+  )
   live_branch = live_warm_branch(
     live_resolution=live_resolution,
     live_fps=live_fps,
@@ -325,7 +337,7 @@ def build_capture_launch(
   if not include_audio:
     return (
       f"{video_source} ! tee name={VIDEO_TEE_NAME} "
-      f"{ring_branch} {vision_branch} {live_branch}"
+      f"{ring_branch} {vision_branch} {snapshot_branch} {live_branch}"
     )
 
   if use_test_source:
@@ -340,7 +352,7 @@ def build_capture_launch(
 
   return (
     f"{video_source} ! tee name={VIDEO_TEE_NAME} "
-    f"{ring_branch} {vision_branch} {live_branch} "
+    f"{ring_branch} {vision_branch} {snapshot_branch} {live_branch} "
     f"{audio_source} ! audioconvert ! audioresample ! tee name={AUDIO_TEE_NAME} "
     f"{audio_branch}"
   )

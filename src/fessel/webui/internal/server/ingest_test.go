@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/derfred/fessel/webui/internal/snapshot"
 	"github.com/derfred/fessel/webui/internal/storage"
 )
 
@@ -120,6 +121,36 @@ func TestWhipIngestRejectsEmptyOffer(t *testing.T) {
 	h := (&Ingest{Storage: storage.NewFakeBackend(), Relay: &fakeIngestRelay{}}).Handler()
 	w := do(t, h, "POST", "/whip/ingest", "", false)
 	if w.Code != 400 {
+		t.Fatalf("%d", w.Code)
+	}
+}
+
+func TestSnapshotPutStoresIntoHolder(t *testing.T) {
+	snap := &snapshot.Holder{}
+	h := (&Ingest{Storage: storage.NewFakeBackend(), Snapshot: snap}).Handler()
+	w := do(t, h, "PUT", "/snapshot", "jpeg-bytes", false)
+	if w.Code != 201 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	data, _, ok := snap.Get()
+	if !ok || string(data) != "jpeg-bytes" {
+		t.Fatalf("stored: %q %v", data, ok)
+	}
+}
+
+func TestSnapshotPutRejectsEmptyBody(t *testing.T) {
+	snap := &snapshot.Holder{}
+	h := (&Ingest{Storage: storage.NewFakeBackend(), Snapshot: snap}).Handler()
+	w := do(t, h, "PUT", "/snapshot", "", false)
+	if w.Code != 400 {
+		t.Fatalf("want 400, got %d", w.Code)
+	}
+}
+
+func TestSnapshotPutWithoutHolderIs503(t *testing.T) {
+	h := (&Ingest{Storage: storage.NewFakeBackend()}).Handler()
+	w := do(t, h, "PUT", "/snapshot", "jpeg-bytes", false)
+	if w.Code != 503 {
 		t.Fatalf("%d", w.Code)
 	}
 }

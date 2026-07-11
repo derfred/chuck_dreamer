@@ -189,6 +189,9 @@ def test_capture_launch_opens_one_camera_and_tees_to_always_on_branches():
   assert "hlssink2 name=ring_hls" in launch
   assert "appsink name=vision_sink" in launch
   assert "width=640,height=360" in launch  # vision downscale
+  # Freeze-frame branch (Monitor UX): its own downscaled JPEG appsink off tee_v.
+  assert "appsink name=snapshot_sink" in launch
+  assert "jpegenc" in launch
   # Audio: one mic open, its own tee_a feeding the level branch.
   assert launch.count("tee name=tee_a") == 1
   assert "level name=audio_level" in launch

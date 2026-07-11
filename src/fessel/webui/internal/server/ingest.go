@@ -17,9 +17,15 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/derfred/fessel/webui/internal/snapshot"
 	"github.com/derfred/fessel/webui/internal/storage"
 	"github.com/derfred/fessel/webui/internal/version"
 )
+
+// maxSnapshotBytes bounds the freeze-frame PUT body (a downscaled single JPEG
+// frame is a few tens of KB; this is a generous ceiling against a misbehaving
+// or malicious sender, not a tuned limit).
+const maxSnapshotBytes = 5 << 20 // 5 MiB
 
 // IngestRelay is the slice of the relay the WHIP endpoints use.
 type IngestRelay interface {
@@ -28,8 +34,9 @@ type IngestRelay interface {
 }
 
 type Ingest struct {
-	Storage storage.Backend
-	Relay   IngestRelay // nil -> /whip/ingest returns 503
+	Storage  storage.Backend
+	Relay    IngestRelay // nil -> /whip/ingest returns 503
+	Snapshot *snapshot.Holder
 }
 
 func (in *Ingest) Handler() http.Handler {
@@ -64,6 +71,31 @@ func (in *Ingest) Handler() http.Handler {
 			ingestLog(recordingID, fileName, counted.n, "store_error", t0)
 			writeDetail(w, http.StatusBadGateway, fmt.Sprintf("store failed: %v", err))
 		}
+	})
+
+	// Monitor freeze-frame push (best-effort, like the Pi's vision/audio
+	// analysis): a low-rate JPEG PUT, cached in memory (no storage.Backend
+	// involvement — this is a single ephemeral slot, not an artifact).
+	mux.HandleFunc("PUT /snapshot", func(w http.ResponseWriter, r *http.Request) {
+		if in.Snapshot == nil {
+			writeDetail(w, http.StatusServiceUnavailable, "snapshot holder disabled")
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxSnapshotBytes+1))
+		if err != nil {
+			writeDetail(w, http.StatusBadRequest, "failed to read body")
+			return
+		}
+		if len(body) == 0 {
+			writeDetail(w, http.StatusBadRequest, "empty body")
+			return
+		}
+		if len(body) > maxSnapshotBytes {
+			writeDetail(w, http.StatusRequestEntityTooLarge, "snapshot too large")
+			return
+		}
+		in.Snapshot.Store(body)
+		w.WriteHeader(http.StatusCreated)
 	})
 
 	// Live WHIP ingest from the Pi (tailnet, not browser-facing, not behind

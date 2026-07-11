@@ -120,6 +120,16 @@ video:
     # Slice-4 "operator decides" property; revisit once the alert load is real.
     auto_upload: false
 
+  # Monitor freeze-frame push: PUTs the latest low-rate JPEG to webui's tailnet
+  # ingest listener, so the Monitor page has a recent still before Stream On
+  # without ever costing WebRTC bandwidth. Best-effort, like vision/audio —
+  # empty ingest_url_base disables the push entirely.
+  snapshot:
+    ingest_url_base: "http://webui.tailnet.ts.net:8001"
+    interval_s: 25
+    timeout_s: 10
+    verify_tls: true
+
 # --- supervisor -------------------------------------------------------------
 
 supervisor:

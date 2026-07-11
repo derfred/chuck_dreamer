@@ -196,6 +196,23 @@ export function fetchPiHealth(): Promise<PiHealth> {
   return getJson<PiHealth>("/api/health/pi");
 }
 
+// The Monitor freeze-frame's metadata (Monitor UX): whether a snapshot has
+// arrived yet and when. The image bytes themselves are fetched separately
+// (as an <img src="/api/snapshot">, not through this client) so the browser
+// can cache/decode them natively; polling this meta endpoint is what drives
+// the "Xs ago" age label without re-downloading the JPEG every tick.
+export interface SnapshotMeta {
+  available: boolean;
+  received_at: string | null;
+}
+
+// Poll the Monitor freeze-frame's metadata. A 401 throws AuthError; any other
+// failure throws so the caller can fall back to "no snapshot" rather than
+// showing a stale age.
+export function fetchSnapshotMeta(): Promise<SnapshotMeta> {
+  return getJson<SnapshotMeta>("/api/snapshot/meta");
+}
+
 // Result of an operator-triggered connection check: a timed round trip to
 // supervisor (latency) plus a timed download of a known-size payload
 // (throughput), both measured cluster-side against the Pi over the tailnet.

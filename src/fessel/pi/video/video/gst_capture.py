@@ -6,6 +6,7 @@ pipeline's `tee`, not its own source. `GstCapturePipeline` owns that pipeline:
 
   v4l2src ! ... ! tee_v   ├─ ring  (hlssink2, always-on, linked at build)
                           ├─ vision (appsink, always-on, linked at build)
+                          ├─ snapshot (JPEG appsink, always-on, linked at build)
                           ├─ live encoder (WARM, always-on, linked at build)
                           │    ! tee_live ├─ fakesink (drop, always linked)
                           │               └─ WHIP sender (added/removed at runtime)
