@@ -118,6 +118,59 @@ describe("corner light", () => {
   });
 });
 
+describe("connection check", () => {
+  function installFetchWithConnectionCheck(connCheck: () => { status: number; body: unknown }) {
+    const fn = vi.fn((url: string, init?: RequestInit) => {
+      if (url === "/api/connection-check" && init?.method === "POST") {
+        const r = connCheck();
+        return Promise.resolve({
+          ok: r.status >= 200 && r.status < 300,
+          status: r.status,
+          json: async () => r.body,
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => HEALTH_GREEN });
+    });
+    vi.stubGlobal("fetch", fn);
+    return fn;
+  }
+
+  it("shows latency and throughput after a successful check", async () => {
+    installFetchWithConnectionCheck(() => ({
+      status: 200,
+      body: { latency_ms: 42, throughput_mbps: 12.3, payload_bytes: 1_000_000 },
+    }));
+    render(<PiHealthIndicator />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Pi: OK/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Check connection to Pi/ }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText(/Latency 42 ms/)).toBeTruthy();
+    expect(screen.getByText(/Throughput 12\.3 Mbps/)).toBeTruthy();
+  });
+
+  it("shows an error message when the Pi is unreachable", async () => {
+    installFetchWithConnectionCheck(() => ({
+      status: 502,
+      body: { error: "supervisor_unreachable", message: "dial tcp: timeout" },
+    }));
+    render(<PiHealthIndicator />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Pi: OK/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Check connection to Pi/ }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("dial tcp: timeout")).toBeTruthy();
+  });
+});
+
 describe("re-auth on 401", () => {
   it("reloads (hands off to the proxy) rather than retrying", async () => {
     // window.location.reload is stubbed in test/setup.ts as a reload counter.

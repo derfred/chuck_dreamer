@@ -196,6 +196,31 @@ export function fetchPiHealth(): Promise<PiHealth> {
   return getJson<PiHealth>("/api/health/pi");
 }
 
+// Result of an operator-triggered connection check: a timed round trip to
+// supervisor (latency) plus a timed download of a known-size payload
+// (throughput), both measured cluster-side against the Pi over the tailnet.
+export interface ConnectionCheckResult {
+  latency_ms: number;
+  throughput_mbps: number;
+  payload_bytes: number;
+}
+
+// POSTs /api/connection-check. This actively drives traffic to the Pi and
+// takes noticeably longer than a status read, so it is operator-triggered
+// (a button), never polled. A 401 throws AuthError; any other failure
+// (including a 502 "Pi unreachable") throws a plain Error the caller shows
+// inline next to the button.
+export async function runConnectionCheck(): Promise<ConnectionCheckResult> {
+  const res = await fetch("/api/connection-check", { method: "POST" });
+  if (res.status === 401) throw new AuthError();
+  clearReauthGuard();
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.message ?? `request failed (${res.status})`);
+  }
+  return res.json();
+}
+
 // --- Slice 4 recordings + ring (F4.1–F4.5) ----------------------------------
 
 // One row of /api/recordings (B4.2). Shape matches the backend's merged item

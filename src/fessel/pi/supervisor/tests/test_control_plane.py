@@ -151,6 +151,30 @@ def test_healthz(monkeypatch):
     assert "version" in body
 
 
+def test_diag_payload_returns_requested_size(monkeypatch):
+  client, _ = make_client(monkeypatch)
+  with client:
+    r = client.get("/diag/payload", params={"size": 1000})
+    assert r.status_code == 200
+    assert len(r.content) == 1000
+
+
+def test_diag_payload_clamps_oversized_request(monkeypatch):
+  client, _ = make_client(monkeypatch)
+  with client:
+    r = client.get("/diag/payload", params={"size": 999_000_000})
+    assert r.status_code == 200
+    assert len(r.content) == 8 * 1024 * 1024
+
+
+def test_diag_payload_default_size(monkeypatch):
+  client, _ = make_client(monkeypatch)
+  with client:
+    r = client.get("/diag/payload")
+    assert r.status_code == 200
+    assert len(r.content) == 1_000_000
+
+
 def test_activate_relays_to_mqtt_parameterless(monkeypatch):
   # Parameterless activation (§2.2/§2.9): no body needed, no mode anywhere.
   client, published = make_client(monkeypatch)

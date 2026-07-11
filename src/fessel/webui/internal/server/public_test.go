@@ -17,11 +17,12 @@ import (
 
 // fakeSupervisor records calls and returns canned results per path.
 type fakeSupervisor struct {
-	posts    []string
-	bodies   []any
-	results  map[string]supervisor.ForwardResult
-	proxies  map[string]supervisor.ProxyResult
-	lastHdrs map[string]string
+	posts     []string
+	bodies    []any
+	results   map[string]supervisor.ForwardResult
+	proxies   map[string]supervisor.ProxyResult
+	lastHdrs  map[string]string
+	connCheck supervisor.ConnectionCheckResult
 }
 
 func newFakeSupervisor() *fakeSupervisor {
@@ -53,6 +54,10 @@ func (f *fakeSupervisor) GetBytes(path string, headers map[string]string) superv
 		return r
 	}
 	return supervisor.ProxyResult{StatusCode: 404, Body: nil, Headers: map[string]string{}}
+}
+
+func (f *fakeSupervisor) ConnectionCheck() supervisor.ConnectionCheckResult {
+	return f.connCheck
 }
 
 type fakeHealth struct{ snap map[string]any }
@@ -220,6 +225,39 @@ func TestHealthPiServesSnapshot(t *testing.T) {
 	w := do(t, p.Handler(), "GET", "/api/health/pi", "", true)
 	if decode(t, w)["light"] != "yellow" {
 		t.Fatalf("%s", w.Body.String())
+	}
+}
+
+func TestConnectionCheckRequiresAuth(t *testing.T) {
+	h := newPublic(newFakeSupervisor(), nil).Handler()
+	if w := do(t, h, "POST", "/api/connection-check", "", false); w.Code != 401 {
+		t.Fatalf("unauth %d", w.Code)
+	}
+}
+
+func TestConnectionCheckReportsLatencyAndThroughput(t *testing.T) {
+	sup := newFakeSupervisor()
+	sup.connCheck = supervisor.ConnectionCheckResult{
+		LatencyMs: 42.5, ThroughputMbps: 12.3, PayloadBytes: 1_000_000,
+	}
+	h := newPublic(sup, nil).Handler()
+	w := do(t, h, "POST", "/api/connection-check", "", true)
+	if w.Code != 200 {
+		t.Fatalf("%d: %s", w.Code, w.Body.String())
+	}
+	body := decode(t, w)
+	if body["latency_ms"] != 42.5 || body["throughput_mbps"] != 12.3 {
+		t.Fatalf("%v", body)
+	}
+}
+
+func TestConnectionCheckUnreachableIs502(t *testing.T) {
+	sup := newFakeSupervisor()
+	sup.connCheck = supervisor.ConnectionCheckResult{Err: "dial tcp: timeout"}
+	h := newPublic(sup, nil).Handler()
+	w := do(t, h, "POST", "/api/connection-check", "", true)
+	if w.Code != 502 {
+		t.Fatalf("%d: %s", w.Code, w.Body.String())
 	}
 }
 

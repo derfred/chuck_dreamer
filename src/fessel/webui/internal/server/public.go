@@ -50,6 +50,7 @@ type SupervisorAPI interface {
 	Post(path string, jsonBody any) supervisor.ForwardResult
 	Get(path string) supervisor.ForwardResult
 	GetBytes(path string, headers map[string]string) supervisor.ProxyResult
+	ConnectionCheck() supervisor.ConnectionCheckResult
 }
 
 // HealthAPI serves /api/health/pi from the monitor's cached snapshot.
@@ -148,6 +149,28 @@ func (p *Public) Handler() http.Handler {
 		// synchronously, so the frontend poll rate is decoupled from
 		// supervisor load.
 		writeJSON(w, http.StatusOK, p.Health.Snapshot())
+	})
+
+	// Operator-triggered, on-demand connection check (latency + bandwidth to
+	// the Pi over the cluster->Pi tailnet path). Not part of the background
+	// health poll — this is a POST because it actively drives traffic and
+	// takes noticeably longer than a status read.
+	mux.HandleFunc("POST /api/connection-check", func(w http.ResponseWriter, r *http.Request) {
+		if p.requireIdentity(w, r) == nil {
+			return
+		}
+		result := p.Supervisor.ConnectionCheck()
+		if result.Err != "" {
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"error": "supervisor_unreachable", "message": result.Err,
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"latency_ms":      result.LatencyMs,
+			"throughput_mbps": result.ThroughputMbps,
+			"payload_bytes":   result.PayloadBytes,
+		})
 	})
 
 	mux.HandleFunc("GET /api/anomalies", func(w http.ResponseWriter, r *http.Request) {

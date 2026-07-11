@@ -18,6 +18,8 @@ import {
   AuthError,
   fetchPiHealth,
   reauthenticate,
+  runConnectionCheck,
+  type ConnectionCheckResult,
   type HealthFact,
   type HealthState,
   type PiHealth,
@@ -200,6 +202,61 @@ function DrillDown({
             <FactRow key={f.id} fact={f} />
           ))}
         </ul>
+      )}
+      <ConnectionCheckPanel />
+    </div>
+  );
+}
+
+// On-demand latency + bandwidth probe to the Pi (cluster-side measurement,
+// distinct from the passively-polled health facts above). Idle until the
+// operator clicks it — the probe actively drives traffic and takes
+// noticeably longer than a status read, so it must never auto-run or poll.
+function ConnectionCheckPanel() {
+  const [state, setState] = useState<
+    { status: "idle" } | { status: "running" } | { status: "done"; result: ConnectionCheckResult } | { status: "error"; message: string }
+  >({ status: "idle" });
+
+  const run = () => {
+    setState({ status: "running" });
+    runConnectionCheck()
+      .then((result) => setState({ status: "done", result }))
+      .catch((e) => {
+        if (e instanceof AuthError) {
+          reauthenticate();
+          return;
+        }
+        setState({ status: "error", message: e instanceof Error ? e.message : String(e) });
+      });
+  };
+
+  return (
+    <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #eee" }}>
+      <button
+        type="button"
+        onClick={run}
+        disabled={state.status === "running"}
+        style={{
+          width: "100%",
+          padding: "6px 10px",
+          fontSize: 12,
+          fontWeight: 600,
+          border: "1px solid #ccc",
+          borderRadius: 6,
+          background: "#fafafa",
+          cursor: state.status === "running" ? "default" : "pointer",
+        }}
+      >
+        {state.status === "running" ? "Checking connection…" : "Check connection to Pi"}
+      </button>
+      {state.status === "done" && (
+        <p style={{ fontSize: 12, color: "#444", margin: "6px 0 0" }}>
+          Latency {state.result.latency_ms.toFixed(0)} ms · Throughput{" "}
+          {state.result.throughput_mbps.toFixed(1)} Mbps
+        </p>
+      )}
+      {state.status === "error" && (
+        <p style={{ fontSize: 12, color: "#b22222", margin: "6px 0 0" }}>{state.message}</p>
       )}
     </div>
   );

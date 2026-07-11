@@ -135,6 +135,78 @@ func (c *Client) GetBytes(path string, headers map[string]string) ProxyResult {
 	return ProxyResult{StatusCode: resp.StatusCode, Body: body, Headers: passthrough}
 }
 
+// ConnectionCheckResult is the outcome of an on-demand connection check
+// (operator-triggered from the status dropdown): a timed round trip to
+// supervisor's /healthz for latency, and a timed download of a known-size
+// payload from /diag/payload for throughput. Err is set (and the numeric
+// fields left zero) when either probe failed — a single unreachable-Pi
+// diagnostic, not a partial result.
+type ConnectionCheckResult struct {
+	LatencyMs      float64
+	ThroughputMbps float64
+	PayloadBytes   int
+	Err            string
+}
+
+// diagPayloadBytes is the payload size requested from supervisor's
+// /diag/payload for the bandwidth probe. Large enough that the transfer takes
+// long enough to time meaningfully over a cellular uplink, small enough to
+// stay a quick, on-demand operator action rather than a real transfer.
+const diagPayloadBytes = 1_000_000
+
+// ConnectionCheck runs the two probes serially (latency first, since a slow
+// or failing /healthz means there's no point attempting the larger payload
+// fetch) and returns a single combined result. Not part of the health
+// monitor's background refresh loop — this is operator-triggered, on demand.
+func (c *Client) ConnectionCheck() ConnectionCheckResult {
+	t0 := time.Now()
+	req, err := http.NewRequest(http.MethodGet, c.base+"/healthz", nil)
+	if err != nil {
+		return ConnectionCheckResult{Err: err.Error()}
+	}
+	req.Header.Set("User-Agent", UserAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return ConnectionCheckResult{Err: err.Error()}
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	latency := time.Since(t0)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ConnectionCheckResult{Err: fmt.Sprintf("healthz returned %d", resp.StatusCode)}
+	}
+
+	t1 := time.Now()
+	req, err = http.NewRequest(http.MethodGet, fmt.Sprintf("%s/diag/payload?size=%d", c.base, diagPayloadBytes), nil)
+	if err != nil {
+		return ConnectionCheckResult{Err: err.Error()}
+	}
+	req.Header.Set("User-Agent", UserAgent)
+	resp, err = c.http.Do(req)
+	if err != nil {
+		return ConnectionCheckResult{Err: err.Error()}
+	}
+	defer resp.Body.Close()
+	n, err := io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		return ConnectionCheckResult{Err: err.Error()}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ConnectionCheckResult{Err: fmt.Sprintf("diag/payload returned %d", resp.StatusCode)}
+	}
+	transferTime := time.Since(t1)
+
+	var mbps float64
+	if transferTime > 0 {
+		mbps = float64(n*8) / transferTime.Seconds() / 1_000_000
+	}
+	return ConnectionCheckResult{
+		LatencyMs:      float64(latency.Microseconds()) / 1000,
+		ThroughputMbps: mbps,
+		PayloadBytes:   int(n),
+	}
+}
+
 // jsonOrText mirrors the FastAPI backend's _json_or_text: preserve object and
 // array bodies; wrap non-JSON text as {"detail": ...} and bare scalars as
 // {"value": ...} so the result is always a JSON container.

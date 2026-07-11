@@ -15,6 +15,8 @@ Slice 6; the safety_state field is a placeholder (see control.py).
 Endpoints (authenticated at the network layer by Tailscale identity):
 
   GET  /healthz
+  GET  /diag/payload?size=N      -> N bytes (clamped), for the cluster-side
+                                     connection bandwidth probe
   GET  /state                    -> aggregated control-plane state (S3.3)
   POST /control/live/activate    parameterless      -> arm/video/cmd/live/activate
   POST /control/live/deactivate  parameterless      -> arm/video/cmd/live/deactivate
@@ -37,6 +39,7 @@ from contextlib import asynccontextmanager
 import uuid
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import Response
 from fessel_schemas import (
   AnomalyRecordingMetadata,
   AnomalyType,
@@ -384,6 +387,19 @@ def create_app(
     # read from /opt/fessel/VERSION on the Pi. Compare against the cluster
     # webui's /healthz version to detect a drifted release.
     return {"status": "ok", "version": fessel_version()}
+
+  # Diagnostic payload for the cluster-side connection-check (bandwidth probe,
+  # architecture §4.3-adjacent operator tooling): the webui backend GETs this
+  # with a chosen size and times the download to estimate throughput over the
+  # tailnet control-plane path. Bounded well below the cellular link's
+  # plausible per-request budget so the probe itself cannot be turned into an
+  # amplification vector; size is clamped, never trusted verbatim.
+  DIAG_PAYLOAD_MAX_BYTES = 8 * 1024 * 1024
+
+  @app.get("/diag/payload")
+  def diag_payload(size: int = 1_000_000) -> Response:
+    size = max(0, min(size, DIAG_PAYLOAD_MAX_BYTES))
+    return Response(content=b"\x00" * size, media_type="application/octet-stream")
 
   @app.get("/state/live")
   def state_live() -> dict:
