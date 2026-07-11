@@ -8,8 +8,8 @@ written; startup fails fast on an unproduced required modality).
 
 The runtime logs to Rerun now, not CSV. The ``fake_rerun`` fixture (conftest.py)
 captures logged entities; :func:`control_tick_rows` reconstructs the per-tick
-row view the CSV-era assertions used. FakeBackend tests set ``sensors: []`` —
-the default config's ``SimCameraSensor`` needs a MuJoCo backend.
+row view the CSV-era assertions used. ``sensors`` defaults to ``[]`` (cameras
+are backend-specific and enabled explicitly in config).
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def _cfg(tmp_path: Path, **runtime_overrides):
     "duration_s": 0.3,
     "control_rate_hz": 200,
     "policy_rate_hz": 50,
-    "sensors": [],   # FakeBackend has no MuJoCo scene for SimCameraSensor
+    "sensors": [],   # explicit: no camera in these FakeBackend tests
     "logging": {"rerun": {"rrd_dir": str(tmp_path / "rrd")}},
     "viewer": {"enabled": False},
   }
@@ -206,6 +206,9 @@ def test_sim_camera_does_not_stall_control_loop(tmp_path):
     "duration_s": 1.5,
     "backend": {"target": "chuck_dreamer.runtime.mujoco_backend:MujocoBackend",
                 "params": {"realtime": True}},
+    "sensors": [{"target": "chuck_dreamer.runtime.sensors:SimCameraSensor",
+                 "params": {"camera": "main_camera", "name": "camera/front",
+                            "render_size": "240x320"}}],
     "perception": [{"target": "chuck_dreamer.runtime.perception:EePoseModule"}],
     "required_modalities": ["image", "ee"],
     "logging": {"rerun": {"rrd_dir": str(tmp_path / "rrd")}},

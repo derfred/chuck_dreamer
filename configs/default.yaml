@@ -315,15 +315,16 @@ runtime:
 
   # Sensors (M3, spec §3.1/§4.2): latest-value producer slots sampled at
   # policy-step time. Each declares the modalities it produces; the startup
-  # composition fails fast if a required modality is unproduced. SimCameraSensor
-  # renders the MuJoCo scene (needs MujocoBackend); swap to WebcamSensor for a
-  # real camera. `render_size` reuses the "HxW" convention.
-  sensors:
-    - target: "chuck_dreamer.runtime.sensors:SimCameraSensor"
-      params: { camera: "main_camera", name: "camera/front", render_size: "240x320" }
-    # Real camera:
-    #   target: "chuck_dreamer.runtime.sensors:WebcamSensor"
-    #   params: { device_index: 0, render_size: "480x640" }
+  # composition fails fast if a required modality is unproduced. Empty by
+  # default — cameras are backend-specific, so enable one explicitly.
+  # `render_size` reuses the "HxW" convention.
+  # MuJoCo scene render (needs MujocoBackend):
+  #   - target: "chuck_dreamer.runtime.sensors:SimCameraSensor"
+  #     params: { camera: "main_camera", name: "camera/front", render_size: "240x320" }
+  # Real camera:
+  #   - target: "chuck_dreamer.runtime.sensors:WebcamSensor"
+  #     params: { device_index: 0, render_size: "480x640" }
+  sensors: []
 
   # Perception pipeline (M3, spec §3.2/§3.3): ordered modules run inline at the
   # start of each policy step, each declaring consumed/emitted modalities. Empty
