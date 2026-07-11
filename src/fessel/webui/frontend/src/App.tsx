@@ -3,13 +3,13 @@
 // the app is a two-route shell; a path-based switch is enough.
 //
 // The shell trusts that oauth2-proxy already authenticated the request that
-// served this page (the app is served from behind the proxy). It displays the
-// operator identity from /api/me and the Pi-connection health light; a 401
-// anywhere means the session lapsed, so it hands off to the proxy's login flow
-// rather than rendering a broken shell.
+// served this page (the app is served from behind the proxy). It probes
+// /api/me on load purely to detect a lapsed session early (a 401 hands off to
+// the proxy's login flow rather than rendering a broken shell); the operator
+// identity itself is not displayed in the chrome.
 
 import { useEffect, useState } from "react";
-import { AuthError, fetchMe, reauthenticate, type Identity } from "./api";
+import { AuthError, fetchMe, reauthenticate } from "./api";
 import { Footage } from "./Footage";
 import { Monitor } from "./Monitor";
 import { navigate } from "./nav";
@@ -32,16 +32,13 @@ const NAV: { path: string; label: string }[] = [
 
 export function App() {
   const path = usePath();
-  const [identity, setIdentity] = useState<Identity | null>(null);
 
   useEffect(() => {
-    fetchMe()
-      .then(setIdentity)
-      .catch((e) => {
-        // A 401 on the shell's own identity probe means the proxy session is
-        // gone; bounce to login rather than render an unauthenticated shell.
-        if (e instanceof AuthError) reauthenticate();
-      });
+    fetchMe().catch((e) => {
+      // A 401 on the shell's own identity probe means the proxy session is
+      // gone; bounce to login rather than render an unauthenticated shell.
+      if (e instanceof AuthError) reauthenticate();
+    });
   }, []);
 
   return (
@@ -94,9 +91,6 @@ export function App() {
         </nav>
         <span style={{ flex: 1 }} />
         <PiHealthIndicator />
-        <span style={{ color: "#8a9895", fontSize: 13, fontFamily: "monospace" }}>
-          {identity ? identity.user : "…"}
-        </span>
       </header>
 
       {route(path)}
