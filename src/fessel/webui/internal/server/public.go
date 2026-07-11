@@ -26,7 +26,6 @@ import (
 
 	"github.com/derfred/fessel/webui/internal/auth"
 	"github.com/derfred/fessel/webui/internal/schemas"
-	"github.com/derfred/fessel/webui/internal/snapshot"
 	"github.com/derfred/fessel/webui/internal/storage"
 	"github.com/derfred/fessel/webui/internal/supervisor"
 	"github.com/derfred/fessel/webui/internal/version"
@@ -72,7 +71,6 @@ type Public struct {
 	Health     HealthAPI
 	Relay      ViewerRelay       // nil -> /whep returns 503 "relay disabled"
 	Controller *relay.Controller // nil -> no gate/activation (tests)
-	Snapshot   *snapshot.Holder  // nil -> /api/snapshot* returns 404
 	StaticDir  string
 }
 
@@ -184,16 +182,19 @@ func (p *Public) Handler() http.Handler {
 	})
 
 	// --- Monitor freeze-frame (Monitor UX: a recent still before Stream On,
-	// so opening Monitor never costs WebRTC bandwidth) -----------------------
+	// so opening Monitor never costs WebRTC bandwidth). Persisted through the
+	// same storage backend recordings use (storage.MonitorSnapshot), not an
+	// in-memory cache — a webui restart doesn't blank it. ---------------------
 	mux.HandleFunc("GET /api/snapshot", func(w http.ResponseWriter, r *http.Request) {
 		if p.requireIdentity(w, r) == nil {
 			return
 		}
-		if p.Snapshot == nil {
+		snap, ok := p.Storage.(storage.MonitorSnapshot)
+		if !ok {
 			writeDetail(w, http.StatusNotFound, "no snapshot available")
 			return
 		}
-		data, _, ok := p.Snapshot.Get()
+		data, _, ok := snap.ReadSnapshot()
 		if !ok {
 			writeDetail(w, http.StatusNotFound, "no snapshot available")
 			return
@@ -209,11 +210,12 @@ func (p *Public) Handler() http.Handler {
 		if p.requireIdentity(w, r) == nil {
 			return
 		}
-		if p.Snapshot == nil {
+		snap, ok := p.Storage.(storage.MonitorSnapshot)
+		if !ok {
 			writeJSON(w, http.StatusOK, map[string]any{"available": false})
 			return
 		}
-		_, receivedAt, ok := p.Snapshot.Get()
+		_, receivedAt, ok := snap.ReadSnapshot()
 		if !ok {
 			writeJSON(w, http.StatusOK, map[string]any{"available": false})
 			return

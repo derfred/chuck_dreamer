@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/derfred/fessel/webui/internal/snapshot"
 	"github.com/derfred/fessel/webui/internal/storage"
 )
 
@@ -125,30 +124,35 @@ func TestWhipIngestRejectsEmptyOffer(t *testing.T) {
 	}
 }
 
-func TestSnapshotPutStoresIntoHolder(t *testing.T) {
-	snap := &snapshot.Holder{}
-	h := (&Ingest{Storage: storage.NewFakeBackend(), Snapshot: snap}).Handler()
+func TestSnapshotPutStoresIntoBackend(t *testing.T) {
+	store := storage.NewFakeBackend()
+	h := (&Ingest{Storage: store}).Handler()
 	w := do(t, h, "PUT", "/snapshot", "jpeg-bytes", false)
 	if w.Code != 201 {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	data, _, ok := snap.Get()
+	data, _, ok := store.ReadSnapshot()
 	if !ok || string(data) != "jpeg-bytes" {
 		t.Fatalf("stored: %q %v", data, ok)
 	}
 }
 
 func TestSnapshotPutRejectsEmptyBody(t *testing.T) {
-	snap := &snapshot.Holder{}
-	h := (&Ingest{Storage: storage.NewFakeBackend(), Snapshot: snap}).Handler()
+	store := storage.NewFakeBackend()
+	h := (&Ingest{Storage: store}).Handler()
 	w := do(t, h, "PUT", "/snapshot", "", false)
 	if w.Code != 400 {
 		t.Fatalf("want 400, got %d", w.Code)
 	}
 }
 
-func TestSnapshotPutWithoutHolderIs503(t *testing.T) {
-	h := (&Ingest{Storage: storage.NewFakeBackend()}).Handler()
+// backendWithoutSnapshot is a storage.Backend that does NOT implement
+// storage.MonitorSnapshot, exercising the ingest handler's type-assertion
+// fallback (a hypothetical future backend that hasn't added snapshot support).
+type backendWithoutSnapshot struct{ storage.Backend }
+
+func TestSnapshotPutWithUnsupportedBackendIs503(t *testing.T) {
+	h := (&Ingest{Storage: backendWithoutSnapshot{storage.NewFakeBackend()}}).Handler()
 	w := do(t, h, "PUT", "/snapshot", "jpeg-bytes", false)
 	if w.Code != 503 {
 		t.Fatalf("%d", w.Code)

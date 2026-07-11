@@ -8,6 +8,7 @@ import (
 	"io"
 	"sort"
 	"sync"
+	"time"
 )
 
 type FakeBackend struct {
@@ -15,6 +16,12 @@ type FakeBackend struct {
 	// files[recordingID][fileName] = bytes
 	files map[string]map[string][]byte
 	types map[string]string
+
+	// Monitor freeze-frame (mirrors StoreSnapshot/ReadSnapshot's semantics: a
+	// single slot, replaced wholesale, timestamped on write).
+	snapshot     []byte
+	snapshotAt   time.Time
+	haveSnapshot bool
 
 	// PresignBase, when set, makes PlaybackURL return PresignedURL like the
 	// MinIO backend; empty means ServeLocally like the disk backend.
@@ -25,6 +32,24 @@ type FakeBackend struct {
 
 func NewFakeBackend() *FakeBackend {
 	return &FakeBackend{files: map[string]map[string][]byte{}, types: map[string]string{}}
+}
+
+func (f *FakeBackend) StoreSnapshot(jpeg []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapshot = jpeg
+	f.snapshotAt = time.Now()
+	f.haveSnapshot = true
+	return nil
+}
+
+func (f *FakeBackend) ReadSnapshot() ([]byte, time.Time, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.haveSnapshot {
+		return nil, time.Time{}, false
+	}
+	return f.snapshot, f.snapshotAt, true
 }
 
 func (f *FakeBackend) Store(recordingID, fileName string, body io.Reader) error {

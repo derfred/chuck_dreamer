@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/derfred/fessel/webui/internal/snapshot"
 	"github.com/derfred/fessel/webui/internal/storage"
 	"github.com/derfred/fessel/webui/internal/version"
 )
@@ -34,9 +33,8 @@ type IngestRelay interface {
 }
 
 type Ingest struct {
-	Storage  storage.Backend
-	Relay    IngestRelay // nil -> /whip/ingest returns 503
-	Snapshot *snapshot.Holder
+	Storage storage.Backend
+	Relay   IngestRelay // nil -> /whip/ingest returns 503
 }
 
 func (in *Ingest) Handler() http.Handler {
@@ -74,27 +72,39 @@ func (in *Ingest) Handler() http.Handler {
 	})
 
 	// Monitor freeze-frame push (best-effort, like the Pi's vision/audio
-	// analysis): a low-rate JPEG PUT, cached in memory (no storage.Backend
-	// involvement — this is a single ephemeral slot, not an artifact).
+	// analysis): a low-rate JPEG PUT, persisted through the same storage
+	// backend recordings use (a fixed slot at its own root, not a recording —
+	// see storage.MonitorSnapshot).
 	mux.HandleFunc("PUT /snapshot", func(w http.ResponseWriter, r *http.Request) {
-		if in.Snapshot == nil {
-			writeDetail(w, http.StatusServiceUnavailable, "snapshot holder disabled")
+		t0 := time.Now()
+		snap, ok := in.Storage.(storage.MonitorSnapshot)
+		if !ok {
+			snapshotIngestLog(0, "unsupported_backend", t0)
+			writeDetail(w, http.StatusServiceUnavailable, "snapshot storage not supported by this backend")
 			return
 		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxSnapshotBytes+1))
 		if err != nil {
+			snapshotIngestLog(0, "read_error", t0)
 			writeDetail(w, http.StatusBadRequest, "failed to read body")
 			return
 		}
 		if len(body) == 0 {
+			snapshotIngestLog(0, "rejected", t0)
 			writeDetail(w, http.StatusBadRequest, "empty body")
 			return
 		}
 		if len(body) > maxSnapshotBytes {
+			snapshotIngestLog(int64(len(body)), "rejected", t0)
 			writeDetail(w, http.StatusRequestEntityTooLarge, "snapshot too large")
 			return
 		}
-		in.Snapshot.Store(body)
+		if err := snap.StoreSnapshot(body); err != nil {
+			snapshotIngestLog(int64(len(body)), "store_error", t0)
+			writeDetail(w, http.StatusBadGateway, fmt.Sprintf("store failed: %v", err))
+			return
+		}
+		snapshotIngestLog(int64(len(body)), "stored", t0)
 		w.WriteHeader(http.StatusCreated)
 	})
 
@@ -153,6 +163,15 @@ func ingestLog(recordingID, fileName string, size int64, outcome string, t0 time
 	slog.Info("audit",
 		"event", "recording_ingest", "recording_id", recordingID, "file", fileName,
 		"size_bytes", size, "outcome", outcome,
+		"latency_ms", time.Since(t0).Milliseconds(),
+		"timestamp", time.Now().UTC().Format(time.RFC3339Nano))
+}
+
+// snapshotIngestLog mirrors ingestLog for the Monitor freeze-frame PUT, so a
+// stuck/failing Pi push is visible in webui logs without SSHing to the Pi.
+func snapshotIngestLog(size int64, outcome string, t0 time.Time) {
+	slog.Info("audit",
+		"event", "snapshot_ingest", "size_bytes", size, "outcome", outcome,
 		"latency_ms", time.Since(t0).Milliseconds(),
 		"timestamp", time.Now().UTC().Format(time.RFC3339Nano))
 }

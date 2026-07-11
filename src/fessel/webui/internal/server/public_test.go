@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/derfred/fessel/webui/internal/auth"
-	"github.com/derfred/fessel/webui/internal/snapshot"
 	"github.com/derfred/fessel/webui/internal/storage"
 	"github.com/derfred/fessel/webui/internal/supervisor"
 )
@@ -263,11 +262,11 @@ func TestConnectionCheckUnreachableIs502(t *testing.T) {
 }
 
 // --- Monitor freeze-frame ------------------------------------------------------------
+// Persisted through the same storage.Backend recordings use (storage.MonitorSnapshot),
+// so these tests exercise it via the FakeBackend's snapshot slot, not a separate holder.
 
 func TestSnapshotRequiresAuth(t *testing.T) {
-	p := newPublic(newFakeSupervisor(), nil)
-	p.Snapshot = &snapshot.Holder{}
-	h := p.Handler()
+	h := newPublic(newFakeSupervisor(), nil).Handler()
 	if w := do(t, h, "GET", "/api/snapshot", "", false); w.Code != 401 {
 		t.Fatalf("unauth: %d", w.Code)
 	}
@@ -277,9 +276,7 @@ func TestSnapshotRequiresAuth(t *testing.T) {
 }
 
 func TestSnapshotNotYetAvailable(t *testing.T) {
-	p := newPublic(newFakeSupervisor(), nil)
-	p.Snapshot = &snapshot.Holder{}
-	h := p.Handler()
+	h := newPublic(newFakeSupervisor(), nil).Handler()
 
 	w := do(t, h, "GET", "/api/snapshot", "", true)
 	if w.Code != 404 {
@@ -292,11 +289,9 @@ func TestSnapshotNotYetAvailable(t *testing.T) {
 }
 
 func TestSnapshotServesLatestJPEGAndMeta(t *testing.T) {
-	p := newPublic(newFakeSupervisor(), nil)
-	snap := &snapshot.Holder{}
-	snap.Store([]byte("jpeg-bytes"))
-	p.Snapshot = snap
-	h := p.Handler()
+	store := storage.NewFakeBackend()
+	_ = store.StoreSnapshot([]byte("jpeg-bytes"))
+	h := newPublic(newFakeSupervisor(), store).Handler()
 
 	w := do(t, h, "GET", "/api/snapshot", "", true)
 	if w.Code != 200 || w.Body.String() != "jpeg-bytes" || w.Header().Get("Content-Type") != "image/jpeg" {
@@ -310,8 +305,8 @@ func TestSnapshotServesLatestJPEGAndMeta(t *testing.T) {
 	}
 }
 
-func TestSnapshotWithoutHolderIsNotFound(t *testing.T) {
-	h := newPublic(newFakeSupervisor(), nil).Handler()
+func TestSnapshotWithUnsupportedBackendIsNotFound(t *testing.T) {
+	h := newPublic(newFakeSupervisor(), backendWithoutSnapshot{storage.NewFakeBackend()}).Handler()
 	w := do(t, h, "GET", "/api/snapshot", "", true)
 	if w.Code != 404 {
 		t.Fatalf("%d", w.Code)

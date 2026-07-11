@@ -31,6 +31,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -128,6 +129,23 @@ type Backend interface {
 // ErrRangeNotSatisfiable marks a malformed or unsatisfiable Range header.
 // Handlers map it to 416.
 var ErrRangeNotSatisfiable = errors.New("range not satisfiable")
+
+// MonitorSnapshot is a small, separate capability (not part of Backend) for
+// the Monitor freeze-frame: a single JPEG, replaced wholesale on every Pi
+// push, with no id/list/playback shape at all. It lives at its own root
+// (sibling to recordings/, not inside it) so it never appears in
+// List()/mergedRecordings — a fixed monitor-wide slot is not a recording.
+//
+// receivedAt is derived from the store's own last-modified time (disk mtime /
+// MinIO's ObjectInfo.LastModified) rather than a side file, so a webui
+// restart loses nothing: the timestamp is intrinsic to the stored object.
+type MonitorSnapshot interface {
+	// StoreSnapshot replaces the current snapshot. Idempotent (like Store).
+	StoreSnapshot(jpeg []byte) error
+	// ReadSnapshot returns the current snapshot + when it was stored, or
+	// ok=false if none has arrived yet.
+	ReadSnapshot() (data []byte, receivedAt time.Time, ok bool)
+}
 
 // --- shared helpers used by more than one backend ----------------------------
 

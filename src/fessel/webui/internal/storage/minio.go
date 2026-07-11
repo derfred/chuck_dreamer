@@ -10,6 +10,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -32,6 +33,11 @@ const (
 	// multipart part is 5 MiB; 10 keeps part counts low for multi-MB segments).
 	minioPartSize = 10 * 1024 * 1024
 	listCacheTTL  = 1500 * time.Millisecond
+
+	// Monitor freeze-frame: a sibling key prefix to recordings/, a single
+	// fixed object — deliberately outside the recordings prefix so it never
+	// surfaces in List() (which only walks keyRoot+"/").
+	snapshotKey = "monitor/snapshot.jpg"
 )
 
 func objectKey(recType, recordingID, fileName string) string {
@@ -209,6 +215,25 @@ func (m *MinioBackend) PlaybackURL(recordingID, fileName string) (PlaybackTarget
 func (m *MinioBackend) Read(recordingID, fileName, httpRange string) (*ReadResult, error) {
 	// MinIO playback is via presigned redirect, never through the webui.
 	return nil, fmt.Errorf("minio backend does not serve playback bytes; use PlaybackURL")
+}
+
+func (m *MinioBackend) StoreSnapshot(jpeg []byte) error {
+	_, err := m.client.PutObject(context.Background(), m.bucket, snapshotKey,
+		bytes.NewReader(jpeg), int64(len(jpeg)),
+		minio.PutObjectOptions{ContentType: "image/jpeg"})
+	return err
+}
+
+func (m *MinioBackend) ReadSnapshot() ([]byte, time.Time, bool) {
+	info, err := m.client.StatObject(context.Background(), m.bucket, snapshotKey, minio.StatObjectOptions{})
+	if err != nil {
+		return nil, time.Time{}, false
+	}
+	raw := m.getObjectBytes(snapshotKey)
+	if raw == nil {
+		return nil, time.Time{}, false
+	}
+	return raw, info.LastModified, true
 }
 
 func (m *MinioBackend) getObjectBytes(key string) []byte {

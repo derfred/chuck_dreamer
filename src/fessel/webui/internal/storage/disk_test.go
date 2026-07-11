@@ -110,6 +110,48 @@ func TestDiskMetadataTypeRouting(t *testing.T) {
 	}
 }
 
+func TestDiskSnapshotStoreAndReadBack(t *testing.T) {
+	d := newDisk(t)
+	if _, _, ok := d.ReadSnapshot(); ok {
+		t.Fatalf("want no snapshot before first store")
+	}
+	if err := d.StoreSnapshot([]byte("jpeg-one")); err != nil {
+		t.Fatal(err)
+	}
+	data, receivedAt, ok := d.ReadSnapshot()
+	if !ok || string(data) != "jpeg-one" {
+		t.Fatalf("stored: %q %v", data, ok)
+	}
+	if receivedAt.IsZero() {
+		t.Fatalf("want a non-zero receivedAt")
+	}
+}
+
+func TestDiskSnapshotOverwrites(t *testing.T) {
+	d := newDisk(t)
+	_ = d.StoreSnapshot([]byte("one"))
+	_ = d.StoreSnapshot([]byte("two"))
+	data, _, ok := d.ReadSnapshot()
+	if !ok || string(data) != "two" {
+		t.Fatalf("stored: %q %v", data, ok)
+	}
+}
+
+func TestDiskSnapshotDoesNotAppearInRecordingsList(t *testing.T) {
+	d := newDisk(t)
+	_ = d.Store("rec1", "seg-00001.ts", strings.NewReader("x"))
+	_ = d.StoreSnapshot([]byte("jpeg"))
+	views := d.List()
+	for _, v := range views {
+		if v.RecordingID == "monitor" || v.RecordingID == "snapshot.jpg" {
+			t.Fatalf("snapshot leaked into recordings list: %v", views)
+		}
+	}
+	if len(views) != 1 || views[0].RecordingID != "rec1" {
+		t.Fatalf("want only rec1, got %v", views)
+	}
+}
+
 func TestDiskListNewestFirst(t *testing.T) {
 	d := newDisk(t)
 	_ = d.Store("old", "metadata.json", strings.NewReader(`{"started_at":"2026-01-01T00:00:00Z"}`))

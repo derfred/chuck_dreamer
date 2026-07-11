@@ -19,9 +19,17 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 const recordingsDirname = "recordings"
+
+// Monitor freeze-frame: a sibling root to recordings/, a single fixed file —
+// deliberately outside the recordings tree so it never surfaces in List().
+const (
+	monitorDirname   = "monitor"
+	snapshotBaseName = "snapshot.jpg"
+)
 
 // isPlainComponent reports whether part is a single, safe path component:
 // non-empty, not `.`/`..`, no separators, no NUL. The defence against
@@ -269,6 +277,38 @@ func (d *DiskBackend) Read(recordingID, fileName, httpRange string) (*ReadResult
 type limitReadCloser struct {
 	io.Reader
 	io.Closer
+}
+
+func (d *DiskBackend) snapshotPath() string {
+	return filepath.Join(filepath.Dir(d.recordingsRoot), monitorDirname, snapshotBaseName)
+}
+
+func (d *DiskBackend) StoreSnapshot(jpeg []byte) error {
+	dest := d.snapshotPath()
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	// Write to a temp sibling then rename, same idempotent/atomic pattern as
+	// Store: a reader never sees a half-written frame.
+	tmp := dest + ".tmp"
+	if err := os.WriteFile(tmp, jpeg, 0o644); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dest)
+}
+
+func (d *DiskBackend) ReadSnapshot() ([]byte, time.Time, bool) {
+	path := d.snapshotPath()
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, time.Time{}, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, time.Time{}, false
+	}
+	return data, st.ModTime(), true
 }
 
 // typeFromMetadataBytes parses the `type` out of a metadata.json byte buffer,

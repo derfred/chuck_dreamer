@@ -26,7 +26,6 @@ import (
 	"github.com/derfred/fessel/webui/internal/config"
 	"github.com/derfred/fessel/webui/internal/health"
 	"github.com/derfred/fessel/webui/internal/server"
-	"github.com/derfred/fessel/webui/internal/snapshot"
 	"github.com/derfred/fessel/webui/internal/storage"
 	"github.com/derfred/fessel/webui/internal/supervisor"
 	"github.com/derfred/fessel/webui/relay"
@@ -116,7 +115,6 @@ func main() {
 		slog.Warn("AUTH BYPASS ACTIVE: FESSEL_DEV_IDENTITY set — header-less requests are treated as authenticated; never use in production",
 			"identity", cfg.DevIdentity)
 	}
-	snap := &snapshot.Holder{}
 	public := &server.Public{
 		Auth:       headers,
 		Supervisor: sup,
@@ -124,10 +122,9 @@ func main() {
 		Health:     mon,
 		Relay:      rly,
 		Controller: ctrl,
-		Snapshot:   snap,
 		StaticDir:  cfg.StaticDir,
 	}
-	ingest := &server.Ingest{Storage: store, Relay: rly, Snapshot: snap}
+	ingest := &server.Ingest{Storage: store, Relay: rly}
 
 	publicSrv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.PublicPort), Handler: public.Handler()}
 	ingestSrv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.IngestPort), Handler: ingest.Handler()}
