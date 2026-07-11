@@ -95,6 +95,9 @@ class MujocoBackend:
     with self._lock:
       return cast(np.ndarray, self.data.qpos[self._qpos_adr].copy())
 
+  def last_positions(self) -> np.ndarray:
+    return self.read_positions()
+
   def write_positions(self, q: np.ndarray) -> None:
     q = np.asarray(q, dtype=np.float64)
     if q.shape != (self._n,):

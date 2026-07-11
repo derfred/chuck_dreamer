@@ -208,13 +208,14 @@ def test_feetech_read_decimation_caches_between_bus_reads(stub_follower):
   b = _backend(read_decimation=3)
   b.start()
   f = stub_follower[0]
-  b.read_positions()                 # call 1: first read always hits the bus
-  assert f.reads == 1
+  assert f.reads == 1                # start() primes the cache with one bus read
+  b.read_positions()                 # call 1: due (count 0) -> bus
+  assert f.reads == 2
   b.read_positions()                 # call 2: cached
   b.read_positions()                 # call 3: cached
-  assert f.reads == 1
-  b.read_positions()                 # call 4: due again (count rolled to a multiple)
   assert f.reads == 2
+  b.read_positions()                 # call 4: due again (count rolled to a multiple)
+  assert f.reads == 3
   b.stop()
 
 
@@ -224,7 +225,78 @@ def test_feetech_read_every_tick_by_default(stub_follower):
   f = stub_follower[0]
   for _ in range(4):
     b.read_positions()
-  assert f.reads == 4
+  assert f.reads == 5                # 1 priming read at start + 4 ticks
+  b.stop()
+
+
+def test_feetech_last_positions_never_touches_the_bus(stub_follower):
+  # The observer (policy-loop) path: start() primes the cache, and any number
+  # of last_positions() calls return it without a single bus transaction.
+  b = _backend()
+  b.start()
+  f = stub_follower[0]
+  assert f.reads == 1                # the priming read only
+  first = b.last_positions()
+  for _ in range(10):
+    np.testing.assert_array_equal(b.last_positions(), first)
+  assert f.reads == 1
+  # A control-thread bus read refreshes what the observer path sees.
+  target = np.array([0.5, -1.0, 1.0, 0.3, -0.4, 0.7])
+  b.write_positions(target)
+  b.read_positions()
+  np.testing.assert_allclose(b.last_positions(), target, atol=1e-9)
+  b.stop()
+
+
+def test_feetech_last_positions_before_start_raises():
+  with pytest.raises(RuntimeError, match="before start"):
+    _backend().last_positions()
+
+
+def test_feetech_bus_transactions_never_interleave(stub_follower):
+  # Regression (B4): concurrent read/write from two threads corrupted the
+  # half-duplex bus ("Incorrect status packet!"). Instrument the stub so any
+  # overlapping transaction is detected, then hammer the backend from a
+  # control-like thread (read+write) and an observer thread (read).
+  import threading
+  import time
+
+  b = _backend()
+  b.start()
+  f = stub_follower[0]
+
+  busy    = threading.Lock()
+  overlap = []
+
+  def _guard(fn):
+    def wrapped(*a, **kw):
+      if not busy.acquire(blocking=False):
+        overlap.append(fn.__name__)
+        return fn(*a, **kw)
+      try:
+        time.sleep(0.0005)           # widen the window a real bus read has
+        return fn(*a, **kw)
+      finally:
+        busy.release()
+    return wrapped
+
+  f.get_observation = _guard(f.get_observation)
+  f.send_action     = _guard(f.send_action)
+
+  q = b.last_positions()
+  def control():
+    for _ in range(50):
+      b.write_positions(q)
+      b.read_positions()
+
+  def rogue_reader():                # a misbehaving second bus user
+    for _ in range(50):
+      b.read_positions()
+
+  threads = [threading.Thread(target=control), threading.Thread(target=rogue_reader)]
+  for t in threads: t.start()
+  for t in threads: t.join()
+  assert overlap == []               # the backend lock serialized every transaction
   b.stop()
 
 

@@ -39,11 +39,29 @@ class RobotBackend(Protocol):
     ...
 
   def read_positions(self) -> np.ndarray:
-    """Latest measured joint positions, shape ``(n_joints,)``."""
+    """Latest measured joint positions, shape ``(n_joints,)``.
+
+    May perform I/O (a bus transaction on hardware). The control thread is
+    the only caller — it owns the measurement schedule.
+    """
+    ...
+
+  def last_positions(self) -> np.ndarray:
+    """Freshest already-measured positions, shape ``(n_joints,)``, no I/O.
+
+    Never touches the bus: returns the most recent reading taken by
+    :meth:`read_positions` (or at :meth:`start`). This is the observer path —
+    the policy loop samples it so it can never contend with the control
+    thread for the bus. For sim backends it is equivalent to
+    :meth:`read_positions`.
+    """
     ...
 
   def write_positions(self, q: np.ndarray) -> None:
-    """Command joint position setpoints, shape ``(n_joints,)``."""
+    """Command joint position setpoints, shape ``(n_joints,)``.
+
+    Control thread only, like :meth:`read_positions`.
+    """
     ...
 
   def joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
@@ -119,6 +137,9 @@ class FakeBackend:
     pass
 
   def read_positions(self) -> np.ndarray:
+    return self._q.copy()
+
+  def last_positions(self) -> np.ndarray:
     return self._q.copy()
 
   def write_positions(self, q: np.ndarray) -> None:

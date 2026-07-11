@@ -119,7 +119,7 @@ class PolicyLoop:
     step = 0
     while not self._stop.is_set():
       t = time.monotonic() - t0
-      q_meas = self._backend.read_positions()
+      q_meas = self._backend.last_positions()
       # latest() is non-blocking by contract, so the policy loop never waits on
       # serial / the camera; when no leader is configured leader_qpos is None.
       leader_qpos = self._leader.latest() if self._leader is not None else None

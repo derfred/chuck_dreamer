@@ -95,8 +95,11 @@ class FeetechBackend:
     self._max_relative_target             = max_relative_target
     self._disable_torque_on_disconnect    = bool(disable_torque_on_disconnect)
 
-    # Bus state. The control thread owns the bus, but guard the cached read so a
-    # diagnostic read on another thread (a future liveness probe) stays safe.
+    # Bus state. The control thread owns the bus (read_positions /
+    # write_positions); other threads observe via last_positions (cache only).
+    # _lock is held across every bus transaction so that even a misbehaving
+    # extra caller cannot interleave packets on the half-duplex bus — two
+    # concurrent sync-reads corrupt each other's status packets.
     self._lock                            = threading.Lock()
     self._read_count                      = 0
     self._cached: np.ndarray | None       = None
@@ -166,9 +169,13 @@ class FeetechBackend:
     )
     self._follower = SO101Follower(cfg)
     self._follower.connect(calibrate=self._calibrate)
+    # Prime the cache with one bus read on the (single) starting thread:
+    # last_positions() is then always answerable without touching the bus,
+    # regardless of which loop thread runs first.
     with self._lock:
       self._read_count = 0
       self._cached = None
+      self._bus_read_locked()
 
   def stop(self) -> None:
     # Safe to call during shutdown even if never started; never raise.
@@ -180,28 +187,40 @@ class FeetechBackend:
       except Exception:
         logger.exception("follower disconnect failed")
 
+  def _bus_read_locked(self) -> np.ndarray:
+    """One sync-read transaction; caller must hold ``self._lock``."""
+    obs = self._follower.get_observation()
+    q = leader_action_to_follower_qpos(
+      {k: v for k, v in obs.items() if k.endswith(".pos")},
+      jaw_lower=self._jaw_lower, jaw_upper=self._jaw_upper)
+    self._cached = q
+    return q.copy()
+
   def read_positions(self) -> np.ndarray:
     """Latest measured joint positions in follower-ordered radians, shape ``(6,)``.
 
-    Hits the bus once every ``read_decimation`` calls (the diagnostic-read
-    schedule); between bus reads it returns the last reading. The very first call
-    always reads so there is never a ``None`` to hand back.
+    Control-thread path. Hits the bus once every ``read_decimation`` calls (the
+    diagnostic-read schedule); between bus reads it returns the cached reading.
+    The whole bus transaction runs under ``self._lock`` (see ``_lock`` comment).
     """
     if self._follower is None:
       raise RuntimeError("FeetechBackend.read_positions before start()")
     with self._lock:
       due = self._cached is None or (self._read_count % self._read_decimation == 0)
       self._read_count += 1
-      cached = None if self._cached is None else self._cached.copy()
-    if not due and cached is not None:
-      return cached
-    obs = self._follower.get_observation()
-    q = leader_action_to_follower_qpos(
-      {k: v for k, v in obs.items() if k.endswith(".pos")},
-      jaw_lower=self._jaw_lower, jaw_upper=self._jaw_upper)
+      if not due and self._cached is not None:
+        return self._cached.copy()
+      return self._bus_read_locked()
+
+  def last_positions(self) -> np.ndarray:
+    """Freshest cached reading, no bus I/O — the observer (policy-loop) path.
+
+    ``start()`` primes the cache, so this is always answerable after start.
+    """
+    if self._follower is None:
+      raise RuntimeError("FeetechBackend.last_positions before start()")
     with self._lock:
-      self._cached = q
-    return q.copy()
+      return self._cached.copy()
 
   def write_positions(self, q: np.ndarray) -> None:
     """Command joint setpoints (follower-ordered radians) to the servos."""
@@ -212,4 +231,5 @@ class FeetechBackend:
       raise ValueError(f"write_positions expects ({_N_JOINTS},); got {q.shape}")
     action = follower_qpos_to_action(
       q, jaw_lower=self._jaw_lower, jaw_upper=self._jaw_upper)
-    self._follower.send_action(action)
+    with self._lock:
+      self._follower.send_action(action)
