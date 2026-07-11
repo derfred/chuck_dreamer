@@ -13,11 +13,14 @@ endpoint is by Tailscale identity at the network layer; the uploader is an
 HTTPS client only (no MinIO SDK, no S3 keys).
 
 Config — the `uploader:` subtree of the single fessel.yaml (Requirements §6),
-plus the shared `mqtt`/`storage` sections, flattened by load_component_config:
-  mqtt:     {host, port}             # shared
-  storage:  {ssd_path}               # shared; default /mnt/ssd (same mount as video)
-  uploader: {driver, ingest_url_base, timeout_s, verify_tls}
-  upload:   {backoff_s: [..], poll_interval_s, backlog_interval_s}
+plus the shared `mqtt`/`storage`/`webui_base` sections, flattened by
+load_component_config:
+  mqtt:       {host, port}           # shared
+  storage:    {ssd_path}             # shared; default /mnt/ssd (same mount as video)
+  webui_base: "http://..."           # shared; the recording-ingest target
+                                      # unless uploader.ingest_url_base overrides it
+  uploader:   {driver, ingest_url_base, timeout_s, verify_tls}
+  upload:     {backoff_s: [..], poll_interval_s, backlog_interval_s}
 """
 
 from __future__ import annotations
@@ -44,16 +47,23 @@ DEFAULT_POLL_INTERVAL_S = 10.0
 DEFAULT_BACKLOG_INTERVAL_S = 30.0
 
 
-def _ingest_config_with_env(cfg: dict) -> dict:
+def _ingest_config_with_env(cfg: dict, webui_base: str | None) -> dict:
   """Overlay env-var overrides on the `uploader` ingest config block. The
   architecture (§5.5) injects deploy-specific values via environment; this lets
   the integration env point the test-Pi's uploader at the in-cluster webui
   Service (plain HTTP) and the `http` driver, rather than the baked-in `fake`
   the fessel.test.yaml defaults to.
 
+  `ingest_url_base` defaults to the shared `webui_base` (the webui pod's
+  tailnet endpoint — the same one video's WHIP/snapshot ingest uses) when the
+  `uploader:` subtree does not set its own; an explicit `uploader.ingest_url_base`
+  still wins, e.g. to point the uploader somewhere else.
+
   Env keys (all optional): FESSEL_INGEST_{DRIVER,URL_BASE,VERIFY_TLS}.
   VERIFY_TLS is parsed as a bool ("true"/"1"/"yes")."""
   out = dict(cfg)
+  if "ingest_url_base" not in out and webui_base:
+    out["ingest_url_base"] = webui_base
   env = os.environ
   for key, env_name in (
     ("driver", "FESSEL_INGEST_DRIVER"),
@@ -90,7 +100,7 @@ class UploaderApp:
       upload_cfg.get("backlog_interval_s", DEFAULT_BACKLOG_INTERVAL_S)
     )
 
-    ingest_cfg = _ingest_config_with_env(config.get("uploader", {}))
+    ingest_cfg = _ingest_config_with_env(config.get("uploader", {}), config.get("webui_base"))
     self._boot_ingest = ingest_cfg
     client = build_ingest_client(ingest_cfg)
     self._uploader = Uploader(
@@ -150,7 +160,10 @@ class UploaderApp:
       log.warning(
         '{"event":"config_reload","note":"mqtt/storage changed; restart required to apply"}'
       )
-    if _ingest_config_with_env(cfg.get("uploader", {})) != self._boot_ingest:
+    if (
+      _ingest_config_with_env(cfg.get("uploader", {}), cfg.get("webui_base"))
+      != self._boot_ingest
+    ):
       log.warning(
         '{"event":"config_reload","note":"uploader ingest config changed; restart required to apply"}'
       )
@@ -182,12 +195,15 @@ class UploaderApp:
       # disk (the durable-queue contract makes "pause" = "don't scan"), so
       # nothing is lost and the queue drains once a viewer leaves.
       outcomes = self._uploader.process_pending() if self._allowed() else []
-      # Publish backlog gauges on their own slower cadence (V4.8) regardless of
-      # the gate, so a viewer camping long enough to starve uploads is still
-      # visible (the Slice-7 >3h alert lands here).
+      # Publish backlog gauges + the liveness heartbeat on their own slower
+      # cadence (V4.8) regardless of the gate, so a viewer camping long enough
+      # to starve uploads is still visible (the Slice-7 >3h alert lands here),
+      # and supervisor can tell "idle" apart from "crash-looping" by heartbeat
+      # absence rather than an empty backlog alone.
       now = time.monotonic()
       if now - last_backlog >= self._backlog_interval:
         self._uploader.publish_backlog()
+        self._uploader.publish_heartbeat()
         last_backlog = now
       # Wait the poll interval, OR a longer backoff if a retryable failure was
       # seen this pass (the queue can't drain faster than the network allows).

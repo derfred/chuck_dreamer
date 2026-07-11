@@ -245,10 +245,17 @@ class UploadProgress(BaseModel):
 
 class UploadBacklog(BaseModel):
   """Upload-queue health gauges (V4.8): how many markers are pending and how
-  old the oldest one is. The Slice 7 ">3h" P2 alert lands against these."""
+  old the oldest one is. The Slice 7 ">3h" P2 alert lands against these.
+
+  `healthy` is the uploader's own liveness, derived from heartbeat freshness
+  (arm/video/upload/heartbeat), NOT from queue depth: an uploader that never
+  started (or is crash-looping before it ever publishes anything) has
+  count=0/oldest=None too, indistinguishable from a genuinely idle uploader
+  unless liveness is tracked separately. None = no heartbeat ever received."""
 
   count: int = 0
   oldest_pending_seconds: int | None = None
+  healthy: bool | None = None
 
 
 class RecordingListItem(BaseModel):

@@ -1,9 +1,11 @@
 // The INGEST listener (B5.5.6/B5.5.7): a SEPARATE handler bound to a SEPARATE
-// port (FESSEL_INGEST_PORT). The `webui-recording-ingest` Tailscale Service
-// targets this port; the public Ingress never does. Because these routes exist
-// ONLY on this handler, they are structurally impossible to reach through the
-// public listener. ALL Pi->webui traffic lives here — recording uploads AND
-// the live WHIP ingest signaling (the Pi dials the pod's tailnet address).
+// port (FESSEL_INGEST_PORT). In production the pod's tailscale sidecar makes
+// this port tailnet-reachable directly (no operator Service); the public
+// Ingress never routes here. Because these routes exist ONLY on this
+// handler, they are structurally impossible to reach through the public
+// listener. ALL Pi->webui traffic lives here — recording uploads, snapshot
+// push, AND the live WHIP ingest signaling (the Pi dials the pod's tailnet
+// address for all three).
 //
 // Auth is at the network layer (Tailscale identity); there is no oauth2-proxy
 // in front, no application-layer token.

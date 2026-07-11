@@ -45,8 +45,8 @@ def plug_state(name: str) -> str:
 # --- Slice 4: recording + upload topics (architecture §2.7) ------------------
 # Explicit-recording command surface (supervisor -> video) and the retained
 # recording-state topic (video -> supervisor). The upload pipeline publishes
-# per-recording progress and periodic backlog gauges (video uploader ->
-# supervisor). All Pi-internal; no cluster->Pi MQTT.
+# per-recording progress, periodic backlog gauges, and a liveness heartbeat
+# (uploader -> supervisor). All Pi-internal; no cluster->Pi MQTT.
 
 CMD_RECORDING_START = f"{SITE_PREFIX}/video/cmd/recording/start"
 CMD_RECORDING_STOP = f"{SITE_PREFIX}/video/cmd/recording/stop"
@@ -60,6 +60,7 @@ STATE_RECORDING = f"{SITE_PREFIX}/video/state/recording"
 UPLOAD_PREFIX = f"{SITE_PREFIX}/video/upload"
 UPLOAD_BACKLOG_COUNT = f"{UPLOAD_PREFIX}/backlog_count"
 UPLOAD_BACKLOG_OLDEST = f"{UPLOAD_PREFIX}/oldest_pending_seconds"
+UPLOAD_HEARTBEAT = f"{UPLOAD_PREFIX}/heartbeat"
 
 
 def upload_progress(recording_id: str) -> str:
@@ -139,3 +140,9 @@ RETAIN_UPLOAD = True
 # it is a latched state, so a (re)connecting uploader must see the current value
 # without waiting for the coordinator's next tick.
 RETAIN_UPLOAD_GATE = True
+
+# Uploader heartbeat: cheap + periodic like the process heartbeat (QoS 0), but
+# retained (unlike it) so a supervisor restart immediately sees the uploader's
+# last-known-alive time rather than waiting a full interval for the next beat.
+QOS_UPLOAD_HEARTBEAT = 0
+RETAIN_UPLOAD_HEARTBEAT = True

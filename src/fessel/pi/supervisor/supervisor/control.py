@@ -50,6 +50,8 @@ log = logging.getLogger(__name__)
 PLUG_ARM = "arm"
 PLUG_JETSON = "jetson"
 
+UPLOADER_HEARTBEAT_STALENESS_S = 90.0
+
 # A publish callback: (topic, payload-dict, qos, retain) -> None. The control
 # plane uses it to publish verified plug state; injecting it keeps this module
 # free of an MQTT-client dependency and trivially testable.
@@ -78,15 +80,19 @@ class ControlPlane:
     jetson_refresh_s: float = 5.0,
     plug_refresh_s: float = 10.0,
     anomalies: AnomalyTracker | None = None,
+    now: Callable[[], float] = time.monotonic,
   ) -> None:
     self._plugs = plugs
     self._jetson = jetson
     self._publish = publish
     self._jetson_refresh_s = jetson_refresh_s
     self._plug_refresh_s = plug_refresh_s
+    self._now = now
     # Slice 5: live vision/audio values + the in-memory anomaly log, fed from
     # the new MQTT topics via the relay (S5.1). Surfaced in /state + /anomalies.
     self._anomalies = anomalies if anomalies is not None else AnomalyTracker()
+    # Uploader liveness (distinct from _upload_backlog): last heartbeat time,
+    self._uploader_hb_at: float | None = None
 
     self._lock = threading.Lock()
     self._safety = SafetyState.IDLE
@@ -133,6 +139,10 @@ class ControlPlane:
   def set_upload_backlog(self, backlog: UploadBacklog) -> None:
     with self._lock:
       self._upload_backlog = backlog
+
+  def note_uploader_heartbeat(self) -> None:
+    with self._lock:
+      self._uploader_hb_at = self._now()
 
   @property
   def anomalies(self) -> AnomalyTracker:
@@ -207,13 +217,16 @@ class ControlPlane:
     audio = self._anomalies.audio_state()
     recent = self._anomalies.recent()
     with self._lock:
+      hb_at = self._uploader_hb_at
+      healthy = None if hb_at is None else (self._now() - hb_at) < UPLOADER_HEARTBEAT_STALENESS_S
+      backlog = self._upload_backlog.model_copy(update={"healthy": healthy})
       return StateResponse(
         safety_state=self._safety,
         jetson=self._jetson_state,
         plugs={name: ps.model_copy() for name, ps in self._plug_state.items()},
         camera=CameraState(up=self._camera_up),
         recording=self._recording.model_copy(),
-        upload_backlog=self._upload_backlog.model_copy(),
+        upload_backlog=backlog,
         vision=vision,
         audio=audio,
         recent_anomalies=recent,

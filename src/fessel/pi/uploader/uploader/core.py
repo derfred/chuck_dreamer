@@ -18,6 +18,12 @@ Per-recording outcome:
 Backlog gauges (V4.8): count of pending markers + age of the oldest, published
 on a periodic schedule. The Slice-7 ">3h" P2 alert lands against these.
 
+Liveness heartbeat: published on the same schedule as the backlog gauges,
+unconditionally (regardless of queue depth or the upload gate) — its absence,
+not the backlog count, is what supervisor uses to tell "uploader crash-looping"
+apart from "uploader idle with nothing queued" (the two look identical in the
+backlog gauges alone).
+
 Uploads are single-threaded (V4.7): cellular uplink is the bottleneck; parallel
 uploads only fight each other for it.
 """
@@ -240,3 +246,13 @@ class Uploader:
       topics.RETAIN_UPLOAD,
     )
     return count, oldest_seconds
+
+  def publish_heartbeat(self) -> None:
+    """Publish the uploader liveness heartbeat. Called on the same cadence as
+    `publish_backlog`, unconditionally — see the module docstring."""
+    self._publish(
+      topics.UPLOAD_HEARTBEAT,
+      {"ts": _now_iso()},
+      topics.QOS_UPLOAD_HEARTBEAT,
+      topics.RETAIN_UPLOAD_HEARTBEAT,
+    )

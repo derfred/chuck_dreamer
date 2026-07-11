@@ -120,6 +120,7 @@ class Relay:
     # plus a cache of per-recording upload progress for /recordings/<id>/upload.
     self.on_recording: Callable[[RecordingState], None] | None = None
     self.on_backlog: Callable[[UploadBacklog], None] | None = None
+    self.on_uploader_heartbeat: Callable[[], None] | None = None
     # §2.12: the bandwidth coordinator needs live-viewer presence; fired with
     # True when the live state machine is `running`, else False.
     self.on_live_running: Callable[[bool], None] | None = None
@@ -150,6 +151,9 @@ class Relay:
     self._mqtt.subscribe(topics.UPLOAD_BACKLOG_COUNT, self._on_backlog_count, qos=topics.QOS_UPLOAD)
     self._mqtt.subscribe(
       topics.UPLOAD_BACKLOG_OLDEST, self._on_backlog_oldest, qos=topics.QOS_UPLOAD
+    )
+    self._mqtt.subscribe(
+      topics.UPLOAD_HEARTBEAT, self._on_uploader_heartbeat, qos=topics.QOS_UPLOAD_HEARTBEAT
     )
     self._mqtt.subscribe_model(
       f"{topics.UPLOAD_PREFIX}/+",
@@ -231,6 +235,10 @@ class Relay:
       val = payload.get("value")
       self._backlog_oldest = int(val) if isinstance(val, int) else None
     self._emit_backlog()
+
+  def _on_uploader_heartbeat(self, _topic: str, _payload: dict) -> None:
+    if self.on_uploader_heartbeat is not None:
+      self.on_uploader_heartbeat()
 
   def _emit_backlog(self) -> None:
     if self.on_backlog is None:
@@ -331,6 +339,7 @@ def create_app(
   relay.on_camera = ctl.set_camera_up
   relay.on_recording = ctl.set_recording
   relay.on_backlog = ctl.set_upload_backlog
+  relay.on_uploader_heartbeat = ctl.note_uploader_heartbeat
   # Slice 5: the relay feeds the control plane's sensing tracker from MQTT; the
   # app reads it for /state (via ctl.state()) and /anomalies.
   relay.anomalies = ctl.anomalies

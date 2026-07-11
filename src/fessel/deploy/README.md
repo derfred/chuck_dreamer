@@ -33,14 +33,13 @@ mediamtx: one binary, one Deployment, `strategy: Recreate` **always**
 |---|---|---|
 | Frontend + `/api` + `/whep` signaling | TCP :8000 | public HTTPS Ingress, behind oauth2-proxy |
 | WHEP viewer media | UDP | NodePort Service `webui-media` (`cfg.webrtc.udpNodePort`, default 31554), `externalTrafficPolicy: Local`; node public IPs advertised as ICE candidates (`FESSEL_VIEWER_PUBLIC_IPS`) |
-| WHIP ingest (signaling + media) | HTTP/UDP | the pod's **kernel-mode Tailscale sidecar** — the Pi dials `http://<sidecar-hostname>.<tailnet>.ts.net:8001/whip/ingest` and sends media to the sidecar's tailnet IP on UDP `cfg.webrtc.ingestUdpPort` (default 31555). **No operator ingress Service** — an operator proxy DNATs, which breaks ICE address symmetry (§5.1) |
-| Recording ingest (Pi uploads) | TCP | Tailscale **operator** ingress Service `webui-recording-ingest` → the ingest listener (`cfg.ingestPort`, default 8001) |
+| WHIP ingest (signaling + media), snapshot push, recording ingest | HTTP/UDP | the pod's **kernel-mode Tailscale sidecar** — the Pi dials `http://<sidecar-hostname>.<tailnet>.ts.net:8001` for all three HTTP routes, and sends WHIP media to the sidecar's tailnet IP on UDP `cfg.webrtc.ingestUdpPort` (default 31555). **No operator ingress Service** — an operator proxy DNATs, which breaks ICE address symmetry for WHIP (§5.1); the plain-HTTP routes have no such constraint but share the sidecar hostname rather than mint a second Tailscale identity |
 | `/metrics` | TCP :8000 | ClusterIP only (scraped in-cluster) |
 
 The ingest listener (`:8001`) carries **all** Pi→webui traffic
-(recording uploads + WHIP signaling); the public Ingress only ever
-backends `:8000`, so the ingest surface is structurally unreachable from
-the public net.
+(recording uploads + snapshot push + WHIP signaling), all reached via the
+one sidecar hostname; the public Ingress only ever backends `:8000`, so
+the ingest surface is structurally unreachable from the public net.
 
 ### Tailscale sidecar (`cfg.webui.tailscaleSidecar`)
 
@@ -113,9 +112,11 @@ Migrating a consumer from the mediamtx-era library:
   `webui-media`).
 - The webui Deployment is `strategy: Recreate` regardless of the
   recordings backend (was: Recreate only for `disk`).
-- `includeTailscale` now renders only `webui-recording-ingest` +
-  `supervisor` egress (the SRT ingress is gone). Production wants
-  `includeTailscale: true` **and** `webui.tailscaleSidecar.enabled: true`.
+- `includeTailscale` now renders only the `supervisor` egress Service (the
+  SRT ingress and the `webui-recording-ingest` operator Service are both
+  gone — recording-ingest now rides the tailscale sidecar alongside WHIP).
+  Production wants `includeTailscale: true` **and**
+  `webui.tailscaleSidecar.enabled: true`.
 
 **Secrets delta:** drop `fessel-whep-secret`; add the Tailscale auth-key
 Secret (`fessel-ts-auth` by default). The MinIO credentials Secret

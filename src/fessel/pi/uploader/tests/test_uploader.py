@@ -151,7 +151,7 @@ def test_ingest_config_env_overrides(monkeypatch):
   monkeypatch.setenv("FESSEL_INGEST_DRIVER", "http")
   monkeypatch.setenv("FESSEL_INGEST_URL_BASE", "http://webui:8001")
   monkeypatch.setenv("FESSEL_INGEST_VERIFY_TLS", "false")
-  out = _ingest_config_with_env({"driver": "fake", "ingest_url_base": "old"})
+  out = _ingest_config_with_env({"driver": "fake", "ingest_url_base": "old"}, webui_base=None)
   assert out["driver"] == "http"
   assert out["ingest_url_base"] == "http://webui:8001"
   assert out["verify_tls"] is False
@@ -162,7 +162,39 @@ def test_ingest_config_no_env_is_passthrough(monkeypatch):
 
   for k in ("FESSEL_INGEST_DRIVER", "FESSEL_INGEST_URL_BASE", "FESSEL_INGEST_VERIFY_TLS"):
     monkeypatch.delenv(k, raising=False)
-  assert _ingest_config_with_env({"driver": "fake"}) == {"driver": "fake"}
+  assert _ingest_config_with_env({"driver": "fake"}, webui_base=None) == {"driver": "fake"}
+
+
+def test_ingest_config_defaults_to_webui_base_when_unset(monkeypatch):
+  # The config consolidation: uploader.ingest_url_base is optional in YAML —
+  # it falls back to the shared webui_base (the same tailnet endpoint video's
+  # WHIP/snapshot traffic uses) when the uploader subtree doesn't set its own.
+  from uploader.main import _ingest_config_with_env
+
+  for k in ("FESSEL_INGEST_DRIVER", "FESSEL_INGEST_URL_BASE", "FESSEL_INGEST_VERIFY_TLS"):
+    monkeypatch.delenv(k, raising=False)
+  out = _ingest_config_with_env({"driver": "http"}, webui_base="http://webui.x:8001")
+  assert out["ingest_url_base"] == "http://webui.x:8001"
+
+
+def test_ingest_config_explicit_url_overrides_webui_base(monkeypatch):
+  from uploader.main import _ingest_config_with_env
+
+  for k in ("FESSEL_INGEST_DRIVER", "FESSEL_INGEST_URL_BASE", "FESSEL_INGEST_VERIFY_TLS"):
+    monkeypatch.delenv(k, raising=False)
+  out = _ingest_config_with_env(
+    {"driver": "http", "ingest_url_base": "http://elsewhere:9000"},
+    webui_base="http://webui.x:8001",
+  )
+  assert out["ingest_url_base"] == "http://elsewhere:9000"
+
+
+def test_ingest_config_env_wins_over_webui_base(monkeypatch):
+  from uploader.main import _ingest_config_with_env
+
+  monkeypatch.setenv("FESSEL_INGEST_URL_BASE", "http://env-wins:8001")
+  out = _ingest_config_with_env({"driver": "http"}, webui_base="http://webui.x:8001")
+  assert out["ingest_url_base"] == "http://env-wins:8001"
 
 
 def test_reload_applies_upload_tunables(tmp_path):
@@ -204,3 +236,16 @@ def test_backlog_gauges(tmp_path):
   topics_seen = {t for t, _ in pubs}
   assert "arm/video/upload/backlog_count" in topics_seen
   assert "arm/video/upload/oldest_pending_seconds" in topics_seen
+
+
+def test_publish_heartbeat(tmp_path):
+  s = Storage(str(tmp_path))
+  s.ensure_layout()
+  pubs, publish = _publish_sink()
+  up = Uploader(storage=s, client=FakeIngestClient(), publish=publish)
+
+  up.publish_heartbeat()
+  assert len(pubs) == 1
+  topic, payload = pubs[0]
+  assert topic == "arm/video/upload/heartbeat"
+  assert "ts" in payload

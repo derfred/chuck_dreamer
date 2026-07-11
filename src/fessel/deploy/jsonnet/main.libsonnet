@@ -97,6 +97,6 @@ local minioLib = import 'minio.libsonnet';
       else []
     )
     + (if cfg.includeMinio then [minio.deployment, minio.service, minio.bucketJob] else [])
-    + (if cfg.includeTailscale then [ts.recordingIngress, ts.supervisorEgress] else [])
+    + (if cfg.includeTailscale then [ts.supervisorEgress] else [])
     + (if withTestJob then [$.testJob(cfg)] else []),
 }

@@ -1,9 +1,20 @@
 # Example Fessel Pi config. Copied to /etc/fessel/fessel.yaml.
 #
 # A SINGLE config file for the whole Pi (Requirements §6). Shared sections
-# (`mqtt`, `storage`) sit at the top level; each process reads its own subtree
-# (`video:` / `supervisor:` / `uploader:`) plus those shared sections. This
-# removes the duplicate mqtt/storage that the old per-process files carried.
+# (`mqtt`, `storage`, `webui_base`) sit at the top level; each process reads
+# its own subtree (`video:` / `supervisor:` / `uploader:`) plus those shared
+# sections. This removes the duplicate mqtt/storage/webui_base the old
+# per-process files (and, before that, per-endpoint config keys) carried.
+#
+# webui_base: the webui pod's tailscale-sidecar tailnet endpoint. It serves
+# ALL Pi->cluster HTTP/media traffic (WHIP ingest, snapshot push, AND
+# recording uploads) on one hostname/port. video.snapshot.ingest_url_base and
+# uploader.ingest_url_base both default to this value in code — there is no
+# per-site YAML key for them unless you want to override one independently.
+# video.whip.endpoint still sets itself explicitly (as "${webui_base}" + its
+# fixed path) since it needs a suffix, not just the bare base.
+
+webui_base: "http://webui.tailnet.ts.net:8001"
 
 # --- shared (read by every process) -----------------------------------------
 
@@ -20,10 +31,9 @@ storage:
 
 video:
   whip:
-    # The webui relay's WHIP ingest endpoint: the webui pod's tsnet-sidecar
-    # tailnet IP/name + the tailnet-only ingest port, full URL ending in
-    # /whip/ingest (architecture §2.2/§4.2). Restart-only (no SIGHUP apply).
-    endpoint: "http://webui.tailnet.ts.net:8001/whip/ingest"
+    # The webui relay's WHIP ingest endpoint: ${webui_base} (above) + the fixed
+    # WHIP ingest path (architecture §2.2/§4.2). Restart-only (no SIGHUP apply).
+    endpoint: "${webui_base}/whip/ingest"
 
   camera:
     device: /dev/video0
@@ -122,10 +132,10 @@ video:
 
   # Monitor freeze-frame push: PUTs the latest low-rate JPEG to webui's tailnet
   # ingest listener, so the Monitor page has a recent still before Stream On
-  # without ever costing WebRTC bandwidth. Best-effort, like vision/audio —
-  # empty ingest_url_base disables the push entirely.
+  # without ever costing WebRTC bandwidth. Best-effort, like vision/audio.
+  # No ingest_url_base here: it defaults to the shared webui_base (above).
+  # Set an explicit ingest_url_base: "" here to disable the push entirely.
   snapshot:
-    ingest_url_base: "http://webui.tailnet.ts.net:8001"
     interval_s: 25
     timeout_s: 10
     verify_tls: true
@@ -192,13 +202,14 @@ uploader:
   # credentials — auth is by Tailscale identity at the network layer.
   # 'http' (prod) | 'fake' (in-memory, integration only).
   driver: http
-  # webui-backend's recording-ingest Tailscale ingress (from the Tanka
-  # webui-recording-ingest Service). No scheme-less host: a full https:// base.
-  # The uploader PUTs to <ingest_url_base>/recording-ingest/<id>/<file>.
-  ingest_url_base: "https://fessel-ingest.tailnet.ts.net:8443"
+  # No ingest_url_base here: it defaults to the shared webui_base (above) —
+  # the same endpoint video's WHIP/snapshot traffic uses. The uploader PUTs
+  # to <webui_base>/recording-ingest/<id>/<file>. Set an explicit
+  # ingest_url_base here only to point the uploader somewhere else.
   # Per-PUT timeout (segments can be several MB on a slow uplink).
   timeout_s: 60
-  # Verify the ingress TLS cert. Leave true in production.
+  # Verify TLS if webui_base/ingest_url_base ever uses https:// (a direct
+  # tailnet-sidecar dial over http:// ignores this).
   verify_tls: true
 
   upload:

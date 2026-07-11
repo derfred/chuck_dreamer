@@ -18,8 +18,7 @@ media server and no JWT/JWKS/WHEP-token machinery — no streaming secret.
 |---|---|---|
 | Frontend + `/api` + `/whep` signaling | TCP :8000 | public HTTPS Ingress behind oauth2-proxy |
 | WHEP viewer media | UDP | `webui-media` NodePort (`externalTrafficPolicy: Local`), node public IPs as ICE candidates |
-| WHIP ingest (signaling + media) | HTTP/UDP | the pod's kernel-mode Tailscale **sidecar** — the Pi dials the sidecar's tailnet address directly (no operator proxy: DNAT would break ICE symmetry, architecture §5.1) |
-| Recording ingest (Pi uploads) | TCP | `webui-recording-ingest` Tailscale operator ingress → ingest listener |
+| WHIP ingest (signaling + media), snapshot push, recording ingest | HTTP/UDP | the pod's kernel-mode Tailscale **sidecar** — the Pi dials the sidecar's tailnet address directly for all three (no operator proxy: DNAT would break ICE symmetry for WHIP, architecture §5.1; the plain-HTTP routes share the same hostname rather than mint a second one) |
 | `/metrics` | TCP :8000 | ClusterIP only, scraped by Prometheus |
 
 Secrets: the Tailscale auth key (sidecar), MinIO credentials (minio
@@ -76,12 +75,13 @@ login (and in/out denial) flow itself.
 Serves **all** Pi→webui traffic:
 
 - `/recording-ingest/{id}/{name}` — the Pi-side `uploader` PUTs each
-  recording file here, reached via the `webui-recording-ingest` Tailscale
-  operator ingress (`<cfg.ingestHostname>.<tailnet>.ts.net:8443`).
-- `/whip/ingest` — the Pi's `video` posts the WHIP offer here, reached
-  **directly at the pod's Tailscale sidecar** address
-  (`http://<sidecar-hostname>.<tailnet>.ts.net:8001`); the WebRTC media
-  then flows to the sidecar's tailnet IP on `FESSEL_INGEST_UDP_PORT`.
+  recording file here, reached **directly at the pod's Tailscale sidecar**
+  address (`http://<sidecar-hostname>.<tailnet>.ts.net:8001`) — the same
+  hostname/port as WHIP and the snapshot push below, not a separate
+  operator ingress.
+- `/whip/ingest` — the Pi's `video` posts the WHIP offer here, reached at
+  the same sidecar address; the WebRTC media then flows to the sidecar's
+  tailnet IP on `FESSEL_INGEST_UDP_PORT`.
 
 Auth is at the **network layer** (Tailscale identity) — no oauth2-proxy,
 no token. The public Ingress never routes to the ingest port, so the

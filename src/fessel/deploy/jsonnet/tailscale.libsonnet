@@ -1,42 +1,18 @@
 // Tailscale OPERATOR Services for the cluster<->Pi legs (production only).
-// Two distinct shapes (the footgun: they look similar but differ):
-//   - ingress: cluster exposes webui's recording-ingest listener TO the
-//     tailnet so the Pi uploads to it (tailscale.com/expose).
 //   - egress: cluster pods dial OUT to the Pi's supervisor over the tailnet
 //     (type: ExternalName + tailscale.com/tailnet-fqdn). NOT the expose
 //     annotation.
 //
-// NOTE: the WHIP ingest (live media) is deliberately NOT here. An operator
-// ingress proxy DNATs, which breaks ICE address symmetry (architecture §5.1);
-// the Pi instead dials the webui pod's tailscale SIDECAR (webui.libsonnet,
-// cfg.webui.tailscaleSidecar) directly. The retired SRT-uplink ingress is
-// retired with the SRT uplink.
+// NOTE: ALL Pi -> cluster traffic (WHIP ingest, snapshot push, recording
+// uploads) goes through the webui pod's tailscale SIDECAR (webui.libsonnet,
+// cfg.webui.tailscaleSidecar), not an operator Service. An operator ingress
+// proxy DNATs, which breaks ICE address symmetry for WHIP (architecture
+// §5.1); the plain-HTTP routes (snapshot, recording-ingest) have no such
+// constraint but reuse the sidecar's existing tailnet identity rather than
+// mint a second one for no reason. The retired SRT-uplink ingress and the
+// recording-ingest operator Service (fessel-ingest) are both retired.
 function(cfg) {
   local ns = cfg.namespace,
-
-  // Pi -> cluster: recording uploads exposed to the tailnet (I5.5.2). A SECOND,
-  // distinct ingress in front of webui-backend's tailnet-only ingest listener
-  // (cfg.ingestPort) — separate hostname from the public HTTPS ingress, same
-  // Deployment selector, different target port. The Pi PUTs flagged recordings
-  // to <ingestHostname>.<tailnet>.ts.net:8443. Auth is by Tailscale identity;
-  // tailnet ACLs (architecture §5.1) admit the Pi and deny cluster-side
-  // identities (which use the in-cluster Service DNS for the same backend).
-  recordingIngress: {
-    apiVersion: 'v1',
-    kind: 'Service',
-    metadata: {
-      name: 'webui-recording-ingest',
-      namespace: ns,
-      annotations: {
-        'tailscale.com/expose': 'true',
-        'tailscale.com/hostname': cfg.ingestHostname,
-      },
-    },
-    spec: {
-      selector: { app: 'webui' },
-      ports: [{ port: 8443, targetPort: cfg.ingestPort, protocol: 'TCP' }],
-    },
-  },
 
   // cluster -> Pi: supervisor control plane reached over the tailnet.
   // ExternalName + tailnet-fqdn: the Tailscale OPERATOR owns spec.externalName

@@ -7,10 +7,10 @@
 // listeners —
 //   - public (:8000): frontend + /api + /whep signaling + /metrics; behind
 //     oauth2-proxy via the public Ingress (nodeport mode).
-//   - ingest (:cfg.ingestPort): ALL Pi->webui traffic — recording uploads +
-//     /whip/ingest signaling. The public Ingress NEVER routes here; the
-//     tailnet reaches it via the webui-recording-ingest operator Service
-//     (recordings) and the pod's tailscale sidecar (WHIP).
+//   - ingest (:cfg.ingestPort): ALL Pi->webui traffic — recording uploads,
+//     snapshot push, + /whip/ingest signaling. The public Ingress NEVER
+//     routes here; the tailnet reaches it entirely via the pod's tailscale
+//     sidecar (one hostname/port for all three).
 // — plus two UDP media planes (viewer + ingest, see below).
 //
 // Media exposure by cfg.webrtc.mode:

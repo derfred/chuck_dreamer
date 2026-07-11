@@ -89,7 +89,9 @@
       enabled: false,
       image: 'tailscale/tailscale:v1.98.4',
       // Tailnet device name; the Pi dials http://<hostname>.<tailnet>.ts.net:8001
-      // for WHIP signaling (and the pod's tailnet IP for media).
+      // for WHIP signaling, snapshot push, AND recording uploads (and the
+      // pod's tailnet IP for WHIP media) — one hostname for all Pi->cluster
+      // HTTP/media traffic.
       hostname: 'fessel-webui',
       // Secret holding the Tailscale auth key. Supplied by the consumer
       // (referenced by name here, never created by this library).
@@ -162,14 +164,12 @@
   },
 
   // The TCP port webui's tailnet-only ingest listener binds (B5.5.7). Serves
-  // ALL Pi->webui traffic: recording uploads AND /whip/ingest signaling. The
-  // public Ingress never routes here; the webui-recording-ingest Tailscale
-  // Service (and, in test, the in-cluster webui Service) target it.
+  // ALL Pi->webui traffic: recording uploads, snapshot push, AND /whip/ingest
+  // signaling. The public Ingress never routes here. Production: the Pi
+  // reaches this port directly on the webui pod's tailscale sidecar
+  // (webui.tailscaleSidecar.hostname). Test: the in-cluster webui Service
+  // targets it.
   ingestPort: 8001,
-
-  // Production only: the magicDNS hostname for the recording-ingest Tailscale
-  // ingress Service. The Pi dials <name>.<tailnet>.ts.net:8443.
-  ingestHostname: 'fessel-ingest',
 
   // Whether to include the in-cluster test-Pi Deployment (test envs) or
   // expect a real Pi over Tailscale (production -> false).
@@ -181,10 +181,11 @@
   // base_url -> jetson-mock). Never set in production or live-preview.
   includeControlMocks: false,
 
-  // Whether to render the Tailscale operator Services (production):
-  // recording-ingest ingress + supervisor egress. The WHIP ingest does NOT
-  // use an operator Service — it goes through the pod's tailscale sidecar
-  // (webui.tailscaleSidecar); production enables both.
+  // Whether to render the Tailscale operator Services (production): the
+  // supervisor egress (cluster -> Pi). ALL Pi -> cluster traffic (WHIP,
+  // snapshot, recording-ingest) goes through the pod's tailscale sidecar
+  // (webui.tailscaleSidecar) instead, not an operator Service; production
+  // enables both this and the sidecar.
   includeTailscale: false,
 
   // Whether to render a throwaway in-namespace MinIO (integration env only),

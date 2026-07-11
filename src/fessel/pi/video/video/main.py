@@ -25,7 +25,10 @@ into the shape below:
   snapshot: {ingest_url_base, interval_s, timeout_s, verify_tls}
       # Monitor freeze-frame push (best-effort, like vision/audio): PUTs the
       # latest JPEG to webui's tailnet ingest listener at most once per
-      # interval_s. Reuses the uploader's ingest_url_base convention/host.
+      # interval_s. ingest_url_base defaults to the shared webui_base (below)
+      # unless snapshot: sets its own (including "" to disable the push).
+  webui_base: "http://..."  # shared; also whip.endpoint's base + the
+                            # uploader's default ingest_url_base
 """
 
 from __future__ import annotations
@@ -114,11 +117,12 @@ DEFAULT_ANOMALY = {
 # Freeze-frame push defaults (Monitor UX): a low-rate JPEG PUT to webui's
 # tailnet ingest listener, so the Monitor page has something to show before
 # Stream On without ever costing WebRTC bandwidth. `interval_s` bounds how
-# stale the shown frame can be (up to ~30s is the documented tolerance);
-# `ingest_url_base` reuses the same tailnet ingest endpoint the uploader PUTs
-# recordings to.
+# stale the shown frame can be (up to ~30s is the documented tolerance).
+# `ingest_url_base` is NOT defaulted here — it falls back to the shared
+# `webui_base` (the same tailnet endpoint the uploader PUTs recordings to)
+# unless `snapshot:` sets its own (including an explicit "" to disable the
+# push entirely).
 DEFAULT_SNAPSHOT = {
-  "ingest_url_base": "",
   "interval_s": 25.0,
   "timeout_s": 10.0,
   "verify_tls": True,
@@ -228,7 +232,10 @@ class VideoApp:
     self._gst_audio = None  # GstAudioPipeline
 
     # --- Monitor freeze-frame (best-effort, like vision/audio) ---------------
-    self._snapshot_cfg = {**DEFAULT_SNAPSHOT, **(config.get("snapshot") or {})}
+    snapshot_cfg = config.get("snapshot") or {}
+    self._snapshot_cfg = {**DEFAULT_SNAPSHOT, **snapshot_cfg}
+    if "ingest_url_base" not in snapshot_cfg:
+      self._snapshot_cfg["ingest_url_base"] = config.get("webui_base") or ""
     self._gst_snapshot = None  # GstSnapshotPipeline
     self._snapshot_pusher = None  # SnapshotPusher
     self._last_snapshot_push = 0.0

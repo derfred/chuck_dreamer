@@ -132,6 +132,15 @@ func TestUploaderStates(t *testing.T) {
 		{"empty", map[string]any{"count": float64(0)}, "green"},
 		{"queued recent", map[string]any{"count": float64(2), "oldest_pending_seconds": float64(60)}, "yellow"},
 		{"queued stuck", map[string]any{"count": float64(2), "oldest_pending_seconds": float64(4 * 3600)}, "red"},
+		// healthy=false overrides an empty queue: a crash-looping uploader that
+		// never gets far enough to publish anything also reports count=0, so
+		// queue depth alone can't tell it apart from a genuinely idle uploader.
+		{"crash-looping (empty queue, no heartbeat)", map[string]any{"count": float64(0), "healthy": false}, "red"},
+		{"healthy with queue", map[string]any{"count": float64(2), "oldest_pending_seconds": float64(60), "healthy": true}, "yellow"},
+		// healthy omitted (nil in Python == not present in the JSON map) is NOT
+		// treated as unhealthy: a freshly-started, working uploader also has no
+		// heartbeat yet until its first ~30s publish.
+		{"healthy unreported, empty queue", map[string]any{"count": float64(0)}, "green"},
 	}
 	for _, tc := range cases {
 		body := healthyState()

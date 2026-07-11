@@ -112,9 +112,11 @@ class FakeJetson:
     pass
 
 
-def make_control(*, arm_fail=False, jetson_fail=False, published=None):
+def make_control(*, arm_fail=False, jetson_fail=False, published=None, now=None):
   """Build a ControlPlane wired to fake actuators. The publish callback
-  records (topic, payload, qos, retain) into `published` if provided."""
+  records (topic, payload, qos, retain) into `published` if provided. `now`
+  overrides the clock used for heartbeat-freshness checks (defaults to the
+  real time.monotonic)."""
   pub_sink = published if published is not None else []
 
   def publish(topic, payload, qos, retain):
@@ -132,12 +134,16 @@ def make_control(*, arm_fail=False, jetson_fail=False, published=None):
   }
   jetson = FakeJetson(fail=jetson_fail)
   # Long refresh intervals so the background thread does not race the test.
+  kwargs = {}
+  if now is not None:
+    kwargs["now"] = now
   ctl = ControlPlane(
     plugs=plugs,
     jetson=jetson,
     publish=publish,
     jetson_refresh_s=3600,
     plug_refresh_s=3600,
+    **kwargs,
   )
   return ctl, jetson, pub_sink
 
@@ -277,6 +283,46 @@ def test_state_reflects_camera_from_mqtt(monkeypatch):
     relay._on_camera_state("arm/video/state/camera", {"up": False})
     body = client.get("/state").json()
   assert body["camera"]["up"] is False
+
+
+# --- Slice 5.5: uploader liveness heartbeat ----------------------------------
+# healthy is None (never reported) until the first heartbeat arrives, then
+# tracks freshness live at read time — the same pattern as vision/audio
+# heartbeats in AnomalyTracker (see test_anomalies.py).
+
+
+class _Clock:
+  def __init__(self):
+    self.t = 100.0
+
+  def __call__(self):
+    return self.t
+
+
+def test_uploader_healthy_none_before_first_heartbeat():
+  ctl, _, _ = make_control()
+  assert ctl.state().upload_backlog.healthy is None
+
+
+def test_uploader_healthy_true_then_stale_after_timeout():
+  clock = _Clock()
+  ctl, _, _ = make_control(now=clock)
+  ctl.note_uploader_heartbeat()
+  assert ctl.state().upload_backlog.healthy is True
+  clock.t += 200.0  # past UPLOADER_HEARTBEAT_STALENESS_S (90s)
+  assert ctl.state().upload_backlog.healthy is False
+
+
+def test_uploader_healthy_reflected_via_mqtt_relay(monkeypatch):
+  ctl, _, _ = make_control()
+  client, _ = make_client(monkeypatch, control=ctl)
+  with client:
+    relay = client.app.state.relay
+    body = client.get("/state").json()
+    assert body["upload_backlog"]["healthy"] is None
+    relay._on_uploader_heartbeat("arm/video/upload/heartbeat", {})
+    body = client.get("/state").json()
+    assert body["upload_backlog"]["healthy"] is True
 
 
 # --- Slice 3: Jetson control relay (S3.2/S3.4) -------------------------------

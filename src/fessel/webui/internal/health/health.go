@@ -208,16 +208,20 @@ func cameraFact(body map[string]any, now time.Time) Fact {
 	return Fact{"camera", "red", "not detected", now}
 }
 
-// uploaderFact reports the Pi-side recording uploader's activity from
-// upload_backlog (StateResponse.upload_backlog, V4.8 gauges): how many
-// recordings are queued and how old the oldest pending one is. An empty
-// backlog is the uploader idle, not down — there is no separate liveness
-// signal for the uploader process itself, so this fact is a queue-depth
-// gauge, not a process-up check.
+// uploaderFact reports the Pi-side recording uploader's health from
+// upload_backlog (StateResponse.upload_backlog, V4.8 gauges plus a `healthy`
+// liveness flag derived from the uploader's own heartbeat). `healthy` is
+// checked first and can override an empty queue: a crash-looping uploader
+// that never gets far enough to publish anything reports count=0 exactly like
+// a genuinely idle one, so queue depth alone can't tell the two apart —
+// `healthy=false`/missing is what does.
 func uploaderFact(body map[string]any, now time.Time) Fact {
 	backlog, ok := body["upload_backlog"].(map[string]any)
 	if !ok {
 		return Fact{"uploader", "unknown", "not reported", now}
+	}
+	if healthy, present := backlog["healthy"].(bool); present && !healthy {
+		return Fact{"uploader", "red", "no heartbeat — uploader may be down", now}
 	}
 	count := intOf(backlog["count"])
 	if count == 0 {

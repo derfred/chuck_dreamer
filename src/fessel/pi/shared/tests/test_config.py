@@ -21,7 +21,7 @@ FESSEL_YAML = textwrap.dedent(
     control: {wiz: {driver: fake}}
   uploader:
     driver: http
-    ingest_url_base: "https://fessel-ingest.tailnet.ts.net:8443"
+    ingest_url_base: "http://webui.tailnet.ts.net:8001"
     upload: {poll_interval_s: 10}
   """
 )
@@ -51,7 +51,7 @@ def test_component_subtree_flattened_to_top_level(tmp_path):
   assert sup["control"]["wiz"]["driver"] == "fake"
   up = load_component_config(p, "uploader")
   assert up["driver"] == "http"
-  assert up["ingest_url_base"].endswith(":8443")
+  assert up["ingest_url_base"].endswith(":8001")
   assert up["upload"]["poll_interval_s"] == 10
 
 
@@ -117,6 +117,74 @@ def test_load_yaml_config_still_available(tmp_path):
   assert set(raw) == {"mqtt", "storage", "video", "supervisor", "uploader"}
 
 
+def test_base_url_placeholder_substituted_everywhere(tmp_path):
+  # video (WHIP + snapshot) and uploader all reach the webui pod's tailscale
+  # sidecar on one hostname/port (B5.5.7 / recording-ingest consolidation): a
+  # single ${webui_base} placeholder, referenced from three subtrees.
+  p = _write(
+    tmp_path,
+    textwrap.dedent(
+      """
+      webui_base: "http://webui.example.ts.net:8001"
+      mqtt: {host: 127.0.0.1, port: 1883}
+      storage: {ssd_path: /mnt/ssd}
+      video:
+        whip: {endpoint: "${webui_base}/whip/ingest"}
+        snapshot: {ingest_url_base: "${webui_base}"}
+      uploader:
+        driver: http
+        ingest_url_base: "${webui_base}"
+      """
+    ),
+  )
+  video = load_component_config(p, "video")
+  assert video["whip"]["endpoint"] == "http://webui.example.ts.net:8001/whip/ingest"
+  assert video["snapshot"]["ingest_url_base"] == "http://webui.example.ts.net:8001"
+  up = load_component_config(p, "uploader")
+  assert up["ingest_url_base"] == "http://webui.example.ts.net:8001"
+
+
+def test_multiple_base_url_placeholders_substituted_independently(tmp_path):
+  # The substitution mechanism itself is generic (any top-level scalar string
+  # key), not hardcoded to one name — verify two distinct keys both resolve.
+  p = _write(
+    tmp_path,
+    textwrap.dedent(
+      """
+      webui_base: "http://webui.example.ts.net:8001"
+      jetson_base: "http://192.168.1.40:8080"
+      mqtt: {host: 127.0.0.1, port: 1883}
+      storage: {ssd_path: /mnt/ssd}
+      supervisor:
+        control: {jetson: {base_url: "${jetson_base}"}}
+      video:
+        whip: {endpoint: "${webui_base}/whip/ingest"}
+      """
+    ),
+  )
+  sup = load_component_config(p, "supervisor")
+  assert sup["control"]["jetson"]["base_url"] == "http://192.168.1.40:8080"
+  video = load_component_config(p, "video")
+  assert video["whip"]["endpoint"] == "http://webui.example.ts.net:8001/whip/ingest"
+
+
+def test_no_base_url_key_leaves_placeholder_literal(tmp_path):
+  # Without a top-level `webui_base:`, ${webui_base} is left untouched rather
+  # than crashing — matches the "tolerant of a legacy/flat file" contract.
+  p = _write(
+    tmp_path,
+    textwrap.dedent(
+      """
+      mqtt: {host: 127.0.0.1}
+      storage: {ssd_path: /mnt/ssd}
+      uploader: {driver: http, ingest_url_base: "${webui_base}/x"}
+      """
+    ),
+  )
+  up = load_component_config(p, "uploader")
+  assert up["ingest_url_base"] == "${webui_base}/x"
+
+
 def test_shipped_example_loads_per_component():
   # Guard: the shipped fessel.yaml.example must produce a sane per-component
   # view for all three processes, so the example can't silently drift from the
@@ -134,8 +202,15 @@ def test_shipped_example_loads_per_component():
   assert "ring" not in video
   assert video["recording"]["fps"] == 30 and video["recording"]["max_lookback_seconds"] == 120.0
   assert "control" not in video and "ingest_url_base" not in video
+  # webui_base is the single shared source for video's WHIP endpoint, the
+  # uploader's (defaulted-in-code) ingest_url_base, and the snapshot push —
+  # no per-site ingest_url_base key is written in the shipped example.
+  assert video["webui_base"] == "http://webui.tailnet.ts.net:8001"
+  assert video["whip"]["endpoint"] == video["webui_base"] + "/whip/ingest"
+  assert "ingest_url_base" not in video["snapshot"]
   sup = load_component_config(example, "supervisor")
   assert sup["http"]["port"] == 8443 and sup["control"]["plugs"]["arm"]["address"]
   up = load_component_config(example, "uploader")
-  assert up["driver"] == "http" and up["ingest_url_base"].endswith(":8443")
+  assert up["driver"] == "http" and up["webui_base"] == video["webui_base"]
+  assert "ingest_url_base" not in up
   assert up["upload"]["poll_interval_s"] == 10.0
