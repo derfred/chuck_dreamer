@@ -135,10 +135,30 @@ function ageStr(ms: number): string {
   return `${Math.floor(s / 3600)}h`;
 }
 
-function StreamOffStage({ onTurnOn }: { onTurnOn: () => void }) {
+function SnapshotChip({ ageMs, stale }: { ageMs: number; stale: boolean }) {
+  return (
+    <span
+      style={{
+        fontSize: 12,
+        fontWeight: 650,
+        padding: "3px 9px",
+        borderRadius: 999,
+        color: stale ? "#2a1600" : "#0a2e26",
+        background: stale ? "#e0a955" : "#9fe0cf",
+      }}
+    >
+      ● snapshot · {ageStr(ageMs)} ago — not live
+    </span>
+  );
+}
+
+// Polls the Monitor freeze-frame's metadata and ticks a live "age" clock.
+// Shared by the resting stage (its own display) and the live stage (shown
+// behind the connecting spinner/error overlay, so establishing a session
+// doesn't drop the operator back to a flat black box).
+function useSnapshotMeta() {
   const [meta, setMeta] = useState<{ receivedAt: string } | null>(null);
   const [now, setNow] = useState<number>(() => Date.now());
-  const [lightboxOpen, setLightboxOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -176,6 +196,12 @@ function StreamOffStage({ onTurnOn }: { onTurnOn: () => void }) {
   // staleness bound, so a stuck Pi push (not just a normal 10s-old frame) is
   // visually distinct.
   const stale = ageMs != null && ageMs > 25_000;
+  return { meta, ageMs, stale };
+}
+
+function StreamOffStage({ onTurnOn }: { onTurnOn: () => void }) {
+  const { meta, ageMs, stale } = useSnapshotMeta();
+  const [lightboxOpen, setLightboxOpen] = useState(false);
 
   return (
     <div
@@ -225,18 +251,7 @@ function StreamOffStage({ onTurnOn }: { onTurnOn: () => void }) {
         }}
       >
         {meta ? (
-          <span
-            style={{
-              fontSize: 12,
-              fontWeight: 650,
-              padding: "3px 9px",
-              borderRadius: 999,
-              color: stale ? "#2a1600" : "#0a2e26",
-              background: stale ? "#e0a955" : "#9fe0cf",
-            }}
-          >
-            ● snapshot · {ageStr(ageMs!)} ago — not live
-          </span>
+          <SnapshotChip ageMs={ageMs!} stale={stale} />
         ) : (
           <div style={{ fontSize: 13.5 }}>Stream is off — no bandwidth in use.</div>
         )}
@@ -305,18 +320,7 @@ function SnapshotLightbox({
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <span
-          style={{
-            fontSize: 12,
-            fontWeight: 650,
-            padding: "3px 9px",
-            borderRadius: 999,
-            color: "#0a2e26",
-            background: "#9fe0cf",
-          }}
-        >
-          ● snapshot · {ageStr(ageMs)} ago — not live
-        </span>
+        <SnapshotChip ageMs={ageMs} stale={false} />
         <button
           type="button"
           onClick={onClose}
@@ -351,6 +355,7 @@ function LiveStage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const session = useLiveSession(videoRef);
   const { state, detail, attempt } = session;
+  const { meta, ageMs, stale } = useSnapshotMeta();
 
   // Start the WebRTC session as soon as the stream is turned on (mounted). Stop
   // it on unmount (toggled off / left Monitor) — useLiveSession's unmount effect
@@ -362,21 +367,45 @@ function LiveStage() {
 
   const spinner = SPINNER[state];
   const showVideo = state === "Playing" || state === "WaitingForVideo" || state === "Stalled";
+  // The last-known snapshot fills the background any time real video isn't
+  // actually rendering yet, so establishing/recovering a session doesn't drop
+  // the operator to a flat black box — it keeps showing the scene, just
+  // clearly marked as not live (spinner/error sit on top of it).
+  const showSnapshotBg = state !== "Playing" && meta != null;
 
   return (
     <div style={{ position: "relative", background: "#000", aspectRatio: "16 / 10" }}>
+      {showSnapshotBg && (
+        <img
+          src={snapshotUrl(meta.receivedAt)}
+          alt="Recent camera snapshot (not live)"
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+          }}
+        />
+      )}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
         style={{
+          position: "relative",
           width: "100%",
           height: "100%",
           objectFit: "contain",
           display: showVideo ? "block" : "none",
         }}
       />
+      {showSnapshotBg && (
+        <div style={{ position: "absolute", top: 10, left: 10 }}>
+          <SnapshotChip ageMs={ageMs!} stale={stale} />
+        </div>
+      )}
       {spinner && (
         <Overlay>
           <Spinner />
