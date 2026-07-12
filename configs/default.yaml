@@ -313,6 +313,20 @@ runtime:
     # Boot pose; matches the so100 SceneConfig default home.
     home_qpos: [0, -3.14, 3.14, 0, 0, 0]
 
+    # Following-error watchdog (spec §3.14): trips the safety latch on
+    # sustained tracking failure (obstruction, self-collision, servo
+    # malfunction) — the only safety layer that closes a loop on measured
+    # state. theta_0/T are global (shared servo model); k is per-joint
+    # (distal joints need a larger allowance per unit commanded velocity).
+    # Defaults are placeholders pending the offline calibration recipe in
+    # spec §3.14 (2-3x resting/typical-velocity p99 |e|); DO NOT ship
+    # without recalibrating against real recordings.
+    following_error_watchdog:
+      enabled: true
+      theta_0: 0.25    # rad
+      k: 0.1           # s; scalar (all joints) or per-joint list
+      T: 0.15          # s
+
   # Sensors (M3, spec §3.1/§4.2): latest-value producer slots sampled at
   # policy-step time. Each declares the modalities it produces; the startup
   # composition fails fast if a required modality is unproduced. Empty by

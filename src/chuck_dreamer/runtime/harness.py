@@ -31,7 +31,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from ..policy import Policy
 from .backend import RobotBackend, ViewableBackend
-from .control_loop import ControlLoop, Watchdog
+from .control_loop import ControlLoop, FollowingErrorLimits, Watchdog
 from .kernel import ControlKernel, KernelLimits, Mode
 from .modalities import (
   RuntimeObservation,
@@ -177,9 +177,16 @@ class Runtime:
       rt.logging.rerun.rrd_dir, self.telemetry, n_joints=n,
       obs_queue_maxsize=int(rt.logging.rerun.get("obs_queue_maxsize", 256)),
     )
+    fe_cfg = rt.safety.get("following_error_watchdog")
+    fe_limits = None
+    if fe_cfg is not None and bool(fe_cfg.get("enabled", True)):
+      fe_limits = FollowingErrorLimits.build(
+        theta_0=float(fe_cfg.theta_0), k=_scalar_or_array(fe_cfg.k), T=float(fe_cfg.T), n_joints=n,
+      )
     self.watchdog = Watchdog(
       timeout_s=float(rt.watchdog.timeout_s),
       on_trip=self._on_watchdog_trip,
+      fe_limits=fe_limits,
     )
     self.control_loop = ControlLoop(
       self.kernel, self.backend, self.channel, self.telemetry,
@@ -361,9 +368,16 @@ class Runtime:
     return construct(spec, **extra)
 
   def _on_watchdog_trip(self) -> None:
-    self.kernel.request_estop()
-    self.telemetry.emit_event("watchdog_trip", detail="control loop stalled -> ESTOP")
-    logger.error("watchdog tripped: control loop stalled, latched ESTOP")
+    trip_q_meas = self.watchdog.trip_q_meas
+    if trip_q_meas is not None:
+      # Following-error trip: freeze at measured position, not drifted q_cmd.
+      self.kernel.request_estop_at(trip_q_meas)
+    else:
+      # Liveness trip: no fresh q_meas sample available; freeze at q_cmd.
+      self.kernel.request_estop()
+    detail = self.watchdog.trip_reason or "control loop stalled -> ESTOP"
+    self.telemetry.emit_event("watchdog_trip", detail=detail)
+    logger.error("watchdog tripped: %s, latched ESTOP", detail)
 
   # -- lifecycle ------------------------------------------------------------
 
