@@ -276,7 +276,7 @@ class ControlLoop:
       dt        = now - last_mono
       last_mono = now
 
-      backend_s = []
+      backend_s: list[float] = []
       with _timed(backend_s):
         q_meas = self._backend.read_positions()
 
