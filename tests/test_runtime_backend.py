@@ -60,6 +60,17 @@ _LOWER = np.array([-1.92, -3.32, -0.174, -1.66, -2.79, -0.174])
 _UPPER = np.array([1.92, 0.174, 3.14, 1.66, 2.79, 1.75])
 
 
+class _StubBus:
+  """Stand-in for FeetechMotorsBus: answers sync_read with fixed per-register values."""
+
+  def __init__(self):
+    self.sync_reads: list[str] = []
+
+  def sync_read(self, data_name):
+    self.sync_reads.append(data_name)
+    return {m: float(i) for i, m in enumerate(_MOTORS)}
+
+
 class _StubFollower:
   """Stand-in for lerobot SO101Follower: an echo arm, no serial.
 
@@ -74,6 +85,7 @@ class _StubFollower:
     # Boot pose: all angular motors at 0 deg, gripper at 0% (jaw at its lower bound).
     self._action = {f"{m}.pos": 0.0 for m in _MOTORS}
     self.reads = 0
+    self.bus = _StubBus()
 
   def connect(self, calibrate=True):
     self.connected = True
@@ -227,6 +239,38 @@ def test_feetech_read_every_tick_by_default(stub_follower):
     b.read_positions()
   assert f.reads == 5                # 1 priming read at start + 4 ticks
   b.stop()
+
+
+def test_feetech_read_diagnostics_returns_follower_ordered_arrays(stub_follower):
+  b = _backend()
+  b.start()
+  diag = b.read_diagnostics()
+  assert set(diag) == {
+    "Present_Velocity", "Present_Load", "Present_Current",
+    "Present_Voltage", "Present_Temperature",
+  }
+  for arr in diag.values():
+    np.testing.assert_array_equal(arr, np.arange(6, dtype=np.float64))
+  b.stop()
+
+
+def test_feetech_read_diagnostics_is_a_separate_bus_call_not_decimated(stub_follower):
+  b = _backend(read_decimation=1000)   # positions would stay cached this many calls
+  b.start()
+  f = stub_follower[0]
+  bus = f.bus
+  assert bus.sync_reads == []
+  b.read_diagnostics()
+  assert len(bus.sync_reads) == 5       # one sync_read per diagnostic register
+  b.read_diagnostics()
+  assert len(bus.sync_reads) == 10      # always hits the bus again, no caching
+  b.stop()
+
+
+def test_feetech_read_diagnostics_before_start_raises():
+  b = _backend()
+  with pytest.raises(RuntimeError, match="before start"):
+    b.read_diagnostics()
 
 
 def test_feetech_last_positions_never_touches_the_bus(stub_follower):
