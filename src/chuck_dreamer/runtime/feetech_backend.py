@@ -48,6 +48,15 @@ logger = logging.getLogger(__name__)
 
 _N_JOINTS = len(_LEADER_MOTORS)
 
+# Per-servo diagnostic registers (STS3215 control table), read on demand via
+# read_diagnostics() — never on the control-thread's read_positions/write_positions
+# path. Velocity/load/current are raw signed counts; voltage is decivolts;
+# temperature is degrees C. See lerobot.motors.feetech.tables for units.
+_DIAGNOSTIC_REGISTERS = (
+  "Present_Velocity", "Present_Load", "Present_Current",
+  "Present_Voltage", "Present_Temperature",
+)
+
 
 class FeetechBackend:
   """Real SO-101 follower over lerobot, behind the backend protocol.
@@ -211,6 +220,23 @@ class FeetechBackend:
       if not due and self._cached is not None:
         return self._cached.copy()
       return self._bus_read_locked()
+
+  def read_diagnostics(self) -> dict[str, np.ndarray]:
+    """Per-servo diagnostics (velocity/load/current/voltage/temperature), follower order.
+
+    A separate, on-demand bus transaction — one ``sync_read`` per register — not
+    part of the ``read_positions``/``write_positions`` control-loop path. Callers
+    (e.g. a diagnostic/monitoring thread) decide when and how often to pay for
+    it; the values are raw servo units (see ``_DIAGNOSTIC_REGISTERS``).
+    """
+    if self._follower is None:
+      raise RuntimeError("FeetechBackend.read_diagnostics before start()")
+    with self._lock:
+      raw = {reg: self._follower.bus.sync_read(reg) for reg in _DIAGNOSTIC_REGISTERS}
+    return {
+      reg: np.asarray([values[motor] for motor in _LEADER_MOTORS], dtype=np.float64)
+      for reg, values in raw.items()
+    }
 
   def last_positions(self) -> np.ndarray:
     """Freshest cached reading, no bus I/O — the observer (policy-loop) path.
