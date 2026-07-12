@@ -17,12 +17,23 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable
+from contextlib import contextmanager
+from typing import Callable, Iterator
 
 from .backend import RobotBackend
 from .kernel import ControlKernel
 from .setpoint_channel import SetpointChannel
 from .telemetry import TelemetryQueue, TelemetryRecord
+
+
+@contextmanager
+def _timed(acc: list[float]) -> Iterator[None]:
+  """Append the wall time spent in the block (seconds) to ``acc``."""
+  t0 = time.perf_counter()
+  try:
+    yield
+  finally:
+    acc.append(time.perf_counter() - t0)
 
 
 class Watchdog:
@@ -142,10 +153,16 @@ class ControlLoop:
       dt        = now - last_mono
       last_mono = now
 
-      q_meas      = self._backend.read_positions()
+      backend_s = []
+      with _timed(backend_s):
+        q_meas = self._backend.read_positions()
+
       target, seq = self._channel.get_with_seq()
       out         = self._kernel.tick(target, q_meas, dt if dt > 0 else self._period)
-      self._backend.write_positions(out.q_cmd)
+
+      with _timed(backend_s):
+        self._backend.write_positions(out.q_cmd)
+
       if self._watchdog is not None:
         self._watchdog.kick()
 
@@ -154,6 +171,7 @@ class ControlLoop:
         clamped=out.clamped, velocity_limited=out.velocity_limited, dt=out.dt,
         q_meas=q_meas, q_cmd=out.q_cmd,
         target=target if target is not None else None, seq=seq,
+        backend_s=sum(backend_s),
       ))
       self._ticks += 1
 

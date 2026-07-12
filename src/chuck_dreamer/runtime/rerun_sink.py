@@ -172,6 +172,7 @@ class RerunSink:
     self._rec.log("control/velocity_limited", rr.Scalars(int(rec.velocity_limited)))
     self._rec.log("control/dt", rr.Scalars(float(rec.dt)))
     self._rec.log("control/seq", rr.Scalars(int(rec.seq)))
+    self._rec.log("control/backend_s", rr.Scalars(float(rec.backend_s)))
     for name, arr in (("q_meas", rec.q_meas), ("q_cmd", rec.q_cmd), ("target", rec.target)):
       if arr is not None:
         self._rec.log(f"control/{name}", rr.Scalars(np.asarray(arr, dtype=float).tolist()))

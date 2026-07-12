@@ -53,11 +53,12 @@ class TelemetryRecord:
   seq: int = -1
   event: str = ""
   detail: str = ""
+  backend_s: float = 0.0
 
 
 _SCALAR_FIELDS = [
   "t_wall", "t_mono", "tick", "mode", "clamped",
-  "velocity_limited", "dt", "seq", "event", "detail",
+  "velocity_limited", "dt", "seq", "event", "detail", "backend_s",
 ]
 
 
@@ -82,6 +83,7 @@ def record_to_row(rec: TelemetryRecord, n_joints: int) -> dict[str, Any]:
     "seq": rec.seq,
     "event": rec.event,
     "detail": rec.detail,
+    "backend_s": rec.backend_s,
   }
   for name, arr in (("q_meas", rec.q_meas), ("q_cmd", rec.q_cmd), ("target", rec.target)):
     for i in range(n_joints):
