@@ -140,14 +140,6 @@ class SegmentationStage:
                       cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
           n += 1
 
-      debug_dir = metadata.get("debug_dir")
-      if debug_dir is not None:
-        dest = Path(debug_dir) / "jpgs"
-        shutil.rmtree(dest, ignore_errors=True)
-        shutil.copytree(jpg_dir, dest)
-        print(f"[{self.name}] ep{episode_idx}: retained {n} JPEG frame(s) "
-              f"at {dest}")
-
       yield jpg_dir
     finally:
       shutil.rmtree(jpg_dir, ignore_errors=True)
@@ -215,7 +207,7 @@ class SegmentationStage:
     return [
       Requirement(
         f"frame-0 object prompt (episode {ep})", ds_dir / "object_prompts.json",
-        f"uv run python main.py prompt-episodes --dataset {self.ctx.source_repo}",
+        f"uv run python main.py import-lerobot prompt-episodes {self.ctx.source_repo}",
         check=frame0_prompt_present),
     ]
 
@@ -233,7 +225,7 @@ class SegmentationStage:
     if 0 not in keyframes:
       raise FileNotFoundError(
         f"no cached frame-0 prompt for {source_repo} episode {episode_index}. "
-        f"Run: `python main.py prompt-episodes --dataset {source_repo}`")
+        f"Run: `python main.py import-lerobot prompt-episodes {source_repo}`")
     print(f"[{self.name}] {source_repo} ep{episode_index}: "
           f"using {len(keyframes)} keyframe prompt(s) at frames "
           f"{sorted(keyframes.keys())}")

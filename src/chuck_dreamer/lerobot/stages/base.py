@@ -95,7 +95,7 @@ class RunContext:
         raise FileNotFoundError(
           f"FK MuJoCo model not found at {FK_MODEL_PATH}. "
           "Restore assets/mujoco/so101_arm.xml from git.")
-      from chuck_dreamer.real.fk_calibration.fk import FK
+      from chuck_dreamer.common.fk import FK
       self._fk = FK(FK_MODEL_PATH)
     return self._fk
 
@@ -106,7 +106,7 @@ class RunContext:
     Validates ``self.config`` once via ``init_from_config`` — no disk
     reload, the config is handed in at construction."""
     if self._ol_cfg is None:
-      from chuck_dreamer.lerobot.object_localization import init_from_config
+      from chuck_dreamer.perception.config import init_from_config
       self._ol_cfg = init_from_config(self.config)
     return self._ol_cfg
 
@@ -116,19 +116,19 @@ class RunContext:
 
   def dataset_cache_dir(self) -> Path:
     """This source repo's per-dataset subdirectory under the cache root."""
-    from chuck_dreamer.lerobot.object_localization.types import dataset_cache_dir
+    from chuck_dreamer.store import dataset_cache_dir
     return dataset_cache_dir(self.cache_dir(), self.source_repo)
 
   def dataset_slug(self) -> str:
     """Filesystem-safe slug for this source repo (used in cache/debug paths)."""
-    from chuck_dreamer.lerobot.object_localization.types import dataset_slug
+    from chuck_dreamer.store import dataset_slug
     return dataset_slug(self.source_repo)
 
   def keyframe_prompts(self, episode_index: int) -> dict[int, Any]:
     """Cached ``{frame_index: prompt}`` map for one episode of this source
     repo (empty if none cached). The segmentation and object-pose stages
-    share this lookup so neither reaches into ``object_localization``."""
-    from chuck_dreamer.lerobot.object_localization.prompts import (
+    share this lookup so neither reaches into the annotation package."""
+    from chuck_dreamer.lerobot.annotation.prompts import (
       load_keyframe_prompts,
     )
     return load_keyframe_prompts(self.cache_dir(), self.source_repo, episode_index)

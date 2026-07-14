@@ -1,7 +1,7 @@
 """MuJoCo pushing simulation package."""
 
 from .episode_collector import EpisodeCollector
-from .episode_writer import (
+from chuck_dreamer.common.episode_writer import (
     EpisodeWriter,
     HDF5EpisodeWriter,
     RerunEpisodeWriter,

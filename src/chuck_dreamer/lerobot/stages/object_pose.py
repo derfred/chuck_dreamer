@@ -129,9 +129,9 @@ def _load_calibration_m(ctx: RunContext):
   ``K`` and ``R_cam`` come straight from the cached calibration; the
   extrinsic translation is converted mm -> m to match the metre-frame
   mesh."""
-  from chuck_dreamer.lerobot.object_localization.types import CameraCalibration
+  from chuck_dreamer.store import load_calibration
 
-  cal = CameraCalibration.load(ctx.cache_dir(), ctx.source_repo)
+  cal = load_calibration(ctx.cache_dir(), ctx.source_repo)
   K     = np.asarray(cal.intrinsics.K, dtype=np.float32)
   R_cam = np.asarray(cal.extrinsics.R, dtype=np.float32)
   T_cam = np.asarray(cal.extrinsics.t, dtype=np.float32).reshape(3) / 1000.0
@@ -141,7 +141,7 @@ def _load_calibration_m(ctx: RunContext):
 
 def _load_mesh_m(ctx: RunContext):
   """``(vertices_m, faces)`` for the tracked object, vertices in metres."""
-  from chuck_dreamer.lerobot.object_localization.mesh import load_mesh
+  from chuck_dreamer.perception.mesh import load_mesh
 
   mesh     = load_mesh(Path(ctx.ol_cfg.mesh_path))
   vertices = np.asarray(mesh.vertices_mm, dtype=np.float32) / 1000.0
@@ -166,10 +166,11 @@ class ObjectPoseStage:
     return [
       Requirement(
         "camera intrinsics", ds_dir / "intrinsics.json",
-        f"uv run python main.py calibrate-intrinsics {self.ctx.source_repo}"),
+        f"uv run python main.py import-lerobot calibrate-intrinsics "
+        f"{ds_dir / 'intrinsics.json'} --episodes {self.ctx.source_repo}"),
       Requirement(
         "camera extrinsics", ds_dir / "extrinsics.json",
-        f"uv run python main.py annotate-mat {self.ctx.source_repo}"),
+        f"uv run python main.py import-lerobot annotate-mat {self.ctx.source_repo}"),
       Requirement(
         "object mesh", Path(ol_cfg.mesh_path),
         "set object_localization.mesh_path in configs/default.yaml "

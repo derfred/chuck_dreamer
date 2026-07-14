@@ -16,7 +16,7 @@ A single logger thread drains both queues and logs to the recording, stamping
 every entry with ``step`` (sequence) and ``time`` (duration) so control scalars
 and camera frames line up in the viewer (spec §4.3). Entity-path conventions
 and the ``RecordingStream`` / ``flush`` recipe are reused from
-``sim/episode_writer.py``'s ``RerunEpisodeWriter``; frames ride as per-step
+``common/episode_writer.py``'s ``RerunEpisodeWriter``; frames ride as per-step
 ``rr.Image`` rather than an encoded video blob — simpler for a streaming sink,
 at the cost of a larger ``.rrd`` (a fine M3 trade).
 """

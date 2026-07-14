@@ -1,7 +1,7 @@
 """Object localizer perception module — wraps the SAM2 + pose-fit estimator.
 
 This is M3's "first real perception module": it wraps the existing
-``ObjectPoseEstimator`` (``lerobot/object_localization/estimator.py``) behind
+``ObjectPoseEstimator`` (``chuck_dreamer.perception.estimator``) behind
 the runtime :class:`~chuck_dreamer.runtime.perception.PerceptionModule`
 protocol, emitting world-frame object position (``object_xy``) and its image
 projection (``object_uv``).
@@ -9,7 +9,7 @@ projection (``object_uv``).
 It is **wired but off by default** (the ``runtime.perception`` config list is
 empty). Two real dependencies keep it out of the default sim loop:
 
-* **Calibration is an M4 deliverable.** ``CameraCalibration.load`` is strict —
+* **Calibration is an M4 deliverable.** ``load_calibration`` is strict —
   it raises if intrinsics/extrinsics aren't cached — so this module's
   ``from_config`` fails fast with a clear message when calibration is absent.
 * **It is not real-time** (the estimator's CPU rasterization + SAM2 are slow).
@@ -47,11 +47,8 @@ class ObjectLocalizerModule:
 
   @classmethod
   def from_config(cls, cfg, **params) -> "ObjectLocalizerModule":
-    from chuck_dreamer.lerobot.object_localization import (
-      CameraCalibration,
-      ObjectPoseEstimator,
-      init_from_config,
-    )
+    from chuck_dreamer.perception import ObjectPoseEstimator, init_from_config
+    from chuck_dreamer.store import load_calibration
 
     prompt = params.get("first_frame_prompt")
     if prompt is None:
@@ -67,7 +64,7 @@ class ObjectLocalizerModule:
     ol = init_from_config(cfg)
     # Strict load — raises CalibrationMissingError if intrinsics/extrinsics are
     # not cached (calibration is the M4 deliverable; surface that here).
-    calibration = CameraCalibration.load(Path(ol.cache_dir), str(dataset_id))
+    calibration = load_calibration(Path(ol.cache_dir), str(dataset_id))
     estimator = ObjectPoseEstimator(
       calibration=calibration,
       mesh_path=Path(ol.mesh_path),
@@ -84,7 +81,7 @@ class ObjectLocalizerModule:
     self._prev_pose = None
 
   def process(self, data: dict[str, np.ndarray], *, t: float) -> dict[str, np.ndarray]:
-    from chuck_dreamer.lerobot.object_localization.estimator import _pose_to_prompt
+    from chuck_dreamer.perception.estimator import pose_to_prompt
 
     image = data[IMAGE]
     pose = self._estimator.estimate(
@@ -96,7 +93,7 @@ class ObjectLocalizerModule:
       # Gap (segmentation failed): keep the warm-start anchor, emit nothing.
       return {}
     self._prev_pose = pose
-    u, v = _pose_to_prompt(pose, self._estimator.camera)
+    u, v = pose_to_prompt(pose, self._estimator.camera)
     return {
       OBJECT_XY: np.asarray(pose.xy_mm, dtype=np.float32),
       OBJECT_UV: np.asarray([u, v], dtype=np.float32),

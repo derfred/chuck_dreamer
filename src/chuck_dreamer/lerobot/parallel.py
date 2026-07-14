@@ -41,10 +41,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 
 from chuck_dreamer.common.episode import Episode
-from chuck_dreamer.sim.episode_writer import EpisodeWriter
+from chuck_dreamer.common.episode_writer import EpisodeWriter
 
 if TYPE_CHECKING:
-  from chuck_dreamer.common.episode_spec import EpisodeSlice
+  from chuck_dreamer.lerobot.episode_spec import EpisodeSlice
   from .pipeline import Run
 
 logger = logging.getLogger(__name__)
@@ -148,7 +148,6 @@ def _producer_main(
   fmt: str,
   tags: tuple[str, ...],
   name_prefix: str | None,
-  debug_dir: str | None,
   has_worker_stages: bool,
 ) -> None:
   """Producer-thread body: pull episode slices off ``slice_q``, decode + run
@@ -182,7 +181,7 @@ def _producer_main(
     sl: EpisodeSlice = item
     try:
       assembled = assemble_episode(
-        run, sl, tags=tags, name_prefix=name_prefix, debug_dir=debug_dir)
+        run, sl, tags=tags, name_prefix=name_prefix)
       if assembled is None:
         continue
       episode, metadata, name_suffix = assembled
@@ -222,7 +221,6 @@ def import_dataset_parallel(
   format: str = "hdf5",
   tags: tuple[str, ...] = (),
   name_prefix: str | None = None,
-  debug_dir: str | None = None,
   jobs: int,
   devices: list[str] | None = None,
 ) -> Iterator[tuple[int, Path]]:
@@ -288,7 +286,7 @@ def import_dataset_parallel(
     t = threading.Thread(
       target=_producer_main,
       args=(prod_run, device, slice_q, task_q, result_q, output_dir,
-            format, tags, name_prefix, debug_dir, has_worker_stages),
+            format, tags, name_prefix, has_worker_stages),
       daemon=True,
     )
     t.start()

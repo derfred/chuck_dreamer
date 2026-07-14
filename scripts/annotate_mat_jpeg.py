@@ -9,17 +9,17 @@ import cv2
 import numpy as np
 
 from chuck_dreamer.config import load_config
-from chuck_dreamer.lerobot.object_localization.calibration.extrinsics import (
+from chuck_dreamer.lerobot.annotation.calibration.extrinsics import (
   render_extrinsics_overlay,
   render_world_axes,
   solve_extrinsics,
 )
-from chuck_dreamer.lerobot.object_localization.calibration.interactive import (
+from chuck_dreamer.lerobot.annotation.calibration.interactive import (
   annotate_mat_cv2,
   close_popup_window,
   reset_popup_state,
 )
-from chuck_dreamer.lerobot.object_localization.runtime import init_from_config
+from chuck_dreamer.perception.config import init_from_config
 
 
 def main() -> None:

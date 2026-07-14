@@ -29,7 +29,7 @@ from .stages.base import RunContext, Stage
 from .stages.registry import build_registry, resolve_stages
 
 if TYPE_CHECKING:
-  from chuck_dreamer.common.episode_spec import EpisodeSlice, EpisodeSpec
+  from chuck_dreamer.lerobot.episode_spec import EpisodeSlice, EpisodeSpec
 
 
 def _frame_to_image(frame: Any) -> np.ndarray:

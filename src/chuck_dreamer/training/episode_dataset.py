@@ -309,7 +309,7 @@ def _load_rerun_camera(
   recordings that pre-date the video switch logged a raw ``rr.Image`` per
   frame on ``/camera/image`` — fall back to that path for them.
   """
-  from chuck_dreamer.sim.rerun_video import decode_frames, video_frame_timestamps
+  from chuck_dreamer.common.rerun_video import decode_frames, video_frame_timestamps
 
   if "/camera/video" in by_entity or "/camera/video" in static:
     vchunks = by_entity.get("/camera/video", [])

@@ -1,15 +1,22 @@
-"""`import-lerobot` CLI: convert a LeRobot v3 HF dataset into the repo's
+"""`import-lerobot` CLI group: the import pipeline and its supporting steps.
+
+``import-lerobot run`` converts a LeRobot v3 HF dataset into the repo's
 episode files, optionally running the EE-FK and object-pose pipeline
-stages and stamping a derived ``T_world_arm`` onto each episode.
+stages. ``import-lerobot doctor`` checks that every artifact the requested
+stages need is present and prints remediation for anything missing. The
+calibration / annotation commands (``calibrate-intrinsics``,
+``annotate-mat``, ``prompt-episodes``) and the artifact-store commands are
+wired onto the group at the bottom of this module.
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 import click
 
 from chuck_dreamer.config import load_config
-from chuck_dreamer.common.episode_spec import EpisodeSpec
+from chuck_dreamer.lerobot.episode_spec import EpisodeSpec
 from .pipeline import Run
 
 logger = logging.getLogger(__name__)
@@ -86,7 +93,6 @@ def _import_dataset(
   format: str = "hdf5",
   tags: tuple[str, ...] = (),
   name_prefix: str | None = None,
-  debug_dir: str | None = None,
   jobs: int = 1,
   devices: list[str] | None = None,
 ) -> int:
@@ -110,7 +116,7 @@ def _import_dataset(
   try:
     for ep_idx, out_path in tqdm(
       import_dataset(run, output_dir, format=format, tags=tags,
-                     name_prefix=name_prefix, debug_dir=debug_dir,
+                     name_prefix=name_prefix,
                      jobs=jobs, devices=devices),
       desc="Episodes",
       total=len(episode_filter) if episode_filter is not None else None,
@@ -148,25 +154,53 @@ def _resolve_jobs_and_devices(
   return jobs, devices
 
 
-@click.command("import-lerobot")
+# Shared stage flags: both `run` and `doctor` resolve the same stage set.
+def _stage_options(fn):
+  fn = click.option(
+    "--with-ee-pos/--no-ee-pos", default=True,
+    help="Convert joint_qpos to radians and run the MuJoCo FK "
+         "(chuck_dreamer.common.fk) to fill ee_pos "
+         "/ ee_quat / ee_action (default: on). Required for "
+         "EE-mode training; needs assets/mujoco/so101_arm.xml.")(fn)
+  fn = click.option(
+    "--with-object-pose/--no-object-pose", default=True,
+    help="Run SAM2 segmentation + per-frame analysis-by-synthesis pose "
+         "fit to fill object_xy / object_gap_too_long (default: on). "
+         "Requires a per-dataset calibration cache entry "
+         "(`main.py import-lerobot calibrate-intrinsics` + "
+         "`main.py import-lerobot annotate-mat`) and a cached frame-0 "
+         "prompt (`main.py import-lerobot prompt-episodes`).")(fn)
+  fn = click.option(
+    "--video-key", default=None, type=str,
+    help="Video feature key (e.g. observation.images.wrist). "
+         "Defaults to the first one.")(fn)
+  fn = click.option(
+    "--episode-config", "episode_config_path", default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to a fk_episode_config.json. When the imported "
+         "repo_id appears in it, derive T_world_arm from the "
+         "touch episodes (Umeyama on joint medians + FK) and "
+         "stamp it onto each written episode's metadata.")(fn)
+  return fn
+
+
+@click.group("import-lerobot")
+def import_lerobot_cmd():
+  """The teleop import pipeline: convert LeRobot datasets to episode files,
+  plus the calibration / annotation steps the pipeline depends on.
+
+  Typical order: `calibrate-intrinsics` (once per camera) → `annotate-mat`
+  and `prompt-episodes` (once per dataset) → `doctor` to verify → `run`.
+  """
+
+
+@import_lerobot_cmd.command("run")
 @click.argument("repo_id", type=str, metavar="REPO_ID[#EPISODES]")
-@click.option("--output", default=None, type=str,
-              help="Output directory. Required unless --doctor is passed.")
+@click.option("--output", required=True, type=str,
+              help="Output directory for the written episode files.")
 @click.option("--format", "fmt", default="rerun", type=click.Choice(["hdf5", "rerun"]),
               help="Episode output format (hdf5 or rerun)")
-@click.option("--video-key", default=None, type=str,
-              help="Video feature key (e.g. observation.images.wrist). Defaults to the first one.")
-@click.option("--with-ee-pos/--no-ee-pos", default=True,
-              help="Convert joint_qpos to radians and run the MuJoCo FK "
-                   "(chuck_dreamer.real.fk_calibration.fk) to fill ee_pos "
-                   "/ ee_quat / ee_action (default: on). Required for "
-                   "EE-mode training; needs assets/mujoco/so101_arm.xml.")
-@click.option("--with-object-pose/--no-object-pose", default=True,
-              help="Run SAM2 segmentation + per-frame analysis-by-synthesis pose "
-                   "fit to fill object_xy / object_gap_too_long (default: on). "
-                   "Requires a per-dataset calibration cache entry "
-                   "(`main.py analyze-cameras`) and a cached frame-0 prompt "
-                   "(`main.py prompt-episodes`).")
+@_stage_options
 @click.option("--tag", "tags", multiple=True, metavar="TAG",
               help="Tag to stamp onto each written episode's metadata. Repeatable. "
                    "The replay buffer reads these for protected_tags (no-evict) and "
@@ -178,23 +212,6 @@ def _resolve_jobs_and_devices(
                    "directory without filename collisions (default "
                    "names are episode-00000, etc. — identical across "
                    "datasets). Typical: --name-prefix task_2_1805_2")
-@click.option("--episode-config", "episode_config_path", default=None,
-              type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              help="Path to a fk_episode_config.json. When the imported "
-                   "repo_id appears in it, derive T_world_arm from the "
-                   "touch episodes (Umeyama on joint medians + FK) and "
-                   "stamp it onto each written episode's metadata.")
-@click.option("--doctor", "doctor", is_flag=True, default=False,
-              help="Check that all calibration / model files required for "
-                   "the requested pipeline stages are present, then exit "
-                   "without importing. Prints the exact remediation command "
-                   "for each missing artifact.")
-@click.option("--debug", "debug", is_flag=True, default=False,
-              help="Dump per-episode debug artifacts under "
-                   "<output>/debug/epNNN: the retained SAM2 JPEG frames and "
-                   "the LeRobot-decoded frames.images stack. Use with "
-                   "scripts/analyze_video_sync.py to diagnose video / mask "
-                   "frame alignment.")
 @click.option("--jobs", "-j", default=1, type=int, metavar="N",
               help="Number of CPU worker processes for the object-pose fit "
                    "(default 1 = serial, byte-identical output). N>1 pipelines "
@@ -208,9 +225,9 @@ def _resolve_jobs_and_devices(
                    "raising the segmentation throughput ceiling ~Nx. Default: "
                    "the configured object_localization.device, one producer.")
 @click.pass_context
-def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
-                       with_ee_pos, with_object_pose, tags, name_prefix,
-                       episode_config_path, doctor, debug, jobs, gpus):
+def import_lerobot_run_cmd(ctx, repo_id, output, fmt, video_key,
+                           with_ee_pos, with_object_pose, tags, name_prefix,
+                           episode_config_path, jobs, gpus):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
 
   Loads the dataset through ``LeRobotDataset`` (which decodes video frames
@@ -231,28 +248,145 @@ def import_lerobot_cmd(ctx, repo_id, output, fmt, video_key,
   syntax is rejected here (frame-range filtering doesn't make sense
   for the importer).
   """
-
-  spec = EpisodeSpec.parse(repo_id, allow_frames=False, command="import-lerobot")
-
-  if not doctor and not output:
-    raise click.UsageError("--output is required (unless --doctor is passed).")
+  spec = EpisodeSpec.parse(repo_id, allow_frames=False, command="import-lerobot run")
 
   cfg    = load_config(ctx.obj["config_path"])
   params = dict(with_ee_pos=with_ee_pos, with_object_pose=with_object_pose)
   run    = Run(cfg, spec, params, video_key=video_key)
 
-  if doctor:
-    ok = _doctor_import_lerobot(run, episode_config_path=episode_config_path)
-    ctx.exit(0 if ok else 1)
-  else:
-    debug_dir = str(Path(output) / "debug") if debug else None
-    n_episodes = len(run.slices)
-    resolved_jobs, devices = _resolve_jobs_and_devices(jobs, gpus, n_episodes)
-    # Debug mode interleaves per-episode stdout and is meant for inspecting one
-    # episode at a time; force serial so its output stays readable and ordered.
-    if debug and resolved_jobs != 1:
-      click.echo("--debug: forcing --jobs 1 (parallel stdout would interleave).")
-      resolved_jobs, devices = 1, None
-    _import_dataset(run, output, format=fmt, tags=tuple(tags),
-                    name_prefix=name_prefix, debug_dir=debug_dir,
-                    jobs=resolved_jobs, devices=devices)
+  n_episodes = len(run.slices)
+  resolved_jobs, devices = _resolve_jobs_and_devices(jobs, gpus, n_episodes)
+  _import_dataset(run, output, format=fmt, tags=tuple(tags),
+                  name_prefix=name_prefix,
+                  jobs=resolved_jobs, devices=devices)
+
+
+@import_lerobot_cmd.command("doctor")
+@click.argument("repo_id", type=str, metavar="REPO_ID[#EPISODES]")
+@_stage_options
+@click.pass_context
+def import_lerobot_doctor_cmd(ctx, repo_id, video_key,
+                              with_ee_pos, with_object_pose,
+                              episode_config_path):
+  """Check that all calibration / model files required for the requested
+  pipeline stages are present, without importing anything.
+
+  Walks the same per-episode stage list ``run`` would execute and prints
+  every stage requirement with the exact remediation command for each
+  missing artifact. Exits non-zero if anything is missing.
+  """
+  spec = EpisodeSpec.parse(repo_id, allow_frames=False,
+                           command="import-lerobot doctor")
+
+  cfg    = load_config(ctx.obj["config_path"])
+  params = dict(with_ee_pos=with_ee_pos, with_object_pose=with_object_pose)
+  run    = Run(cfg, spec, params, video_key=video_key)
+
+  ok = _doctor_import_lerobot(run, episode_config_path=episode_config_path)
+  ctx.exit(0 if ok else 1)
+
+
+# ---------------------------------------------------------------------------
+# Artifact-store subcommands
+# ---------------------------------------------------------------------------
+@import_lerobot_cmd.group("store")
+def store_group():
+  """Inspect and manage the artifact store (docs/trainer/artifact_store.md)."""
+
+
+_STORE_ROOT_OPT = click.option(
+  "--store", "store_root", default="store", type=click.Path(path_type=Path),
+  show_default=True, help="Artifact-store root directory.")
+
+
+@store_group.command("ls")
+@_STORE_ROOT_OPT
+def store_ls_cmd(store_root: Path):
+  """List every artifact in the store with its scope and producing node."""
+  from chuck_dreamer.store import ArtifactStore
+
+  infos = ArtifactStore(store_root).ls()
+  if not infos:
+    click.echo(f"store {store_root}: empty")
+    return
+  for info in infos:
+    click.echo(f"{info.artifact:16s} {json.dumps(info.scope.to_json()):48s} "
+               f"{info.node:24s} {info.created_at}")
+
+
+@store_group.command("show")
+@click.argument("artifact")
+@click.option("--camera", default=None, help="CAMERA scope key.")
+@click.option("--dataset", default=None, help="DATASET scope key.")
+@click.option("--episode", default=None, type=int, help="EPISODE scope key (with --dataset).")
+@_STORE_ROOT_OPT
+def store_show_cmd(artifact: str, camera: str | None, dataset: str | None,
+                   episode: int | None, store_root: Path):
+  """Print one artifact's provenance record (and JSON payloads)."""
+  from chuck_dreamer.store import ArtifactStore, MissingArtifact, Scope
+
+  scope = Scope(camera=camera, dataset=dataset, episode=episode)
+  store = ArtifactStore(store_root)
+  try:
+    payload, record = store.get(artifact, scope)
+  except (MissingArtifact, ValueError, KeyError) as e:
+    raise click.ClickException(str(e))
+  click.echo(json.dumps(record.to_json(), indent=2))
+  if store.registry[artifact].codec == "json":
+    click.echo(json.dumps(payload, indent=2))
+
+
+@store_group.command("migrate")
+@click.option("--cache", "cache_root", default="calibration_cache",
+              type=click.Path(exists=True, file_okay=False, path_type=Path),
+              show_default=True, help="Legacy calibration_cache directory.")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Print the migration plan without writing.")
+@_STORE_ROOT_OPT
+def store_migrate_cmd(cache_root: Path, dry_run: bool, store_root: Path):
+  """One-time, idempotent migration of calibration_cache/ into the store.
+
+  Prompts once per dataset for the camera id (the legacy layout has no
+  camera identity); the answer also seeds each dataset's dataset_config.
+  The source cache is never modified or deleted.
+  """
+  from chuck_dreamer.store import ArtifactStore
+  from chuck_dreamer.store.migrate import migrate_calibration_cache
+
+  answers: dict[str, str] = {}
+
+  def camera_id_for(dataset_id: str) -> str:
+    if dataset_id not in answers:
+      default = next(iter(answers.values()), None)
+      answers[dataset_id] = click.prompt(
+        f"camera id for {dataset_id}", default=default)
+    return answers[dataset_id]
+
+  actions = migrate_calibration_cache(
+    cache_root, ArtifactStore(store_root), camera_id_for, dry_run=dry_run)
+  for a in actions:
+    click.echo(str(a))
+  n = sum(1 for a in actions if a.kind == "migrated")
+  conflicts = sum(1 for a in actions if a.kind == "conflict")
+  click.echo(f"\n{'would migrate' if dry_run else 'migrated'} {n} artifact(s); "
+             f"{conflicts} conflict(s).")
+  if conflicts:
+    raise SystemExit(1)
+
+
+# ---------------------------------------------------------------------------
+# Calibration / annotation subcommands (defined in lerobot.annotation, next
+# to the code they drive; wired here so the whole import surface lives on
+# this one group).
+# ---------------------------------------------------------------------------
+def _register_annotation_commands() -> None:
+  from .annotation import (
+    annotate_mat_cmd,
+    calibrate_intrinsics_cmd,
+    prompt_episodes_cmd,
+  )
+  for cmd in (calibrate_intrinsics_cmd, annotate_mat_cmd, prompt_episodes_cmd):
+    import_lerobot_cmd.add_command(cmd)
+
+
+_register_annotation_commands()

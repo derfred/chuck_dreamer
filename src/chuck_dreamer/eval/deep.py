@@ -294,7 +294,7 @@ class DeepEvalRunner:
     horizon:         int,
   ) -> None:
     """Dump per-episode rerun recordings of (posterior vs prior) rollouts."""
-    from ..sim.episode_writer import EpisodeWriter
+    from ..common.episode_writer import EpisodeWriter
     from .checkpoint import load_checkpoint
     from .core import load_eval_episodes, run_split_rollout
 

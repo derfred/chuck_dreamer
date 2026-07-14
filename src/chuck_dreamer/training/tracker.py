@@ -3,7 +3,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import cast
 
-from ..sim.episode_writer import EpisodeWriter
+from ..common.episode_writer import EpisodeWriter
 
 
 _UNSET: object = object()

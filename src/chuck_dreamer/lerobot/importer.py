@@ -23,10 +23,10 @@ from typing import TYPE_CHECKING, Any, Iterator
 import numpy as np
 
 from chuck_dreamer.common.episode import Episode
-from chuck_dreamer.sim.episode_writer import EpisodeWriter
+from chuck_dreamer.common.episode_writer import EpisodeWriter
 
 if TYPE_CHECKING:
-  from chuck_dreamer.common.episode_spec import EpisodeSlice
+  from chuck_dreamer.lerobot.episode_spec import EpisodeSlice
   from .pipeline import Run
 
 logger = logging.getLogger(__name__)
@@ -38,13 +38,12 @@ def assemble_episode(
   *,
   tags: tuple[str, ...] = (),
   name_prefix: str | None = None,
-  debug_dir: str | None = None,
 ) -> tuple[Episode, dict[str, Any], str] | None:
   """Decode one episode and build its ``(episode, metadata, name_suffix)``,
   *before* any analysis stage runs. Returns ``None`` if no frames decoded.
 
   This is the shared assembler for both the serial loop and the parallel
-  producer, so the :class:`Episode` / metadata / debug-dump construction lives in
+  producer, so the :class:`Episode` / metadata construction lives in
   exactly one place. The caller is responsible for running the stages (serially
   in :func:`import_dataset`, split across producer/worker lanes in
   :mod:`chuck_dreamer.lerobot.parallel`) and writing the result."""
@@ -93,18 +92,6 @@ def assemble_episode(
   if tags:
     metadata["tags"] = tuple(tags)
 
-  # Debug mode: dump the LeRobot-decoded frames and tell the segmentation
-  # stage to retain its SAM2 JPEGs, both under <debug_dir>/epNNN, so
-  # scripts/analyze_video_sync.py can compare them against the .rrd video.
-  if debug_dir is not None:
-    ep_debug = Path(debug_dir) / f"ep{sl.episode_index:05d}"
-    ep_debug.mkdir(parents=True, exist_ok=True)
-    np.save(ep_debug / "frames_images.npy", frames.images)
-    logger.info("episode %d: saved frames.images %s → %s",
-                sl.episode_index, frames.images.shape,
-                ep_debug / "frames_images.npy")
-    metadata["debug_dir"] = str(ep_debug)
-
   if name_prefix:
     name_suffix = f"{name_prefix}-{sl.episode_index:05d}"
   else:
@@ -120,7 +107,6 @@ def import_dataset(
   format: str = "hdf5",
   tags: tuple[str, ...] = (),
   name_prefix: str | None = None,
-  debug_dir: str | None = None,
   jobs: int = 1,
   devices: list[str] | None = None,
 ) -> Iterator[tuple[int, Path]]:
@@ -173,14 +159,14 @@ def import_dataset(
     from .parallel import import_dataset_parallel
     yield from import_dataset_parallel(
       run, output_dir, format=format, tags=tags, name_prefix=name_prefix,
-      debug_dir=debug_dir, jobs=jobs, devices=devices)
+      jobs=jobs, devices=devices)
     return
 
   writer = EpisodeWriter(output_dir, format=format)
 
   for sl in slices:
     assembled = assemble_episode(
-      run, sl, tags=tags, name_prefix=name_prefix, debug_dir=debug_dir)
+      run, sl, tags=tags, name_prefix=name_prefix)
     if assembled is None:
       continue
     episode, metadata, name_suffix = assembled
