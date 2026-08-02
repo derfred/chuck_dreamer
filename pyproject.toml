@@ -69,6 +69,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chuck_dreamer"]
+# Ship the PEP 561 marker so mypy treats chuck_dreamer as typed. Without it,
+# function-level (deferred) imports resolve to the installed package and are
+# reported as "missing library stubs or py.typed marker".
+artifacts = ["src/chuck_dreamer/py.typed"]
 
 [tool.black]
 line-length = 160
