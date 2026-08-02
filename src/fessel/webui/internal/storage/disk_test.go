@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newDisk(t *testing.T) *DiskBackend {
@@ -115,22 +116,40 @@ func TestDiskSnapshotStoreAndReadBack(t *testing.T) {
 	if _, _, ok := d.ReadSnapshot(); ok {
 		t.Fatalf("want no snapshot before first store")
 	}
-	if err := d.StoreSnapshot([]byte("jpeg-one")); err != nil {
+	// The capture time is carried by the file's own mtime, so it survives a
+	// webui restart with no side file: a frame captured well before it was
+	// written must read back with the CAPTURE time, not the write time.
+	capturedAt := time.Now().Add(-90 * time.Second).Truncate(time.Second)
+	if err := d.StoreSnapshot([]byte("jpeg-one"), capturedAt); err != nil {
 		t.Fatal(err)
 	}
-	data, receivedAt, ok := d.ReadSnapshot()
+	data, gotAt, ok := d.ReadSnapshot()
 	if !ok || string(data) != "jpeg-one" {
 		t.Fatalf("stored: %q %v", data, ok)
 	}
-	if receivedAt.IsZero() {
-		t.Fatalf("want a non-zero receivedAt")
+	if !gotAt.Equal(capturedAt) {
+		t.Fatalf("capturedAt %v, want %v", gotAt, capturedAt)
+	}
+}
+
+// A zero capture time (a backend called without one) leaves the write time in
+// place rather than stamping the epoch onto the file.
+func TestDiskSnapshotZeroCapturedAtFallsBackToWriteTime(t *testing.T) {
+	d := newDisk(t)
+	before := time.Now().Add(-time.Second)
+	if err := d.StoreSnapshot([]byte("jpeg"), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	_, gotAt, ok := d.ReadSnapshot()
+	if !ok || gotAt.Before(before) {
+		t.Fatalf("capturedAt %v, want >= %v", gotAt, before)
 	}
 }
 
 func TestDiskSnapshotOverwrites(t *testing.T) {
 	d := newDisk(t)
-	_ = d.StoreSnapshot([]byte("one"))
-	_ = d.StoreSnapshot([]byte("two"))
+	_ = d.StoreSnapshot([]byte("one"), time.Now())
+	_ = d.StoreSnapshot([]byte("two"), time.Now())
 	data, _, ok := d.ReadSnapshot()
 	if !ok || string(data) != "two" {
 		t.Fatalf("stored: %q %v", data, ok)
@@ -140,7 +159,7 @@ func TestDiskSnapshotOverwrites(t *testing.T) {
 func TestDiskSnapshotDoesNotAppearInRecordingsList(t *testing.T) {
 	d := newDisk(t)
 	_ = d.Store("rec1", "seg-00001.ts", strings.NewReader("x"))
-	_ = d.StoreSnapshot([]byte("jpeg"))
+	_ = d.StoreSnapshot([]byte("jpeg"), time.Now())
 	views := d.List()
 	for _, v := range views {
 		if v.RecordingID == "monitor" || v.RecordingID == "snapshot.jpg" {

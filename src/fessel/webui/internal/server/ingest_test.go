@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/derfred/fessel/webui/internal/storage"
 )
@@ -134,6 +135,61 @@ func TestSnapshotPutStoresIntoBackend(t *testing.T) {
 	data, _, ok := store.ReadSnapshot()
 	if !ok || string(data) != "jpeg-bytes" {
 		t.Fatalf("stored: %q %v", data, ok)
+	}
+}
+
+// putSnapshot PUTs a frame with the Pi's declared capture age and returns the
+// capture time the backend recorded.
+func putSnapshot(t *testing.T, ageHeader string) (time.Time, time.Time) {
+	t.Helper()
+	store := storage.NewFakeBackend()
+	h := (&Ingest{Storage: store}).Handler()
+	req := httptest.NewRequest("PUT", "/snapshot", strings.NewReader("jpeg-bytes"))
+	if ageHeader != "" {
+		req.Header.Set("X-Snapshot-Age-Ms", ageHeader)
+	}
+	w := httptest.NewRecorder()
+	before := time.Now()
+	h.ServeHTTP(w, req)
+	if w.Code != 201 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	_, capturedAt, ok := store.ReadSnapshot()
+	if !ok {
+		t.Fatal("nothing stored")
+	}
+	return capturedAt, before
+}
+
+// The whole point of the age header: the stored timestamp is when the CAMERA
+// took the frame, so a Pi re-pushing a stale cached frame doesn't reset the
+// operator's "Xs ago" label to zero.
+func TestSnapshotPutBacksdatesToCaptureTime(t *testing.T) {
+	capturedAt, before := putSnapshot(t, "45000")
+	age := before.Sub(capturedAt)
+	if age < 44*time.Second || age > 46*time.Second {
+		t.Fatalf("captured %v before receipt, want ~45s", age)
+	}
+}
+
+// An older Pi (no header) and a garbage header both degrade to "as fresh as
+// its arrival" — never to a rejected frame or a nonsense timestamp.
+func TestSnapshotPutWithoutOrWithBadAgeHeaderUsesReceiptTime(t *testing.T) {
+	for _, header := range []string{"", "not-a-number", "-500"} {
+		capturedAt, before := putSnapshot(t, header)
+		if capturedAt.Before(before.Add(-time.Second)) {
+			t.Fatalf("header %q: captured_at %v is backdated from %v", header, capturedAt, before)
+		}
+	}
+}
+
+// A wild/overflowing age is clamped, not wrapped into a future timestamp.
+func TestSnapshotPutClampsAbsurdAge(t *testing.T) {
+	for _, header := range []string{"999999999999", "9223372036854775807"} {
+		capturedAt, before := putSnapshot(t, header)
+		if age := before.Sub(capturedAt); age < time.Hour-time.Second || age > time.Hour+time.Second {
+			t.Fatalf("header %q: age %v, want clamped to 1h", header, age)
+		}
 	}
 }
 

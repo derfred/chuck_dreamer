@@ -85,6 +85,14 @@ SNAPSHOT_APPSINK_NAME = "snapshot_sink"
 VISION_WIDTH = 640
 VISION_HEIGHT = 360
 
+# The snapshot branch scales to HALF the vision resolution: the freeze-frame is
+# a "what does the scene look like" still shown at a fraction of the stage's
+# size, not an analysis input, so half the linear resolution (a quarter of the
+# pixels) cuts the JPEG — and the cellular uplink bytes it costs every
+# interval_s — without changing what the operator can tell from it.
+SNAPSHOT_WIDTH = VISION_WIDTH // 2
+SNAPSHOT_HEIGHT = VISION_HEIGHT // 2
+
 
 def _resolution_wh(mode: ModeTriplet) -> tuple[int, int]:
   w, h = (int(x) for x in mode.resolution.split("x"))
@@ -319,7 +327,7 @@ def build_capture_launch(
   )
   snapshot_branch = (
     f"{VIDEO_TEE_NAME}. ! queue ! videoscale ! "
-    f"video/x-raw,width={VISION_WIDTH},height={VISION_HEIGHT},format=I420 ! "
+    f"video/x-raw,width={SNAPSHOT_WIDTH},height={SNAPSHOT_HEIGHT},format=I420 ! "
     f"jpegenc ! "
     f"appsink name={SNAPSHOT_APPSINK_NAME} emit-signals=true max-buffers=1 drop=true sync=false"
   )

@@ -18,7 +18,7 @@ type FakeBackend struct {
 	types map[string]string
 
 	// Monitor freeze-frame (mirrors StoreSnapshot/ReadSnapshot's semantics: a
-	// single slot, replaced wholesale, timestamped on write).
+	// single slot, replaced wholesale, carrying the caller's capture time).
 	snapshot     []byte
 	snapshotAt   time.Time
 	haveSnapshot bool
@@ -34,11 +34,14 @@ func NewFakeBackend() *FakeBackend {
 	return &FakeBackend{files: map[string]map[string][]byte{}, types: map[string]string{}}
 }
 
-func (f *FakeBackend) StoreSnapshot(jpeg []byte) error {
+func (f *FakeBackend) StoreSnapshot(jpeg []byte, capturedAt time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapshot = jpeg
-	f.snapshotAt = time.Now()
+	f.snapshotAt = capturedAt
+	if f.snapshotAt.IsZero() {
+		f.snapshotAt = time.Now()
+	}
 	f.haveSnapshot = true
 	return nil
 }

@@ -192,6 +192,11 @@ def test_capture_launch_opens_one_camera_and_tees_to_always_on_branches():
   # Freeze-frame branch (Monitor UX): its own downscaled JPEG appsink off tee_v.
   assert "appsink name=snapshot_sink" in launch
   assert "jpegenc" in launch
+  # ...at HALF the vision resolution: the still is a "what does the scene look
+  # like" thumbnail, not an analysis input, so it must not cost vision-sized
+  # JPEGs on the cellular uplink every interval_s.
+  snapshot_branch = launch.split("jpegenc")[0].rsplit("tee_v.", 1)[1]
+  assert "width=320,height=180" in snapshot_branch
   # Audio: one mic open, its own tee_a feeding the level branch.
   assert launch.count("tee name=tee_a") == 1
   assert "level name=audio_level" in launch

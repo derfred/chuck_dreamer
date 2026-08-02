@@ -217,10 +217,21 @@ func (m *MinioBackend) Read(recordingID, fileName, httpRange string) (*ReadResul
 	return nil, fmt.Errorf("minio backend does not serve playback bytes; use PlaybackURL")
 }
 
-func (m *MinioBackend) StoreSnapshot(jpeg []byte) error {
+// capturedAtMetaKey is the object user-metadata key carrying the frame's
+// capture time. On the wire it becomes `X-Amz-Meta-Captured-At`; minio-go
+// strips that prefix again on StatObject, so the read side looks the key up
+// case-insensitively rather than betting on one canonicalisation.
+const capturedAtMetaKey = "captured-at"
+
+func (m *MinioBackend) StoreSnapshot(jpeg []byte, capturedAt time.Time) error {
+	opts := minio.PutObjectOptions{ContentType: "image/jpeg"}
+	if !capturedAt.IsZero() {
+		opts.UserMetadata = map[string]string{
+			capturedAtMetaKey: capturedAt.UTC().Format(time.RFC3339Nano),
+		}
+	}
 	_, err := m.client.PutObject(context.Background(), m.bucket, snapshotKey,
-		bytes.NewReader(jpeg), int64(len(jpeg)),
-		minio.PutObjectOptions{ContentType: "image/jpeg"})
+		bytes.NewReader(jpeg), int64(len(jpeg)), opts)
 	return err
 }
 
@@ -233,7 +244,27 @@ func (m *MinioBackend) ReadSnapshot() ([]byte, time.Time, bool) {
 	if raw == nil {
 		return nil, time.Time{}, false
 	}
-	return raw, info.LastModified, true
+	// LastModified (when the PUT landed) is the fallback for an object written
+	// before capture time was tracked.
+	capturedAt := info.LastModified
+	if t, ok := capturedAtFromMeta(info.UserMetadata); ok {
+		capturedAt = t
+	}
+	return raw, capturedAt, true
+}
+
+func capturedAtFromMeta(meta map[string]string) (time.Time, bool) {
+	for k, v := range meta {
+		if !strings.EqualFold(strings.TrimPrefix(strings.ToLower(k), "x-amz-meta-"), capturedAtMetaKey) {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			return time.Time{}, false
+		}
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 func (m *MinioBackend) getObjectBytes(key string) []byte {

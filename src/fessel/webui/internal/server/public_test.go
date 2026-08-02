@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/derfred/fessel/webui/internal/auth"
 	"github.com/derfred/fessel/webui/internal/storage"
@@ -290,7 +291,8 @@ func TestSnapshotNotYetAvailable(t *testing.T) {
 
 func TestSnapshotServesLatestJPEGAndMeta(t *testing.T) {
 	store := storage.NewFakeBackend()
-	_ = store.StoreSnapshot([]byte("jpeg-bytes"))
+	capturedAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	_ = store.StoreSnapshot([]byte("jpeg-bytes"), capturedAt)
 	h := newPublic(newFakeSupervisor(), store).Handler()
 
 	w := do(t, h, "GET", "/api/snapshot", "", true)
@@ -298,10 +300,16 @@ func TestSnapshotServesLatestJPEGAndMeta(t *testing.T) {
 		t.Fatalf("%d %q %q", w.Code, w.Body.String(), w.Header().Get("Content-Type"))
 	}
 
+	// meta reports the CAPTURE time the store carries (what the "Xs ago" label
+	// is about), not a fresh now-timestamp minted at read time.
 	w = do(t, h, "GET", "/api/snapshot/meta", "", true)
 	body := decode(t, w)
-	if w.Code != 200 || body["available"] != true || body["received_at"] == nil {
+	if w.Code != 200 || body["available"] != true {
 		t.Fatalf("%d %v", w.Code, body)
+	}
+	got, err := time.Parse(time.RFC3339Nano, body["captured_at"].(string))
+	if err != nil || !got.Equal(capturedAt) {
+		t.Fatalf("captured_at %v (%v), want %v", body["captured_at"], err, capturedAt)
 	}
 }
 
