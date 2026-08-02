@@ -39,5 +39,11 @@ dev = [
 line-length = 100
 indent-width = 2
 
+[tool.ruff.lint]
+# Pin the rule set explicitly: `uvx ruff` floats to the newest release, and
+# newer defaults (e.g. RUF100) would otherwise flag the deliberate
+# `# noqa: ANN0xx/BLE001` annotations this codebase uses as "unused".
+select = ["E4", "E7", "E9", "F"]
+
 [tool.ruff.format]
 indent-style = "space"

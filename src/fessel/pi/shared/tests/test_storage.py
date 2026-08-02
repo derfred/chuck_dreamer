@@ -6,6 +6,7 @@ from fessel_schemas import (
   RecordingMetadata,
   UploadStateValue,
 )
+
 from fessel_shared import Storage, assemble_recording_playlist
 
 

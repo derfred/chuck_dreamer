@@ -11,4 +11,4 @@ per-file-ignores =
     src/chuck_dreamer/sim/scene_builder.py:E501
     # Reuses the ``fake_repo`` pytest fixture imported from test_lerobot_import;
     # using it as a test-arg reads as an F811 redefinition (expected pattern).
-    tests/test_lerobot_parallel.py:F811
+    tests/lerobot/test_lerobot_parallel.py:F811

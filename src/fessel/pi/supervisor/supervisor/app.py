@@ -33,10 +33,9 @@ import logging
 import os
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-
-import uuid
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
@@ -56,8 +55,7 @@ from fessel_schemas import (
   UploadProgress,
   fessel_version,
 )
-from fessel_shared import ConfigReloader, MqttClient, Storage, load_component_config
-from fessel_shared import topics
+from fessel_shared import ConfigReloader, MqttClient, Storage, load_component_config, topics
 from pydantic import BaseModel, Field
 
 from .bandwidth import BandwidthCoordinator

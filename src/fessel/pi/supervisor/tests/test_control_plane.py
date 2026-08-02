@@ -12,8 +12,9 @@ def make_client(monkeypatch, control=None):
   # logic (so the validating-dispatch path is exercised, not re-stubbed): a
   # FakeMqtt subclasses MqttClient, skips paho, and routes deliver() through
   # the registered handlers exactly as the real on_message would.
-  import supervisor.app as appmod
   from fessel_shared import MqttClient
+
+  import supervisor.app as appmod
 
   published: list = []
 
@@ -339,7 +340,7 @@ def test_pause_relays_to_jetson_and_updates_state(monkeypatch):
 
 
 def test_resume_sets_running(monkeypatch):
-  ctl, jetson, _ = make_control()
+  ctl, _jetson, _ = make_control()
   client, _ = make_client(monkeypatch, control=ctl)
   with client:
     client.post("/control/pause")
@@ -382,7 +383,7 @@ def test_shutdown_arm_verifies_and_publishes(monkeypatch):
   # Verified plug state was published retained on the plug topic.
   plug_pub = [p for p in pub if p[0] == "arm/supervisor/plug/arm"]
   assert plug_pub, "expected a retained plug-state publish"
-  topic, payload, qos, retain = plug_pub[-1]
+  _topic, payload, qos, retain = plug_pub[-1]
   assert payload["on"] is False and payload["verified"] is True
   assert retain is True and qos == 1
 

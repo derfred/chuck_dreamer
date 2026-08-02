@@ -2,6 +2,8 @@
 ring proxy (S4.3), recordings listing (S4.4), recording-segment proxy, and the
 upload-progress cache (B4.6). Uses a FakeMqtt (no broker) and a tmp SSD."""
 
+from typing import ClassVar
+
 import paho.mqtt.client as mqtt
 import pytest
 from fastapi.testclient import TestClient
@@ -36,7 +38,9 @@ class FakeMqtt(MqttClient):
   def publish(self, topic, payload, qos=0, retain=False):
     self.published.append((topic, payload, qos, retain))
 
-  published: list = []
+  # Deliberately class-level: the ``client`` fixture resets it per test and
+  # aliases it onto the TestClient as ``_published``.
+  published: ClassVar[list] = []
 
   def deliver(self, topic, payload):
     h = self._handlers.get(topic)

@@ -2,10 +2,10 @@
 episodes, or a live camera.
 
 Pools checkerboard views from any mix of frame sources and fits a single
-``cv2.calibrateCamera`` model, writing one intrinsics JSON (the
-``checkerboard_capture`` → ``intrinsics`` node of the pipeline spec). It is
-source-agnostic and uses *every* detected view (no dedup, no
-coverage/min-frame gating).
+``cv2.calibrateCamera`` model, persisting the ``intrinsics`` artifact at
+CAMERA scope in the artifact store (the ``checkerboard_capture`` →
+``intrinsics`` node of the pipeline spec). It is source-agnostic and uses
+*every* detected view (no dedup, no coverage/min-frame gating).
 
 Sources:
   --video PATH       a video file (repeatable)
@@ -18,14 +18,13 @@ Checkerboard geometry, distortion model, and the inspect coverage grid come
 from ``object_localization`` in the project config (see configs/default.yaml).
 
 Examples:
-  main.py import-lerobot calibrate-intrinsics out.json --video clip.mp4 --inspect
-  main.py import-lerobot calibrate-intrinsics out.json --episodes user/cal#1
-  main.py import-lerobot calibrate-intrinsics out.json --camera --inspect
-  main.py import-lerobot calibrate-intrinsics out.json --inspect   # re-inspect existing json
+  main.py import-lerobot calibrate-intrinsics --video clip.mp4 --inspect
+  main.py import-lerobot calibrate-intrinsics --episodes user/cal#1
+  main.py import-lerobot calibrate-intrinsics --camera --inspect
+  main.py import-lerobot calibrate-intrinsics --inspect   # re-inspect the stored artifact
 """
 from __future__ import annotations
 
-import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -360,8 +359,8 @@ def calibrate_from_frames(
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
-def write_output(result: CalibrationResult, sources: list[str],
-                 ol_cfg: ObjectLocalizationConfig, out_path: Path) -> None:
+def output_payload(result: CalibrationResult, sources: list[str],
+                   ol_cfg: ObjectLocalizationConfig) -> dict[str, Any]:
   blob = result.intrinsics.to_json()
   blob.update({
     "sources": sources,
@@ -371,9 +370,7 @@ def write_output(result: CalibrationResult, sources: list[str],
       {"label": v.label, "bucket": list(v.bucket)} for v in result.views
     ],
   })
-  out_path.parent.mkdir(parents=True, exist_ok=True)
-  out_path.write_text(json.dumps(blob, indent=2))
-  print(f"wrote {out_path}")
+  return blob
 
 
 # ---------------------------------------------------------------------------
@@ -454,11 +451,9 @@ def render_coverage(result: CalibrationResult, ol_cfg: ObjectLocalizationConfig,
   print(f"wrote {out_png}")
 
 
-def inspect_existing(out_path: Path, ol_cfg: ObjectLocalizationConfig) -> None:
-  """Re-inspect an already-written intrinsics JSON (no recalibration)."""
-  if not out_path.exists():
-    raise SystemExit(f"--inspect with no sources needs an existing {out_path}.")
-  blob = json.loads(out_path.read_text())
+def inspect_existing(blob: dict[str, Any],
+                     ol_cfg: ObjectLocalizationConfig) -> None:
+  """Re-inspect an already-stored intrinsics payload (no recalibration)."""
   intr = Intrinsics.from_json(blob)
   per_view = [float(x) for x in blob.get("per_view_rms_px", [])]
 
@@ -498,7 +493,10 @@ def _camera_config(cfg: Any) -> dict[str, Any]:
 
 
 @click.command("calibrate-intrinsics")
-@click.argument("output", type=click.Path(path_type=Path))
+@click.option("--camera-id", "camera_id", default=None, type=str,
+              help="Store camera identity to persist under (default: derived "
+                   "from object_localization.camera_key, e.g. "
+                   "observation.images.front -> front).")
 @click.option("--video", "videos", type=click.Path(exists=True, path_type=Path),
               multiple=True, help="Video file (repeatable).")
 @click.option("--episodes", "episode_specs", type=str, multiple=True,
@@ -514,18 +512,21 @@ def _camera_config(cfg: Any) -> dict[str, Any]:
                    "(default: real.camera width/height).")
 @click.option("--inspect", "inspect", is_flag=True, default=False,
               help="Print a diagnostic summary + write a coverage PNG; "
-                   "with no sources, re-inspects the existing output JSON.")
+                   "with no sources, re-inspects the stored artifact.")
 @click.option("--stride", default=1, type=int, show_default=True,
               help="Use every Nth frame from video/camera sources.")
 @override_option
 @click.pass_context
-def calibrate_intrinsics_cmd(ctx, output: Path, videos: tuple[Path, ...],
+def calibrate_intrinsics_cmd(ctx, camera_id: str | None,
+                             videos: tuple[Path, ...],
                              episode_specs: tuple[str, ...],
                              camera: str | None, resolution: str | None,
                              inspect: bool, stride: int,
                              overrides: tuple[str, ...]) -> None:
   """Calibrate camera intrinsics from video / episodes / live camera,
-  writing the intrinsics JSON to OUTPUT."""
+  persisting the CAMERA-scoped ``intrinsics`` artifact in the store."""
+  from .store_sync import camera_id_from_key, put_intrinsics, require_store
+
   using_camera = camera is not None
   using_files = bool(videos) or bool(episode_specs)
   if using_camera and using_files:
@@ -535,10 +536,21 @@ def calibrate_intrinsics_cmd(ctx, output: Path, videos: tuple[Path, ...],
 
   cfg = load_config(ctx.obj["config_path"], overrides=overrides)
   ol_cfg = init_from_config(cfg)
+  try:
+    store = require_store(cfg, "calibrate-intrinsics")
+  except RuntimeError as e:
+    raise click.ClickException(str(e))
+  cam_id = camera_id or camera_id_from_key(ol_cfg.camera_key)
 
-  # --inspect with no sources: re-inspect the existing JSON and exit.
+  # --inspect with no sources: re-inspect the stored artifact and exit.
   if inspect and not using_camera and not using_files:
-    inspect_existing(output, ol_cfg)
+    from .store_sync import get_intrinsics
+    from chuck_dreamer.store import MissingArtifact
+    try:
+      blob, _ = get_intrinsics(store, cam_id)
+    except MissingArtifact as e:
+      raise click.ClickException(str(e))
+    inspect_existing(blob, ol_cfg)
     return
 
   if not using_camera and not using_files:
@@ -575,8 +587,9 @@ def calibrate_intrinsics_cmd(ctx, output: Path, videos: tuple[Path, ...],
       yield from it
 
   result = calibrate_from_frames(_chain(), ol_cfg)
-  write_output(result, sources, ol_cfg, output)
+  put_intrinsics(store, cam_id, output_payload(result, sources, ol_cfg))
   if inspect:
     print_summary(result.intrinsics, result.per_view_rms,
                   result.coverage_filled, result.coverage_total)
-    render_coverage(result, ol_cfg, output.with_suffix(".coverage.png"))
+    render_coverage(result, ol_cfg,
+                    Path(f"intrinsics-coverage-{cam_id}.png"))
