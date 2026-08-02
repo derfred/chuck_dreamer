@@ -106,13 +106,13 @@ describe("resting-stage freeze-frame", () => {
   });
 
   it("shows the snapshot age chip and a click-to-enlarge lightbox once a snapshot exists", async () => {
-    const receivedAt = new Date().toISOString();
+    const capturedAt = new Date().toISOString();
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
       if (url.includes("/api/snapshot/meta")) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ available: true, received_at: receivedAt }),
+          json: async () => ({ available: true, captured_at: capturedAt }),
         });
       }
       return Promise.resolve(whepResponse(201));
@@ -131,6 +131,28 @@ describe("resting-stage freeze-frame", () => {
       fireEvent.keyDown(window, { key: "Escape" });
     });
     expect(screen.queryByRole("dialog", { name: "Full-size snapshot" })).toBeNull();
+    await tick(config.snapshotPollMs); // drain the next scheduled poll before unmount
+  });
+
+  // The label dates the FRAME, not the push: a Pi that keeps re-pushing one
+  // stale cached frame reports a capture time that stays put, and the chip
+  // must show that growing age (and go amber) rather than resetting to 0s.
+  it("ages the chip from the capture time, not from when the push landed", async () => {
+    const capturedAt = new Date(Date.now() - 90_000).toISOString();
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes("/api/snapshot/meta")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ available: true, captured_at: capturedAt }),
+        });
+      }
+      return Promise.resolve(whepResponse(201));
+    });
+
+    render(<MonitorVideo />);
+    await tick(0);
+    expect(screen.getByText(/1m ago — not live/)).toBeTruthy();
     await tick(config.snapshotPollMs); // drain the next scheduled poll before unmount
   });
 });

@@ -566,11 +566,15 @@ class VideoApp:
     interval = float(self._snapshot_cfg.get("interval_s", 10.0))
     if now_monotonic - self._last_snapshot_push < interval:
       return
-    jpeg = self._gst_snapshot.latest()
-    if jpeg is None:
+    cached = self._gst_snapshot.latest()
+    if cached is None:
       return
+    jpeg, captured_at = cached
     self._last_snapshot_push = now_monotonic
-    self._snapshot_pusher.push(jpeg)
+    # Both instants come from time.monotonic() (the handle stamps the appsink
+    # callback), so the difference is the frame's true age at push time — the
+    # webui dates the snapshot from that, not from when the PUT landed.
+    self._snapshot_pusher.push(jpeg, age_s=now_monotonic - captured_at)
 
   def _publish_vision_heartbeat(self) -> None:
     """Publish the vision thread heartbeat (V5.1). Absence -> supervisor marks

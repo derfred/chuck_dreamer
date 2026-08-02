@@ -215,14 +215,17 @@ func (p *Public) Handler() http.Handler {
 			writeJSON(w, http.StatusOK, map[string]any{"available": false})
 			return
 		}
-		_, receivedAt, ok := snap.ReadSnapshot()
+		_, capturedAt, ok := snap.ReadSnapshot()
 		if !ok {
 			writeJSON(w, http.StatusOK, map[string]any{"available": false})
 			return
 		}
+		// captured_at, not received_at: the frontend's "Xs ago" is about when
+		// the camera took the frame, so a capture side that stalls while the
+		// push keeps running shows its true age instead of resetting to 0.
 		writeJSON(w, http.StatusOK, map[string]any{
 			"available":   true,
-			"received_at": receivedAt.UTC().Format(time.RFC3339Nano),
+			"captured_at": capturedAt.UTC().Format(time.RFC3339Nano),
 		})
 	})
 

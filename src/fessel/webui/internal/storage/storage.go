@@ -136,15 +136,20 @@ var ErrRangeNotSatisfiable = errors.New("range not satisfiable")
 // (sibling to recordings/, not inside it) so it never appears in
 // List()/mergedRecordings — a fixed monitor-wide slot is not a recording.
 //
-// receivedAt is derived from the store's own last-modified time (disk mtime /
-// MinIO's ObjectInfo.LastModified) rather than a side file, so a webui
-// restart loses nothing: the timestamp is intrinsic to the stored object.
+// capturedAt is when the CAMERA took the frame (the ingest handler resolves it
+// from the Pi's age header), not when the PUT landed — the two diverge exactly
+// when it matters, on a stalled pipeline that keeps re-pushing one cached
+// frame. It is carried by the stored object itself rather than a side file, so
+// a webui restart loses nothing: the disk backend sets the file's mtime to it,
+// MinIO keeps it as object user metadata. Both fall back to the store's own
+// last-modified time for a snapshot written before this was tracked (or by a
+// Pi too old to send the header).
 type MonitorSnapshot interface {
 	// StoreSnapshot replaces the current snapshot. Idempotent (like Store).
-	StoreSnapshot(jpeg []byte) error
-	// ReadSnapshot returns the current snapshot + when it was stored, or
-	// ok=false if none has arrived yet.
-	ReadSnapshot() (data []byte, receivedAt time.Time, ok bool)
+	StoreSnapshot(jpeg []byte, capturedAt time.Time) error
+	// ReadSnapshot returns the current snapshot + when its frame was captured,
+	// or ok=false if none has arrived yet.
+	ReadSnapshot() (data []byte, capturedAt time.Time, ok bool)
 }
 
 // --- shared helpers used by more than one backend ----------------------------

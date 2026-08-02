@@ -124,8 +124,8 @@ function CostTag({ on }: { on: boolean }) {
 // Cache-bust the <img> src on every successful meta poll, so the browser
 // re-fetches the JPEG each time a fresher one has landed rather than serving
 // its own cached copy of an older frame.
-function snapshotUrl(receivedAt: string): string {
-  return `/api/snapshot?t=${encodeURIComponent(receivedAt)}`;
+function snapshotUrl(capturedAt: string): string {
+  return `/api/snapshot?t=${encodeURIComponent(capturedAt)}`;
 }
 
 function ageStr(ms: number): string {
@@ -157,7 +157,7 @@ function SnapshotChip({ ageMs, stale }: { ageMs: number; stale: boolean }) {
 // behind the connecting spinner/error overlay, so establishing a session
 // doesn't drop the operator back to a flat black box).
 function useSnapshotMeta() {
-  const [meta, setMeta] = useState<{ receivedAt: string } | null>(null);
+  const [meta, setMeta] = useState<{ capturedAt: string } | null>(null);
   const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
@@ -166,7 +166,7 @@ function useSnapshotMeta() {
       fetchSnapshotMeta()
         .then((m) => {
           if (cancelled) return;
-          setMeta(m.available && m.received_at ? { receivedAt: m.received_at } : null);
+          setMeta(m.available && m.captured_at ? { capturedAt: m.captured_at } : null);
         })
         .catch((e) => {
           if (cancelled) return;
@@ -191,7 +191,11 @@ function useSnapshotMeta() {
     return () => window.clearInterval(id);
   }, []);
 
-  const ageMs = meta ? now - Date.parse(meta.receivedAt) : null;
+  // Age of the FRAME (since the camera took it), not of the last push: the Pi
+  // sends the capture->push delay with every PUT, so a capture side that
+  // stalls while the pusher keeps running reads as stale instead of resetting
+  // to 0s every interval.
+  const ageMs = meta ? now - Date.parse(meta.capturedAt) : null;
   // Colour-shift toward amber as the frame approaches the documented ~30s
   // staleness bound, so a stuck Pi push (not just a normal 10s-old frame) is
   // visually distinct.
@@ -232,7 +236,7 @@ function StreamOffStage({ onTurnOn }: { onTurnOn: () => void }) {
           }}
         >
           <img
-            src={snapshotUrl(meta.receivedAt)}
+            src={snapshotUrl(meta.capturedAt)}
             alt="Recent camera snapshot (not live)"
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
@@ -274,7 +278,7 @@ function StreamOffStage({ onTurnOn }: { onTurnOn: () => void }) {
         </button>
       </div>
       {lightboxOpen && meta && (
-        <SnapshotLightbox receivedAt={meta.receivedAt} ageMs={ageMs!} onClose={() => setLightboxOpen(false)} />
+        <SnapshotLightbox capturedAt={meta.capturedAt} ageMs={ageMs!} onClose={() => setLightboxOpen(false)} />
       )}
     </div>
   );
@@ -284,11 +288,11 @@ function StreamOffStage({ onTurnOn }: { onTurnOn: () => void }) {
 // custom lightbox mirroring RecordModal's dialog pattern (no UI library in
 // this codebase): Escape/outside-click to close, full-viewport overlay.
 function SnapshotLightbox({
-  receivedAt,
+  capturedAt,
   ageMs,
   onClose,
 }: {
-  receivedAt: string;
+  capturedAt: string;
   ageMs: number;
   onClose: () => void;
 }) {
@@ -340,7 +344,7 @@ function SnapshotLightbox({
         </button>
       </div>
       <img
-        src={snapshotUrl(receivedAt)}
+        src={snapshotUrl(capturedAt)}
         alt="Recent camera snapshot (not live), full size"
         onClick={(e) => e.stopPropagation()}
         style={{ maxWidth: "100%", maxHeight: "80vh", objectFit: "contain", borderRadius: 8 }}
@@ -377,7 +381,7 @@ function LiveStage() {
     <div style={{ position: "relative", background: "#000", aspectRatio: "16 / 10" }}>
       {showSnapshotBg && (
         <img
-          src={snapshotUrl(meta.receivedAt)}
+          src={snapshotUrl(meta.capturedAt)}
           alt="Recent camera snapshot (not live)"
           style={{
             position: "absolute",

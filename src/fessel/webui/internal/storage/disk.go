@@ -283,7 +283,7 @@ func (d *DiskBackend) snapshotPath() string {
 	return filepath.Join(filepath.Dir(d.recordingsRoot), monitorDirname, snapshotBaseName)
 }
 
-func (d *DiskBackend) StoreSnapshot(jpeg []byte) error {
+func (d *DiskBackend) StoreSnapshot(jpeg []byte, capturedAt time.Time) error {
 	dest := d.snapshotPath()
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
@@ -295,7 +295,18 @@ func (d *DiskBackend) StoreSnapshot(jpeg []byte) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, dest)
+	if err := os.Rename(tmp, dest); err != nil {
+		return err
+	}
+	// The file's mtime IS the capture time (not the write time): that keeps the
+	// timestamp intrinsic to the stored object — no side file to lose, and a
+	// snapshot from before this was tracked still reads back sensibly. A
+	// failure here is not fatal; the frame is stored, only its age degrades to
+	// "when it was written".
+	if !capturedAt.IsZero() {
+		_ = os.Chtimes(dest, capturedAt, capturedAt)
+	}
+	return nil
 }
 
 func (d *DiskBackend) ReadSnapshot() ([]byte, time.Time, bool) {

@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/derfred/fessel/webui/internal/storage"
@@ -27,6 +28,21 @@ import (
 // frame is a few tens of KB; this is a generous ceiling against a misbehaving
 // or malicious sender, not a tuned limit).
 const maxSnapshotBytes = 5 << 20 // 5 MiB
+
+// The Pi declares how old the frame already was when it pushed it (capture ->
+// PUT), measured on its own monotonic clock. We resolve that against OUR wall
+// clock so the operator's "Xs ago" label dates the frame from when the camera
+// took it, not from when the PUT landed — the two diverge exactly when it
+// matters (a stalled pipeline re-pushing one cached frame looks perpetually
+// fresh otherwise). An absent header means an older Pi: fall back to receipt
+// time, which is what the label meant before.
+const snapshotAgeHeader = "X-Snapshot-Age-Ms"
+
+// maxSnapshotAge bounds the declared age. A frame older than this says the
+// capture side is broken, not that the snapshot is that old; clamping keeps a
+// garbage/overflowed header from rendering an absurd label (and from a
+// negative-age "captured in the future" frame reading as 0s forever).
+const maxSnapshotAge = time.Hour
 
 // IngestRelay is the slice of the relay the WHIP endpoints use.
 type IngestRelay interface {
@@ -101,12 +117,13 @@ func (in *Ingest) Handler() http.Handler {
 			writeDetail(w, http.StatusRequestEntityTooLarge, "snapshot too large")
 			return
 		}
-		if err := snap.StoreSnapshot(body); err != nil {
+		age := parseSnapshotAge(r.Header.Get(snapshotAgeHeader))
+		if err := snap.StoreSnapshot(body, time.Now().Add(-age)); err != nil {
 			snapshotIngestLog(int64(len(body)), "store_error", t0)
 			writeDetail(w, http.StatusBadGateway, fmt.Sprintf("store failed: %v", err))
 			return
 		}
-		snapshotIngestLog(int64(len(body)), "stored", t0)
+		snapshotIngestLog(int64(len(body)), "stored", t0, "capture_age_ms", age.Milliseconds())
 		w.WriteHeader(http.StatusCreated)
 	})
 
@@ -171,9 +188,33 @@ func ingestLog(recordingID, fileName string, size int64, outcome string, t0 time
 
 // snapshotIngestLog mirrors ingestLog for the Monitor freeze-frame PUT, so a
 // stuck/failing Pi push is visible in webui logs without SSHing to the Pi.
-func snapshotIngestLog(size int64, outcome string, t0 time.Time) {
-	slog.Info("audit",
+// extra carries per-outcome key/values (the stored path adds capture_age_ms,
+// which is how a stalled capture side shows up in Loki).
+func snapshotIngestLog(size int64, outcome string, t0 time.Time, extra ...any) {
+	args := []any{
 		"event", "snapshot_ingest", "size_bytes", size, "outcome", outcome,
 		"latency_ms", time.Since(t0).Milliseconds(),
-		"timestamp", time.Now().UTC().Format(time.RFC3339Nano))
+		"timestamp", time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	slog.Info("audit", append(args, extra...)...)
+}
+
+// parseSnapshotAge reads the Pi's declared capture age. Anything missing,
+// unparseable, negative or beyond maxSnapshotAge degrades to 0 (= "as fresh as
+// its arrival"), never to an error: a bad header must not cost the operator
+// the frame itself.
+func parseSnapshotAge(header string) time.Duration {
+	if header == "" {
+		return 0
+	}
+	ms, err := strconv.ParseInt(header, 10, 64)
+	if err != nil || ms < 0 {
+		return 0
+	}
+	// Compare in milliseconds: ms * time.Millisecond would overflow int64 for a
+	// wild value and wrap to a negative duration ("captured in the future").
+	if ms >= maxSnapshotAge.Milliseconds() {
+		return maxSnapshotAge
+	}
+	return time.Duration(ms) * time.Millisecond
 }
