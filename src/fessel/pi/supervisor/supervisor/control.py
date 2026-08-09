@@ -25,7 +25,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fessel_schemas import (
   CameraState,
@@ -59,7 +59,7 @@ PublishFn = Callable[[str, dict, int, bool], None]
 
 
 def _now_iso() -> str:
-  return datetime.now(timezone.utc).isoformat()
+  return datetime.now(UTC).isoformat()
 
 
 class ControlPlane:

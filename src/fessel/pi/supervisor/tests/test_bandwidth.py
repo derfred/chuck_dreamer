@@ -71,8 +71,9 @@ def test_no_churn_on_unchanged_decision():
 
 def test_relay_live_state_drives_live_running_hook(monkeypatch):
   # Relay._on_live_state fires on_live_running(True) only in `running`.
-  import supervisor.app as appmod
   from fessel_schemas import LiveState
+
+  import supervisor.app as appmod
 
   relay = appmod.Relay({"mqtt": {"host": "x"}})
   seen = []

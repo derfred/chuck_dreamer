@@ -32,8 +32,7 @@ import threading
 import time
 
 from fessel_schemas import UploadGate
-from fessel_shared import ConfigReloader, MqttClient, Storage, load_component_config
-from fessel_shared import topics
+from fessel_shared import ConfigReloader, MqttClient, Storage, load_component_config, topics
 
 from .core import DEFAULT_BACKOFF_S, Uploader
 from .ingest import build_ingest_client

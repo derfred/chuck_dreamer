@@ -4,6 +4,7 @@ backend."""
 
 from fessel_schemas import RecordingMetadata, UploadStateValue
 from fessel_shared import Storage
+
 from uploader import FakeIngestClient, Uploader
 
 
@@ -61,7 +62,7 @@ def test_happy_path_uploads_all_files_and_clears_marker(tmp_path):
 def test_completion_order_metadata_last(tmp_path):
   # V5.5.1: segments first, then the playlist, then metadata.json LAST —
   # metadata.json's arrival is the backend's "fully uploaded" marker.
-  s, rid = _setup(tmp_path, segments=2)
+  s, _rid = _setup(tmp_path, segments=2)
   _, publish = _publish_sink()
   client = FakeIngestClient()
   up = Uploader(storage=s, client=client, publish=publish)
@@ -128,6 +129,7 @@ def test_gate_honoring(tmp_path):
   # resumes when it re-allows. The marker stays on disk while paused (nothing
   # lost), then uploads on resume.
   from fessel_schemas import UploadGate
+
   from uploader.main import UploaderApp
 
   app = UploaderApp({"storage": {"ssd_path": str(tmp_path)}, "uploader": {"driver": "fake"}})
@@ -200,6 +202,7 @@ def test_ingest_config_env_wins_over_webui_base(monkeypatch):
 def test_reload_applies_upload_tunables(tmp_path):
   # §2.13: SIGHUP reload updates poll/backlog intervals + retry backoff.
   import pytest
+
   from uploader.main import UploaderApp
 
   app = UploaderApp({"storage": {"ssd_path": str(tmp_path)}, "uploader": {"driver": "fake"}})

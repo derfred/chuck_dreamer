@@ -8,6 +8,7 @@ real HttpIngestClient against an httpx MockTransport, so the URL construction
 
 import httpx
 import pytest
+
 from uploader.ingest import (
   HttpIngestClient,
   HttpIngestConfig,

@@ -33,12 +33,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fessel_schemas import UploadProgress, UploadStateValue
-from fessel_shared import Storage
-from fessel_shared import topics
+from fessel_shared import Storage, topics
 
 from .ingest import IngestClient, PermanentError, RetryableError
 
@@ -57,7 +56,7 @@ METADATA_FILENAME = "metadata.json"
 
 
 def _now_iso() -> str:
-  return datetime.now(timezone.utc).isoformat()
+  return datetime.now(UTC).isoformat()
 
 
 def _upload_rank(name: str) -> tuple[int, str]:
@@ -235,7 +234,7 @@ class Uploader:
     count = len(markers)
     oldest_seconds: int | None = None
     if markers:
-      now = datetime.now(timezone.utc).timestamp()
+      now = datetime.now(UTC).timestamp()
       oldest_mtime = min(m.stat().st_mtime for m in markers)
       oldest_seconds = max(0, int(now - oldest_mtime))
     self._publish(topics.UPLOAD_BACKLOG_COUNT, {"value": count}, topics.QOS_UPLOAD, topics.RETAIN_UPLOAD)
