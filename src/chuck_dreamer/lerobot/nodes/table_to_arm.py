@@ -15,13 +15,20 @@ inside the per-episode harness lists: it runs once per dataset (the
 in the artifact store keyed by its input versions, and downstream episode
 nodes consume it through the ``table_to_arm`` artifact provider.
 
-Degeneracy: all targets lie in the mat plane (z = 0), which full 3-D
-Umeyama handles fine — but when the touched points are (near-)collinear the
-rotation about the common line is unobservable. The captured datasets can't
-be redone, so instead of rejecting we fall back to a **planar heuristic**:
-the arm base is bolted flat to the table, so its z axis is assumed parallel
-to the table z axis, reducing the fit to a rotation about z plus a 3-D
-translation — well-posed for any two distinct touch points.
+The fit is deliberately **2-parameter**, not a general 6-DoF rigid
+alignment. The rig pins down everything else:
+
+* the arm base is bolted flat to the mat, so arm z ∥ table z — no tilt to
+  estimate, and the z translation is just the negative mean touch height
+  (every touch is on the mat surface, z = 0 by definition);
+* the arm is aimed at the middle touch target, so that target sits on the
+  arm's +x axis — the base offset has no y component.
+
+What is left is ``theta`` (the yaw of the touch line relative to the arm's
+x axis) and ``distance`` (base → middle target, along that axis). Fitting
+two parameters instead of six is well-conditioned on the collinear touch
+rows the capture protocol produces, where a full Umeyama fit would leave
+the rotation about the common line unobservable.
 """
 from __future__ import annotations
 
@@ -49,18 +56,18 @@ ARTIFACT  = "table_to_arm"     # store artifact type (spec §6) this node produc
 # before trusting any extracted transform.
 TOUCHPOINT_VARIANTS: dict[int, dict[int, tuple[float, float]]] = {
   3: {
-    1: (0.0, 0.0),
-    2: (-150.0, 0.0),
-    3: (150.0, 0.0),
+    5: (-150.0, 0.0),
+    6: (0.0, 0.0),
+    7: (150.0, 0.0),
   },
   7: {
-    1: (0.0, 0.0),
-    2: (0.0, 80.0),
-    3: (-150.0, 80.0),
-    4: (-300.0, 80.0),
-    5: (-14.0, 0.0),
-    6: (0.0, -80.0),
-    7: (-150.0, -80.0),
+    4: (-150.0, 0.0),
+    5: (0.0, 0.0),
+    6: (150.0, 0.0),
+    7: (-150.0, 80.0),
+    8: (150.0, 80.0),
+    9: (-150.0, -80.0),
+    10: (150.0, -80.0),
   },
 }
 
@@ -75,10 +82,6 @@ RESIDUAL_REJECT_MM = 10.0
 # suspect — the arm was not at rest for most of the episode.
 SPREAD_WARN_DEG = 3.0
 
-# Relative second-singular-value threshold below which the target set is
-# treated as collinear (rotation about the common line unobservable).
-_COLLINEAR_RTOL = 0.05
-
 
 class ResidualGateError(ValueError):
   """The fitted transform misses its own touch targets by more than
@@ -88,60 +91,37 @@ class ResidualGateError(ValueError):
 # ---------------------------------------------------------------------------
 # Alignment math
 # ---------------------------------------------------------------------------
-def umeyama_rigid(P: np.ndarray, Q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-  """Closed-form rigid alignment ``q = R @ p + t`` over ``(N, 3)``
-  correspondences (Umeyama/Kabsch, no scale).
-
-  The reflection correction (the ``d`` term) is required, not optional:
-  without it SVD can return an improper rotation (det −1) that looks
-  geometrically plausible but is a mirror."""
-  P = np.asarray(P, dtype=np.float64)
-  Q = np.asarray(Q, dtype=np.float64)
-  c_p = P.mean(axis=0)
-  c_q = Q.mean(axis=0)
-  H = (P - c_p).T @ (Q - c_q)
-  U, _, Vt = np.linalg.svd(H)
-  d = np.sign(np.linalg.det(Vt.T @ U.T))
-  R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
-  t = c_q - R @ c_p
-  return R, t
+def _middle_target_index(p_table_m: np.ndarray) -> int:
+  """Index of the *middle* touch target: the one nearest the table-frame
+  origin, which the capture protocol places under the arm's x axis."""
+  return int(np.argmin(np.linalg.norm(np.asarray(p_table_m, dtype=np.float64)[:, :2], axis=1)))
 
 
-def _planar_z_fit(P: np.ndarray, Q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-  """Rigid alignment constrained to a rotation about z (2-D Kabsch on the
-  xy channels) plus a full 3-D translation.
+def _fit_theta(p_arm_m: np.ndarray, p_table_m: np.ndarray) -> float:
+  """Yaw of the table frame relative to the arm frame.
 
-  The degeneracy heuristic for collinear touch points: the arm base sits
-  flat on the table, so arm z ∥ table z is assumed rather than estimated;
-  the z component of ``t`` absorbs the (constant) touch height offset."""
-  P = np.asarray(P, dtype=np.float64)
-  Q = np.asarray(Q, dtype=np.float64)
-  Pc = P[:, :2] - P[:, :2].mean(axis=0)
-  Qc = Q[:, :2] - Q[:, :2].mean(axis=0)
-  theta = math.atan2(float(np.sum(Pc[:, 0] * Qc[:, 1] - Pc[:, 1] * Qc[:, 0])),
-                     float(np.sum(Pc[:, 0] * Qc[:, 0] + Pc[:, 1] * Qc[:, 1])))
-  c, s = math.cos(theta), math.sin(theta)
-  R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
-  t = Q.mean(axis=0) - R @ P.mean(axis=0)
-  return R, t
-
-
-def _is_collinear(points: np.ndarray) -> bool:
-  """Whether ``(N, 3)`` points are (near-)collinear: the second singular
-  value of the centered set vanishes relative to the first."""
-  pts = np.asarray(points, dtype=np.float64)
-  if len(pts) < 3:
-    return True
-  s = np.linalg.svd(pts - pts.mean(axis=0), compute_uv=False)
-  return bool(s[1] <= _COLLINEAR_RTOL * s[0])
+  With the translation constrained to lie along the arm's x axis, theta is
+  still the ordinary 2-D Kabsch angle on the *centered* xy channels: the
+  centering removes the translation whatever it turns out to be, so the
+  rotation can be solved for first and independently."""
+  Pc = p_arm_m[:, :2]   - p_arm_m[:, :2].mean(axis=0)
+  Qc = p_table_m[:, :2] - p_table_m[:, :2].mean(axis=0)
+  return math.atan2(float(np.sum(Pc[:, 0] * Qc[:, 1] - Pc[:, 1] * Qc[:, 0])),
+                    float(np.sum(Pc[:, 0] * Qc[:, 0] + Pc[:, 1] * Qc[:, 1])))
 
 
 @dataclass(frozen=True)
 class TableToArmFit:
-  """A fitted arm→table transform: ``p_table = R @ p_arm + t`` (metres)."""
+  """A fitted arm→table transform: ``p_table = R @ p_arm + t`` (metres).
+
+  ``R`` and ``t`` are the *derived* dense form; the fit itself has only the
+  two free parameters :attr:`theta_rad` and :attr:`distance_m` (plus the
+  z offset, which is measured rather than fitted)."""
   R: np.ndarray
   t: np.ndarray
-  method: str                    # "umeyama3d" | "planar_z"
+  theta_rad: float               # yaw of the touch line vs. the arm x axis
+  distance_m: float              # arm base → middle touch target, along arm +x
+  z_offset_m: float              # −mean touch height, folded into t[2]
   residuals_mm: np.ndarray       # (N,) per-touch |predicted − target|
 
   @property
@@ -155,28 +135,35 @@ class TableToArmFit:
 
 def fit_table_to_arm(p_arm_m: np.ndarray, p_table_m: np.ndarray) -> TableToArmFit:
   """Fit ``p_table = R @ p_arm + t`` from ``(N, 3)`` correspondences in
-  metres, falling back to the planar-z heuristic when the touch points are
-  collinear (see module docstring)."""
+  metres under the rig's 2-parameter model (see the module docstring).
+
+  ``theta`` comes from the centered 2-D Kabsch angle; ``distance`` is the
+  arm-frame x coordinate of the middle touch, which the protocol places on
+  the arm's +x axis; the z translation is the negative mean touch height."""
   p_arm_m   = np.asarray(p_arm_m, dtype=np.float64)
   p_table_m = np.asarray(p_table_m, dtype=np.float64)
   if p_arm_m.shape != p_table_m.shape or p_arm_m.ndim != 2 or p_arm_m.shape[1] != 3:
-    raise ValueError(
-      f"correspondence shapes differ or are not (N, 3): "
-      f"{p_arm_m.shape} vs {p_table_m.shape}")
+    raise ValueError(f"correspondence shapes differ or are not (N, 3): {p_arm_m.shape} vs {p_table_m.shape}")
+
   if len(p_arm_m) < 2:
     raise ValueError("need at least 2 touch points to fit a transform")
 
-  # Collinearity in either point set kills the same rotational DOF.
-  if _is_collinear(p_table_m) or _is_collinear(p_arm_m):
-    R, t = _planar_z_fit(p_arm_m, p_table_m)
-    method = "planar_z"
-  else:
-    R, t = umeyama_rigid(p_arm_m, p_table_m)
-    method = "umeyama3d"
+  theta = _fit_theta(p_arm_m, p_table_m)
+  c, s  = math.cos(theta), math.sin(theta)
+  R     = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
 
-  predicted = p_arm_m @ R.T + t
+  # The middle touch is on the arm's +x axis, so the base→middle distance is
+  # that touch's arm-frame x. The whole translation is along that axis, which
+  # after rotation into the table frame is −R @ [distance, 0, 0].
+  middle     = _middle_target_index(p_table_m)
+  distance   = float(p_arm_m[middle, 0])
+  z_offset   = float(-p_arm_m[:, 2].mean())
+  t          = -R @ np.array([distance, 0.0, 0.0])
+  t[2]       = z_offset
+
+  predicted    = p_arm_m @ R.T + t
   residuals_mm = np.linalg.norm(predicted - p_table_m, axis=1) * 1000.0
-  return TableToArmFit(R=R, t=t, method=method, residuals_mm=residuals_mm)
+  return TableToArmFit(R=R, t=t, theta_rad=theta, distance_m=distance, z_offset_m=z_offset, residuals_mm=residuals_mm)
 
 
 # ---------------------------------------------------------------------------
@@ -192,25 +179,25 @@ class Touch:
   p_arm_m: np.ndarray            # (3,) FK of the median, metres
 
 
-def _process_touch(episode: int, target_mm: tuple[float, float],
-                   qpos_deg: np.ndarray, fk: Any) -> Touch:
+def _process_touch(episode: int, target_mm: tuple[float, float], qpos_deg: np.ndarray, fk: Any) -> Touch:
   """Median the positioning joints over the episode, run FK.
 
   The median is robust as long as the arm dwells on the point for most of
   the episode; the spread is computed over the central half of the frames
   (move-in/move-out excluded) as the rest-quality diagnostic."""
+
   q = np.asarray(qpos_deg, dtype=np.float64)
   if q.ndim != 2 or q.shape[0] == 0:
     raise ValueError(f"episode {episode}: no joint values")
-  n_pos = min(5, q.shape[1])
-  q_pos = q[:, :n_pos]
+
+  n_pos    = min(5, q.shape[1])
+  q_pos    = q[:, :n_pos]
   q_median = np.median(q_pos, axis=0)
-  lo, hi = len(q) // 4, max(len(q) // 4 + 1, (3 * len(q)) // 4)
-  window = q_pos[lo:hi]
+  lo, hi   = len(q) // 4, max(len(q) // 4 + 1, (3 * len(q)) // 4)
+  window   = q_pos[lo:hi]
   q_spread = window.max(axis=0) - window.min(axis=0)
-  p_arm = np.asarray(fk(np.deg2rad(q_median)), dtype=np.float64).reshape(3)
-  return Touch(episode=episode, target_mm=target_mm,
-               q_median_deg=q_median, q_spread_deg=q_spread, p_arm_m=p_arm)
+  p_arm    = np.asarray(fk(np.deg2rad(q_median)), dtype=np.float64).reshape(3)
+  return Touch(episode=episode, target_mm=target_mm, q_median_deg=q_median, q_spread_deg=q_spread, p_arm_m=p_arm)
 
 
 # ---------------------------------------------------------------------------
@@ -273,18 +260,16 @@ def extract_table_to_arm(run: "Run", *, force: bool = False) -> ExtractionResult
 
   from ..trackset import _file_sha
 
-  ctx = run.ctx
+  ctx   = run.ctx
   store = ctx.store
   if store is None:
-    raise RuntimeError(
-      "extract-table-to-arm needs the artifact store; set store.root in the "
-      "config")
+    raise RuntimeError("extract-table-to-arm needs the artifact store; set store.root in the config")
 
   variant = resolve_variant(run)
   targets = TOUCHPOINT_VARIANTS[variant]
-  scope = for_dataset(run.dataset_id)
+  scope   = for_dataset(run.dataset_id)
 
-  joint_values = {ep: run.episode_joint_values(ep) for ep in sorted(targets)}
+  joint_values                   = {ep: run.episode_joint_values(ep) for ep in sorted(targets)}
   input_versions: dict[str, str] = {
     "fk_model":            _file_sha(FK_MODEL_PATH) or "missing",
     "touchpoint_targets":  _targets_version(),
@@ -297,9 +282,8 @@ def extract_table_to_arm(run: "Run", *, force: bool = False) -> ExtractionResult
     if record.input_versions == input_versions:
       return ExtractionResult(payload=stored, cached=True)
 
-  fk = ctx.fk()
-  touches = [_process_touch(ep, targets[ep], joint_values[ep], fk)
-             for ep in sorted(targets)]
+  fk      = ctx.fk()
+  touches = [_process_touch(ep, targets[ep], joint_values[ep], fk) for ep in sorted(targets)]
 
   warnings: list[str] = []
   for touch in touches:
@@ -310,14 +294,9 @@ def extract_table_to_arm(run: "Run", *, force: bool = False) -> ExtractionResult
         f"window (> {SPREAD_WARN_DEG}°) — the median may not be a rest pose")
 
   p_arm   = np.stack([t.p_arm_m for t in touches])
-  p_table = np.array([[t.target_mm[0] / 1000.0, t.target_mm[1] / 1000.0, 0.0]
-                      for t in touches])
-  fit = fit_table_to_arm(p_arm, p_table)
+  p_table = np.array([[t.target_mm[0] / 1000.0, t.target_mm[1] / 1000.0, 0.0] for t in touches])
+  fit     = fit_table_to_arm(p_arm, p_table)
 
-  if fit.method == "planar_z":
-    warnings.append(
-      "touch points are collinear — rotation about their common line is "
-      "unobservable; fell back to the planar heuristic (arm z ∥ table z)")
   if fit.max_residual_mm >= RESIDUAL_WARN_MM:
     warnings.append(
       f"max residual {fit.max_residual_mm:.1f} mm ≥ {RESIDUAL_WARN_MM} mm — "
@@ -335,7 +314,10 @@ def extract_table_to_arm(run: "Run", *, force: bool = False) -> ExtractionResult
     "t": fit.t.tolist(),
     "convention": "p_table = R @ p_arm + t",
     "units": "m",
-    "method": fit.method,
+    "method": "rig2p",
+    "theta_rad": fit.theta_rad,
+    "distance_m": fit.distance_m,
+    "z_offset_m": fit.z_offset_m,
     "variant": variant,
     "touchpoints": [
       {

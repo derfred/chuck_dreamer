@@ -1,5 +1,5 @@
-"""extract_table_to_arm: alignment math, the collinearity heuristic, the
-residual gates, and the store-first extraction step."""
+"""extract_table_to_arm: the 2-parameter rig fit, the residual gates, and
+the store-first extraction step."""
 from __future__ import annotations
 
 import math
@@ -14,7 +14,6 @@ from chuck_dreamer.lerobot.nodes.table_to_arm import (
   extract_table_to_arm,
   fit_table_to_arm,
   resolve_variant,
-  umeyama_rigid,
 )
 from chuck_dreamer.store import ArtifactStore, annotation_record, for_dataset
 
@@ -39,42 +38,60 @@ def _arm_points(p_table: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray
 # ---------------------------------------------------------------------------
 # Alignment math
 # ---------------------------------------------------------------------------
-def test_umeyama_recovers_full_3d_transform():
-  rng = np.random.default_rng(0)
-  P = rng.uniform(-0.3, 0.3, size=(7, 3))
-  R_true = _rx(30.0) @ _rz(-70.0)
-  t_true = np.array([0.2, -0.1, 0.05])
-  R, t = umeyama_rigid(P, P @ R_true.T + t_true)
-  np.testing.assert_allclose(R, R_true, atol=1e-9)
-  np.testing.assert_allclose(t, t_true, atol=1e-9)
+def _rig_arm_points(p_table: np.ndarray, theta_deg: float, distance: float,
+                    touch_z: float) -> np.ndarray:
+  """Arm-frame touches for a rig at yaw ``theta_deg``, whose base sits
+  ``distance`` behind the middle target along the arm's +x axis, touching at
+  height ``touch_z``."""
+  R = _rz(theta_deg)
+  t = -R @ np.array([distance, 0.0, 0.0])
+  t[2] = -touch_z
+  return _arm_points(p_table, R, t)
 
 
-def test_fit_coplanar_targets_uses_full_umeyama():
-  """All touch targets are on the mat plane (z = 0) — coplanar is the
-  normal case and must still recover a transform with tilt."""
+def test_fit_recovers_the_two_rig_parameters():
+  """The exact-fit case: touches generated from a known (theta, distance)
+  come back with those parameters and a zero residual."""
   p_table = np.array(
     [[x / 1000.0, y / 1000.0, 0.0] for x, y in TOUCHPOINT_VARIANTS[7].values()])
-  R_true = _rx(2.0) @ _rz(35.0)          # slight base tilt + yaw
-  t_true = np.array([0.25, -0.05, 0.01])
-  fit = fit_table_to_arm(_arm_points(p_table, R_true, t_true), p_table)
-  assert fit.method == "umeyama3d"
+  theta_deg, distance, touch_z = 35.0, 0.28, 0.004
+  fit = fit_table_to_arm(
+    _rig_arm_points(p_table, theta_deg, distance, touch_z), p_table)
   assert fit.max_residual_mm < 1e-6
-  np.testing.assert_allclose(fit.R, R_true, atol=1e-9)
-  np.testing.assert_allclose(fit.t, t_true, atol=1e-9)
+  assert math.degrees(fit.theta_rad) == pytest.approx(theta_deg)
+  assert fit.distance_m == pytest.approx(distance)
+  assert fit.z_offset_m == pytest.approx(-touch_z)
+  np.testing.assert_allclose(fit.R, _rz(theta_deg), atol=1e-9)
 
 
-def test_fit_collinear_targets_falls_back_to_planar():
-  """Collinear touches leave rotation about their line unobservable; the
-  planar heuristic (arm z ∥ table z) must still recover a z-rotation +
-  translation exactly."""
-  p_table = np.array([[0.0, 0.0, 0.0], [-0.1, 0.0, 0.0], [-0.2, 0.0, 0.0]])
-  R_true = _rz(40.0)
-  t_true = np.array([0.3, 0.1, 0.02])
-  fit = fit_table_to_arm(_arm_points(p_table, R_true, t_true), p_table)
-  assert fit.method == "planar_z"
+def test_fit_handles_collinear_touches():
+  """Collinear touch rows are the protocol's normal case and are fully
+  determined under the 2-parameter model."""
+  p_table = np.array([[-0.15, 0.0, 0.0], [0.0, 0.0, 0.0], [0.15, 0.0, 0.0]])
+  fit = fit_table_to_arm(_rig_arm_points(p_table, 40.0, 0.3, 0.0), p_table)
   assert fit.max_residual_mm < 1e-6
-  np.testing.assert_allclose(fit.R, R_true, atol=1e-9)
-  np.testing.assert_allclose(fit.t, t_true, atol=1e-9)
+  assert math.degrees(fit.theta_rad) == pytest.approx(40.0)
+  assert fit.distance_m == pytest.approx(0.3)
+
+
+def test_z_offset_is_the_negative_mean_touch_height():
+  """Touches at differing heights average into a single z offset rather
+  than tilting the frame."""
+  p_table = np.array([[-0.15, 0.0, 0.0], [0.0, 0.0, 0.0], [0.15, 0.0, 0.0]])
+  p_arm = _rig_arm_points(p_table, 0.0, 0.25, 0.0)
+  p_arm[:, 2] += np.array([0.001, 0.003, 0.005])   # mean +3 mm
+  fit = fit_table_to_arm(p_arm, p_table)
+  assert fit.z_offset_m == pytest.approx(-0.003)
+  assert fit.t[2] == pytest.approx(-0.003)
+
+
+def test_translation_has_no_y_component_in_the_arm_frame():
+  """The model asserts the middle target is on the arm's +x axis, so the
+  base offset it recovers is purely axial."""
+  p_table = np.array([[-0.15, 0.0, 0.0], [0.0, 0.0, 0.0], [0.15, 0.0, 0.0]])
+  fit = fit_table_to_arm(_rig_arm_points(p_table, 25.0, 0.3, 0.0), p_table)
+  offset_arm = -fit.R.T @ fit.t          # base offset expressed in the arm frame
+  assert offset_arm[1] == pytest.approx(0.0, abs=1e-12)
 
 
 def test_fit_rejects_bad_shapes():
@@ -128,7 +145,9 @@ def rig(tmp_path):
   ctx._store_resolved = True
   ctx._fk = lambda q_rad: np.asarray(q_rad[:3], dtype=np.float64)
 
-  R_true, t_true = _rz(30.0), np.array([0.28, -0.04, 0.015])
+  R_true = _rz(30.0)
+  t_true = -R_true @ np.array([0.28, 0.0, 0.0])
+  t_true[2] = -0.015
   joints: dict[int, np.ndarray] = {}
   for ep, (x_mm, y_mm) in TOUCHPOINT_VARIANTS[3].items():
     p_table = np.array([x_mm / 1000.0, y_mm / 1000.0, 0.0])
@@ -148,7 +167,7 @@ def test_extract_fits_and_persists(rig):
   assert p["max_residual_mm"] < 0.5
   np.testing.assert_allclose(np.asarray(p["R"]), R_true, atol=1e-3)
   np.testing.assert_allclose(np.asarray(p["t"]), t_true, atol=1e-4)
-  assert [tp["episode"] for tp in p["touchpoints"]] == [1, 2, 3]
+  assert [tp["episode"] for tp in p["touchpoints"]] == sorted(TOUCHPOINT_VARIANTS[3])
 
   record = store.provenance("table_to_arm", for_dataset(DS))
   assert record.node == "extract_table_to_arm"
@@ -165,7 +184,8 @@ def test_extract_is_cached_until_inputs_change(rig):
 
   # A changed touchpoint episode invalidates the cache (nudge small enough
   # to stay inside the residual gates).
-  run._joints[2] = run._joints[2] + 0.05
+  middle = sorted(TOUCHPOINT_VARIANTS[3])[1]
+  run._joints[middle] = run._joints[middle] + 0.05
   recomputed = extract_table_to_arm(run)
   assert not recomputed.cached
 
@@ -173,7 +193,8 @@ def test_extract_is_cached_until_inputs_change(rig):
 def test_extract_residual_gate(rig):
   run, store, _R, _t = rig
   # Pull one touch ~28 mm off target: reject without --force.
-  run._joints[3] = run._joints[3] + np.rad2deg(0.02)
+  last = sorted(TOUCHPOINT_VARIANTS[3])[-1]
+  run._joints[last] = run._joints[last] + np.rad2deg(0.02)
   with pytest.raises(ResidualGateError, match="not persisting"):
     extract_table_to_arm(run)
   assert not store.has("table_to_arm", for_dataset(DS))
