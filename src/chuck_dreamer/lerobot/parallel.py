@@ -261,12 +261,6 @@ def import_dataset_parallel(
     if getattr(n, "lane", "worker") == "worker")
   has_worker_stages = bool(worker_node_names)
 
-  # As in the serial path: with --no-video and no frame-consuming node, the
-  # decode is skipped outright instead of decoded-then-discarded.
-  if not run.decodes_video:
-    logger.info("--no-video and no frame-consuming stage enabled: "
-                "skipping video decode entirely")
-
   # ``spawn`` (not fork): the workers must not inherit any CUDA context, and a
   # producer thread may have initialised CUDA in this process by the time a
   # worker starts.

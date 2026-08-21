@@ -171,24 +171,16 @@ def import_dataset(
 
   writer = EpisodeWriter(output_dir, format=format)
 
-  if not run.decodes_video:
-    logger.info("--no-video and no frame-consuming stage enabled: "
-                "skipping video decode entirely")
-
   for sl in slices:
-    assembled = assemble_episode(
-      run, sl, tags=tags, name_prefix=name_prefix)
-    if assembled is None:
-      continue
-    episode, metadata, name_suffix = assembled
+    assembled = assemble_episode(run, sl, tags=tags, name_prefix=name_prefix)
+    if assembled is not None:
+      episode, metadata, name_suffix = assembled
 
-    ts = TrackSet(
-      EpisodeScope(run.dataset_id, sl.episode_index), episode, metadata)
-    run_episode(run.pipeline(sl.episode_index), ts)
+      ts = TrackSet(EpisodeScope(run.dataset_id, sl.episode_index), episode, metadata)
+      run_episode(run.pipeline(sl.episode_index), ts)
 
-    if run.drop_video:
-      drop_video_field(episode)
+      if run.drop_video:
+        drop_video_field(episode)
 
-    out_path = writer.write_episode(
-      episode, metadata=metadata, name_suffix=name_suffix)
-    yield sl.episode_index, out_path
+      out_path = writer.write_episode(episode, metadata=metadata, name_suffix=name_suffix)
+      yield sl.episode_index, out_path
