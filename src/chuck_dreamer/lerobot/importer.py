@@ -61,7 +61,6 @@ def assemble_episode(
   metadata = {
     "config": {
       "source_repo":   run.dataset_id,
-      "video_key":     run.video_key,
       "episode_index": sl.episode_index,
       "task":          sl.task,
       "n_joints":      frames.n_joints,

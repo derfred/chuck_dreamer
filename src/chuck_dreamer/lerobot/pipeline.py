@@ -113,9 +113,9 @@ class Run:
     return self._resolved[0]
 
   @property
-  def video_key(self) -> str:
-    """The resolved ``observation.images.*`` feature key the slices' video
-    fields were populated from."""
+  def _video_key(self) -> str:
+    """The dataset's ``observation.images.*`` feature key, as resolved from
+    its metadata — the frame dict's key for the camera tensor."""
     return self._resolved[1]
 
   # ---- video-decode requirement -------------------------------------------
@@ -129,14 +129,9 @@ class Run:
 
   @cached_property
   def decodes_video(self) -> bool:
-    """Whether this run opens the MP4s at all.
+    """Whether this run opens the MP4s at all. Even if not writing to disk,
+    some nodes (segmentation, object pose) consume the frames and require decoding."""
 
-    False only when ``--no-video`` is set *and* no enabled node declares
-    ``image`` as an input — i.e. the frames would reach neither a stage nor
-    the output file. Derived from the node declarations rather than the flag
-    names, so a new frame-consuming node is accounted for without editing
-    this. The node set is flag-driven, not episode-driven, so the answer is
-    the same for every episode and is cached per run."""
     if not self.drop_video:
       return True
     return any(decl.name == "image"
@@ -184,7 +179,7 @@ class Run:
     images, action, state, timestamp = [], [], [], []
     for i in range(len(ds)):
       frame = ds[i]
-      images.append(_frame_to_image(frame[self.video_key]))
+      images.append(_frame_to_image(frame[self._video_key]))
       action.append(np.asarray(frame["action"], dtype=np.float32))
       state.append(np.asarray(frame["observation.state"], dtype=np.float32))
       timestamp.append(float(frame["timestamp"]))
