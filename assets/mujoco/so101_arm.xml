@@ -110,7 +110,7 @@
                 <geom class="finger_collision" name="fixed_jaw_pad_2" size="0.001 0.005 0.006" pos="0.0109 -0.0914 0"/>
                 <geom class="finger_collision" name="fixed_jaw_pad_3" size="0.001 0.01 0.007"  pos="0.0126 -0.0768 0"/>
                 <geom class="finger_collision" name="fixed_jaw_pad_4" size="0.001 0.01 0.008"  pos="0.0143 -0.0572 0"/>
-                <site name="ee_tip" pos="0 -0.1014 0" size="0.002" rgba="1 0 0 1"/>
+                <site name="ee_tip" pos="0.0079 -0.0981274 -0.000218121" size="0.002" rgba="1 0 0 1"/>
                 <body name="vx300s_left/camera_focus" pos="0.0 -0.06 0">
                   <site pos="0 0 0" size="0.01" type="sphere" name="left_cam_focus" rgba="0 0 1 0"/>
                   <body name="ee_frame" pos="0 0 0" quat="0.5 0.5 -0.5 -0.5">

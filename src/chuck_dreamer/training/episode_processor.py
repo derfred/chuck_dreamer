@@ -149,12 +149,25 @@ def _union_focus_mask(raw: RawEpisode, sources: tuple[str, ...]) -> np.ndarray |
 # Per-component vector builders. ``image`` is handled separately because
 # it needs the image_size argument for resize. Keep the field
 # composition here as the single source of truth.
+def _joint_angles(raw: RawEpisode) -> np.ndarray:
+  """Joint angles in radians.
+
+  Imported LeRobot episodes carry both the raw servo reading (``joint_qpos``,
+  degrees) and the converted one (``joint_qpos_rad``); sim-collected episodes
+  carry only ``joint_qpos``, already in radians from MuJoCo. Prefer the
+  explicit radians track where present so both sources agree on units — this
+  is also the convention the runtime speaks (see
+  ``runtime/teleop.py:leader_action_to_follower_qpos``)."""
+  key = "joint_qpos_rad" if "joint_qpos_rad" in raw else "joint_qpos"
+  return np.asarray(raw[key], dtype=np.float32)
+
+
 def _build_joints(raw: RawEpisode) -> np.ndarray:
-  return np.asarray(raw["joint_qpos"], dtype=np.float32)
+  return _joint_angles(raw)
 
 
 def _build_proprio(raw: RawEpisode) -> np.ndarray:
-  return np.asarray(raw["joint_qpos"], dtype=np.float32)
+  return _joint_angles(raw)
 
 
 def _build_ee(raw: RawEpisode) -> np.ndarray:
@@ -194,8 +207,8 @@ def _build_observation(
   concatenations of float32 fields.
   """
   components: dict[str, Any] = {}
-  fmask: np.ndarray | None = None
-  needs_image = IMAGE in obs_mode
+  fmask: np.ndarray | None   = None
+  needs_image                = IMAGE in obs_mode
   if needs_image:
     if image_size is None:
       raise ValueError(f"obs_mode={obs_mode!r} includes 'image' but image_size is None")
@@ -238,10 +251,10 @@ class EpisodeProcessor:
     focus_mask_sources: tuple[str, ...] = (),
     act_mode: str = "ee",
   ):
-    self.obs_mode = normalize_obs_mode(obs_mode)
-    self.image_size = None if image_size is None else int(image_size)
+    self.obs_mode           = normalize_obs_mode(obs_mode)
+    self.image_size         = None if image_size is None else int(image_size)
     self.focus_mask_sources = tuple(focus_mask_sources)
-    self.act_mode = str(act_mode)
+    self.act_mode           = str(act_mode)
 
   def __call__(self, raw: RawEpisode) -> Episode:
     obs = _build_observation(raw, self.obs_mode, self.image_size, self.focus_mask_sources)
@@ -257,13 +270,14 @@ def processor_for(config) -> EpisodeProcessor:
   ``focus_mask_sources`` is pulled from ``training.losses.focus_masks``
   and only applied when an image component is present.
   """
-  obs_mode = normalize_obs_mode(config.env.obs_mode)
-  act_mode = str(config.env.act_mode)
-  image_size = None
+  obs_mode                       = normalize_obs_mode(config.env.obs_mode)
+  act_mode                       = str(config.env.act_mode)
+  image_size                     = None
   focus_sources: tuple[str, ...] = ()
   if IMAGE in obs_mode:
     image_size = int(config.model.encoder.image_size)
     focus_sources = tuple(config.training.losses.get("focus_masks", []) or [])
+
   return EpisodeProcessor(
     obs_mode,
     image_size=image_size,

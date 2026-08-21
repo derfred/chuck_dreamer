@@ -8,10 +8,9 @@ the repo's episode dict, runs the per-episode stages, and writes the result
 via :class:`HDF5EpisodeWriter` / :class:`RerunEpisodeWriter`. It never touches
 ``lerobot`` or a raw frame dict — all dataset access is behind the run.
 
-Fields the repo's episode format expects but LeRobot teleop data does not
-provide (``reward``, ``ee_pos``, ``ee_quat``, ``object_xy``) are zero-filled.
-This is fine for image-mode training; state-mode training would need real
-EE / object signals.
+``reward`` (absent from teleop data) is zero-filled; the EE / object
+coordinate tracks exist only when the pipeline nodes that produce them are
+enabled — consumers treat them as optional.
 """
 
 from __future__ import annotations
@@ -64,9 +63,6 @@ def assemble_episode(
     "reward":       np.zeros((T,),          dtype=np.float32),
     "timestamp":    frames.timestamp,
     "joint_qpos":   frames.state,
-    "ee_pos":       np.zeros((T, 3),        dtype=np.float32),
-    "ee_quat":      np.zeros((T, 4),        dtype=np.float32),
-    "object_xy":    np.zeros((T, 2),        dtype=np.float32),
   })
   metadata = {
     "config": {
@@ -123,14 +119,17 @@ def import_dataset(
   on each assembled episode before it is written:
 
     * ``with_ee_pos`` (default True) rescales ``joint_qpos`` to radians
-      and runs the FK MLP to fill ``ee_pos``, ``ee_quat`` and
-      ``ee_action``. Trainers select between ``joint_action`` and
-      ``ee_action`` based on ``cfg.env.act_mode``.
+      and runs the FK to fill ``ee_pos_arm``, ``ee_quat_arm`` and
+      ``ee_action_arm`` (mm). Trainers select between ``joint_action`` and
+      the EE action based on ``cfg.env.act_mode``.
     * ``with_object_pose`` (default True) runs SAM2 + a per-frame
-      analysis-by-synthesis pose fit to fill ``object_xy`` and
-      ``object_gap_too_long`` (and a ``camera/mesh_overlay`` track in the
-      Rerun output). Requires per-dataset calibration and a cached frame-0
-      prompt; missing either raises.
+      analysis-by-synthesis pose fit to fill ``obj_pos_table`` (with its
+      ``obj_pos_table.valid`` sibling, and a ``camera/mesh_overlay`` track
+      in the Rerun output). Requires the calibration artifacts and a cached
+      frame-0 prompt in the store; missing either raises.
+    * ``with_table_frame`` adds the frame-crossing nodes (``ee_pos_table``
+      / ``ee_quat_table`` / ``ee_action_table`` / ``obj_pos_arm``), which
+      need the dataset's ``table_to_arm`` transform in the store.
 
   ``tags`` are stamped onto each written episode's metadata. The
   importer is the canonical way to mark recordings as e.g. ``"real"``
@@ -162,6 +161,8 @@ def import_dataset(
       jobs=jobs, devices=devices)
     return
 
+  from .trackset import EpisodeScope, TrackSet, run_episode
+
   writer = EpisodeWriter(output_dir, format=format)
 
   for sl in slices:
@@ -171,8 +172,9 @@ def import_dataset(
       continue
     episode, metadata, name_suffix = assembled
 
-    for stage in run.pipeline(sl.episode_index):
-      stage.apply(episode, metadata)
+    ts = TrackSet(
+      EpisodeScope(run.dataset_id, sl.episode_index), episode, metadata)
+    run_episode(run.pipeline(sl.episode_index), ts)
 
     out_path = writer.write_episode(
       episode, metadata=metadata, name_suffix=name_suffix)

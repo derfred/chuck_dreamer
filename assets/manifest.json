@@ -1,0 +1,7 @@
+{
+  "_comment": "Pinned identities for external (non-git-versioned) assets (docs/trainer/artifact_store.md). The revision is recorded in every consumer's input_versions, so bumping it invalidates the store caches keyed on the asset. Enforcement is provenance-level: loaders resolve from the local HF cache and cannot pin the download itself.",
+  "sam2_weights": {
+    "hf_repo": "facebook/sam2-hiera-large",
+    "revision": "e6a8e8809b8f1bfa2238b6d080f3d05cc76bd251"
+  }
+}

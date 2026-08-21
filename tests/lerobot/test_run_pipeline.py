@@ -173,7 +173,7 @@ def test_ee_chain_declares():
   nodes = build_ee_nodes(_ctx())
   assert [n.name for n in nodes] == EE_CHAIN
   produced = {spec.name for n in nodes for spec in n.outputs}
-  assert produced == {"joint_qpos", "ee_pos_arm", "ee_quat_arm",
+  assert produced == {"joint_qpos_rad", "ee_pos_arm", "ee_quat_arm",
                       "ee_action_arm"}
   assert all(n.lane == "producer" for n in nodes)
 

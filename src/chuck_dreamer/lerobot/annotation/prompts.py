@@ -1,51 +1,29 @@
-"""Per-episode first-frame prompts for the object pose estimator.
+"""Per-episode keyframe prompts for the object pose estimator.
 
 ``ObjectPoseEstimator.estimate_episode`` requires a ``first_frame_prompt``
 (2-D pixel coordinate, or list of them) because the white object on a
-black mat with white fiducials can't be reliably auto-detected. The
-LeRobot importer would otherwise have to either pop a click window for
-every episode (annoying) or hard-code prompts (wrong).
+black mat with white fiducials can't be reliably auto-detected.
 
-This module owns a sidecar JSON cache under the existing calibration
-cache directory keyed by ``(dataset_id, episode_index)``. The first
-import for a dataset pops an OpenCV click window per episode and writes
-the result back to the sidecar; subsequent imports read the sidecar and
-run non-interactively.
+Prompts are EPISODE-scoped ``object_prompts`` artifacts in the artifact
+store: per episode a ``{frame_idx: prompt}`` map (JSON keys are strings).
+Each episode's first-frame click lives under frame_idx 0; additional
+keyframe clicks (e.g. the last frame for end-anchor) sit under their
+episode-relative frame index. ``prompt-episodes`` is the writing tool.
 """
 from __future__ import annotations
 
-import json
 import os
-import tempfile
-from pathlib import Path
 from typing import Any
 
 import numpy as np
-
-from chuck_dreamer.store import dataset_cache_dir
-
-_SIDECAR_NAME = "object_prompts.json"
 
 # Type alias for what SAM2 / the estimator accepts.
 Prompt = tuple[int, int] | list[tuple[int, int]]
 
 
-def sidecar_path(cache_dir: Path | str, dataset_id: str) -> Path:
-  return dataset_cache_dir(cache_dir, dataset_id) / _SIDECAR_NAME
-
-
-# Sidecar schema (current): per episode, a map of {frame_idx -> prompt}.
-# Each episode's first-frame click lives under frame_idx 0; additional
-# keyframe clicks (e.g. the last frame for end-anchor) sit under their
-# global frame index inside the episode. The legacy schema (per-episode
-# single prompt without a frame_idx wrapper) is auto-migrated on read.
-
-def _episode_entry(blob: dict[str, Any], episode_index: int
-                   ) -> dict[int, "Prompt"] | None:
-  """Normalize the per-episode entry to ``{frame_idx: prompt}`` or None."""
-  raw = blob.get(str(episode_index))
-  if raw is None:
-    return None
+def _coerce_entry(raw: Any) -> dict[int, "Prompt"]:
+  """Normalize a store payload to ``{frame_idx: prompt}``. The legacy
+  single-prompt form (a bare ``[u, v]``) is treated as the frame-0 click."""
   if isinstance(raw, dict):
     out: dict[int, "Prompt"] = {}
     for k, v in raw.items():
@@ -55,125 +33,39 @@ def _episode_entry(blob: dict[str, Any], episode_index: int
         continue
       out[fi] = _coerce_prompt(v)
     return out
-  # Legacy single-prompt form: treat as frame 0 click.
   return {0: _coerce_prompt(raw)}
 
 
-def load_prompt(
-  cache_dir: Path | str, dataset_id: str, episode_index: int,
-) -> Prompt | None:
-  """Return the first-frame (frame 0) cached prompt for an episode."""
-  p = sidecar_path(cache_dir, dataset_id)
-  if not p.exists():
-    return None
-  try:
-    blob = json.loads(p.read_text())
-  except (json.JSONDecodeError, OSError):
-    return None
-  entry = _episode_entry(blob, episode_index)
-  if entry is None:
-    return None
-  return entry.get(0)
+def load_keyframe_prompts(store: Any, dataset_id: str,
+                          episode_index: int) -> dict[int, Prompt]:
+  """The full per-frame prompt map for an episode (empty if unannotated)."""
+  from chuck_dreamer.store import for_episode
 
-
-def load_keyframe_prompts(
-  cache_dir: Path | str, dataset_id: str, episode_index: int,
-) -> dict[int, Prompt]:
-  """Return the full per-frame prompt map for an episode (may be empty)."""
-  p = sidecar_path(cache_dir, dataset_id)
-  if not p.exists():
+  scope = for_episode(dataset_id, episode_index)
+  if not store.has("object_prompts", scope):
     return {}
-  try:
-    blob = json.loads(p.read_text())
-  except (json.JSONDecodeError, OSError):
-    return {}
-  entry = _episode_entry(blob, episode_index)
-  return entry or {}
+  payload, _ = store.get("object_prompts", scope)
+  return _coerce_entry(payload)
 
 
-def save_prompt(
-  cache_dir: Path | str, dataset_id: str, episode_index: int, prompt: Prompt,
-) -> Path:
-  """Save a first-frame (frame 0) prompt for an episode. Back-compat
-  wrapper around ``save_keyframe_prompt(..., frame_index=0)``.
+def save_keyframe_prompt(store: Any, dataset_id: str,
+                         episode_index: int, frame_index: int, prompt: Prompt,
+                         *, advisory: dict[str, str] | None = None) -> None:
+  """Merge a ``(episode, frame_index) -> prompt`` keyframe into the
+  episode's ``object_prompts`` artifact.
+
+  ``advisory`` records pre-computed inputs an assisted proposal leaned on
+  (calibration hashes) — re-annotation hints, never staleness (spec §9.3).
   """
-  return save_keyframe_prompt(cache_dir, dataset_id, episode_index, 0, prompt)
+  from chuck_dreamer.store import annotation_record, for_episode
 
-
-def save_keyframe_prompt(
-  cache_dir: Path | str, dataset_id: str,
-  episode_index: int, frame_index: int, prompt: Prompt,
-) -> Path:
-  """Atomically merge a ``(episode, frame_index) -> prompt`` keyframe
-  into the sidecar.
-
-  Per-episode entries are normalized into the new ``{frame_idx: prompt}``
-  shape on merge; legacy single-prompt entries get migrated transparently.
-  """
-  p = sidecar_path(cache_dir, dataset_id)
-  p.parent.mkdir(parents=True, exist_ok=True)
-  blob: dict[str, Any] = {}
-  if p.exists():
-    try:
-      blob = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-      blob = {}
-
-  ep_key = str(episode_index)
-  existing = _episode_entry(blob, episode_index) or {}
+  scope = for_episode(dataset_id, episode_index)
+  existing = load_keyframe_prompts(store, dataset_id, episode_index)
   existing[int(frame_index)] = _coerce_prompt(prompt)
-  blob[ep_key] = {str(fi): _prompt_to_json(pr) for fi, pr in sorted(existing.items())}
-
-  fd, tmp = tempfile.mkstemp(prefix=".prompts-", suffix=".json", dir=str(p.parent))
-  try:
-    with os.fdopen(fd, "w") as f:
-      json.dump(blob, f, indent=2, sort_keys=True)
-    os.replace(tmp, p)
-  except Exception:
-    if os.path.exists(tmp):
-      os.unlink(tmp)
-    raise
-  return p
-
-
-def prompt_or_click(
-  cache_dir: Path | str,
-  dataset_id: str,
-  episode_index: int,
-  first_frame: np.ndarray,
-  *,
-  banner: str | None = None,
-  interactive: bool | None = None,
-) -> Prompt | None:
-  """Resolve a first-frame prompt: prefer the sidecar, fall back to a click.
-
-  When ``interactive`` is ``False`` (or auto-detected to be False because
-  no display is available) and no sidecar entry exists, raise a
-  ``RuntimeError`` naming the sidecar path so headless batch runs fail
-  loudly instead of hanging on a `cv2` window that has nowhere to draw.
-
-  Returns ``None`` only if the user cancels the click window.
-  """
-  cached = load_prompt(cache_dir, dataset_id, episode_index)
-  if cached is not None:
-    return cached
-
-  if interactive is None:
-    interactive = _has_display()
-  if not interactive:
-    raise RuntimeError(
-      f"no prompt cached for {dataset_id!r} episode {episode_index} at "
-      f"{sidecar_path(cache_dir, dataset_id)} and no interactive display is "
-      f"available. Either run an interactive import once to populate the "
-      f"sidecar, or write the file manually as "
-      f"{{\"{episode_index}\": [u, v]}}.")
-
-  msg = banner or f"{dataset_id}  episode {episode_index}"
-  prompt = click_object(first_frame, banner=msg)
-  if prompt is None:
-    return None
-  save_prompt(cache_dir, dataset_id, episode_index, prompt)
-  return prompt
+  payload = {str(fi): _prompt_to_json(pr) for fi, pr in sorted(existing.items())}
+  store.put("object_prompts", scope,
+            payload, annotation_record("object_prompts", scope,
+                                       "prompt-episodes", advisory=advisory))
 
 
 def click_object(

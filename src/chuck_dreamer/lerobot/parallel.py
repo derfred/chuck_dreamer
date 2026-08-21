@@ -43,6 +43,8 @@ from typing import TYPE_CHECKING, Any, Iterator
 from chuck_dreamer.common.episode import Episode
 from chuck_dreamer.common.episode_writer import EpisodeWriter
 
+from .trackset import EpisodeScope, TrackSet, run_episode
+
 if TYPE_CHECKING:
   from chuck_dreamer.lerobot.episode_spec import EpisodeSlice
   from .pipeline import Run
@@ -88,33 +90,33 @@ def _worker_main(
   source_repo: str,
   output_dir: str,
   fmt: str,
-  worker_stage_names: tuple[str, ...],
+  worker_node_names: tuple[str, ...],
   task_q: "mp.Queue[Any]",
   result_q: "mp.Queue[_Result]",
 ) -> None:
   """Worker-process entrypoint: build a CPU-only context + the run's worker-lane
-  stages once, then drain ``task_q``, running those stages from the handed-in
+  nodes once, then drain ``task_q``, running those nodes from the handed-in
   masks and writing each episode, until a ``_STOP`` sentinel arrives.
 
-  ``worker_stage_names`` is the dependency-ordered list of ``"worker"``-lane
-  stage names the parent resolved from the enabled flags (today just
+  ``worker_node_names`` is the dependency-ordered list of ``"worker"``-lane
+  node names the parent resolved from the enabled flags (today just
   ``object_pose``; resolving by name keeps the worker correct if more are
-  added). The producer's masks ride *inside* ``task.episode`` as a non-persisted
-  ``object_masks`` field, so ``object_pose`` reads them off the episode exactly
-  as in the serial path — no ctx re-seeding, no separate mask channel.
+  added). The producer's masks ride *inside* ``task.episode`` as non-persisted
+  ``object_masks`` / ``object_masks.valid`` fields, so the worker's TrackSet
+  reconstructs the validity-carrying track exactly as in the serial path — no
+  ctx re-seeding, no separate mask channel.
 
   Imports stay torch-free: a worker only needs the calibration/mesh loaders and
   the writer, so ``spawn`` doesn't pay torch / CUDA init and never inherits a
   forked CUDA context. Per-episode failures are reported as ``_Result(error=)``
   rather than crashing the pool, so one bad episode doesn't sink the run."""
-  # Built lazily inside the worker so the parent never imports the stage
+  # Built lazily inside the worker so the parent never imports the node
   # module's transitive deps before ``spawn``.
-  from .stages.base import RunContext
-  from .stages.registry import build_registry
+  from .context import RunContext
+  from .nodes import NODE_TYPES
 
   ctx = RunContext(config=config, source_repo=source_repo)
-  registry = build_registry(ctx)
-  stages = [registry[name] for name in worker_stage_names]
+  nodes = [NODE_TYPES[name](ctx) for name in worker_node_names]
   writer = EpisodeWriter(output_dir, format=fmt)
 
   while True:
@@ -124,10 +126,11 @@ def _worker_main(
     task: _Task = item
     try:
       ctx.episode_index = task.episode_index
-      for stage in stages:
-        stage.apply(task.episode, task.metadata)
+      ts = TrackSet(EpisodeScope(source_repo, task.episode_index),
+                    task.episode, task.metadata)
+      run_episode(nodes, ts)
       name_suffix = task.metadata.pop("_name_suffix")
-      out_path = writer.write_episode(
+      out_path    = writer.write_episode(
         task.episode, metadata=task.metadata, name_suffix=name_suffix)
       result_q.put(_Result(task.episode_index, out_path=out_path))
     except Exception as exc:  # noqa: BLE001 — ship the failure back, don't crash the pool
@@ -186,12 +189,13 @@ def _producer_main(
         continue
       episode, metadata, name_suffix = assembled
 
-      # Run the producer-lane stages (ee_pos + SAM2 segmentation) on this
-      # producer's ctx/device. The SAM2 masks land on the episode itself as a
-      # non-persisted field, so they travel to the worker with the episode —
-      # nothing to lift off the ctx.
-      for stage in run.lane_pipeline(sl.episode_index, "producer"):
-        stage.apply(episode, metadata)
+      # Run the producer-lane nodes (the EE chain + SAM2 segmentation) on
+      # this producer's ctx/device, through the harness. The SAM2 masks land
+      # on the episode itself as a non-persisted field, so they travel to the
+      # worker with the episode — nothing to lift off the ctx.
+      ts = TrackSet(EpisodeScope(run.dataset_id, sl.episode_index),
+                    episode, metadata)
+      run_episode(run.lane_pipeline(sl.episode_index, "producer"), ts)
 
       if has_worker_stages:
         # The worker writes; pass the name suffix through metadata (it pops it
@@ -243,14 +247,14 @@ def import_dataset_parallel(
   if devices is None or not devices:
     devices = [None]  # type: ignore[list-item]  # single producer, configured device
 
-  # The run's worker-lane stages, dependency-ordered (today just object_pose).
+  # The run's worker-lane nodes, dependency-ordered (today just object_pose).
   # If empty (e.g. --no-object-pose), producers write episodes directly and we
-  # start no worker pool. Resolved off the first episode's pipeline — the stage
+  # start no worker pool. Resolved off the first episode's pipeline — the node
   # *set* is the same for every episode (it's flag-driven, not episode-driven).
-  worker_stage_names = tuple(
-    s.name for s in run.pipeline(slices[0].episode_index)
-    if getattr(s, "lane", "worker") == "worker")
-  has_worker_stages = bool(worker_stage_names)
+  worker_node_names = tuple(
+    n.name for n in run.pipeline(slices[0].episode_index)
+    if getattr(n, "lane", "worker") == "worker")
+  has_worker_stages = bool(worker_node_names)
 
   # ``spawn`` (not fork): the workers must not inherit any CUDA context, and a
   # producer thread may have initialised CUDA in this process by the time a
@@ -272,7 +276,7 @@ def import_dataset_parallel(
       p: mp.process.BaseProcess = mp_ctx.Process(
         target=_worker_main,
         args=(run.ctx.config, run.dataset_id, output_dir, format,
-              worker_stage_names, task_q, result_q),
+              worker_node_names, task_q, result_q),
         daemon=True,
       )
       p.start()
@@ -295,8 +299,8 @@ def import_dataset_parallel(
   # Drain results until every episode is accounted for. Producers run in this
   # process (join them to know when production is done); workers are separate
   # processes (sentinel + join).
-  n_expected = len(slices)
-  n_done = 0
+  n_expected        = len(slices)
+  n_done            = 0
   errors: list[str] = []
 
   # A background thread joins producers then sends worker stop sentinels, so

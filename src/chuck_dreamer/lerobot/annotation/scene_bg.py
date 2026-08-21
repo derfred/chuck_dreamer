@@ -8,8 +8,9 @@ like without the object". Subtracting this from a frame from episodes
 
 The image-space model itself (:class:`SceneBackground`, the ROI helpers)
 lives in ``chuck_dreamer.perception.scene_bg``; this module owns the
-LeRobot sampling and the ``<cache>/<slug>/scene_bg.npz`` cache (paid once
-per dataset, ~10 s to rebuild).
+LeRobot sampling and a private tool cache under
+``~/.cache/chuck_dreamer/scene_bg/<slug>.npz`` (paid once per dataset,
+~10 s to rebuild — deliberately *not* an artifact-store entry, spec §6).
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from typing import Any
 import numpy as np
 
 from chuck_dreamer.perception.scene_bg import SceneBackground, build_mat_mask
-from chuck_dreamer.store import dataset_cache_dir
+from chuck_dreamer.store import dataset_slug
 
 from .dataset import episode_bounds_from_meta, get_frame
 
@@ -65,13 +66,13 @@ def build_scene_bg(
   return SceneBackground(median=median, std=std, n_frames=len(stack))
 
 
-def scene_bg_path(cache_dir: Path | str, dataset_id: str) -> Path:
-  return dataset_cache_dir(cache_dir, dataset_id) / "scene_bg.npz"
+def scene_bg_path(dataset_id: str) -> Path:
+  return (Path.home() / ".cache" / "chuck_dreamer" / "scene_bg"
+          / f"{dataset_slug(dataset_id)}.npz")
 
 
-def save_scene_bg(cache_dir: Path | str, dataset_id: str,
-                  bg: SceneBackground) -> Path:
-  p = scene_bg_path(cache_dir, dataset_id)
+def save_scene_bg(dataset_id: str, bg: SceneBackground) -> Path:
+  p = scene_bg_path(dataset_id)
   p.parent.mkdir(parents=True, exist_ok=True)
   payload: dict[str, np.ndarray] = {
     "median":   bg.median,
@@ -85,9 +86,8 @@ def save_scene_bg(cache_dir: Path | str, dataset_id: str,
   return p
 
 
-def load_scene_bg(cache_dir: Path | str, dataset_id: str
-                  ) -> SceneBackground | None:
-  p = scene_bg_path(cache_dir, dataset_id)
+def load_scene_bg(dataset_id: str) -> SceneBackground | None:
+  p = scene_bg_path(dataset_id)
   if not p.exists():
     return None
   with np.load(p) as f:
@@ -101,7 +101,7 @@ def load_scene_bg(cache_dir: Path | str, dataset_id: str
 
 
 def ensure_scene_bg(
-  cache_dir: Path | str, dataset_id: str, camera_key: str,
+  dataset_id: str, camera_key: str,
   episode_idx: int, n_samples: int = 16, rebuild: bool = False,
   calibration: "Any | None" = None,
   ol_cfg: "Any | None" = None,
@@ -116,7 +116,7 @@ def ensure_scene_bg(
   """
   bg: SceneBackground | None = None
   if not rebuild:
-    bg = load_scene_bg(cache_dir, dataset_id)
+    bg = load_scene_bg(dataset_id)
   if bg is None:
     bg = build_scene_bg(dataset_id, camera_key, episode_idx, n_samples)
   needs_mat = (bg.mat_mask is None) or rebuild_mat_mask
@@ -142,5 +142,5 @@ def ensure_scene_bg(
     except Exception as e:
       logger.warning("[bg] %s: could not build mat_mask (%s); proceeding "
                      "without ROI.", dataset_id, e)
-  save_scene_bg(cache_dir, dataset_id, bg)
+  save_scene_bg(dataset_id, bg)
   return bg

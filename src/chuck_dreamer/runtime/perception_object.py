@@ -10,8 +10,9 @@ It is **wired but off by default** (the ``runtime.perception`` config list is
 empty). Two real dependencies keep it out of the default sim loop:
 
 * **Calibration is an M4 deliverable.** ``load_calibration`` is strict —
-  it raises if intrinsics/extrinsics aren't cached — so this module's
-  ``from_config`` fails fast with a clear message when calibration is absent.
+  it raises if intrinsics/extrinsics aren't in the artifact store — so this
+  module's ``from_config`` fails fast with a clear message when calibration
+  is absent.
 * **It is not real-time** (the estimator's CPU rasterization + SAM2 are slow).
   That is acceptable per spec §3.2/§4.1 — inline perception reduces the policy
   rate while the control loop keeps slewing — but it is why M3 ships the cheap
@@ -47,8 +48,10 @@ class ObjectLocalizerModule:
 
   @classmethod
   def from_config(cls, cfg, **params) -> "ObjectLocalizerModule":
+    from omegaconf import OmegaConf
+
     from chuck_dreamer.perception import ObjectPoseEstimator, init_from_config
-    from chuck_dreamer.store import load_calibration
+    from chuck_dreamer.store import ArtifactStore, load_calibration
 
     prompt = params.get("first_frame_prompt")
     if prompt is None:
@@ -62,9 +65,15 @@ class ObjectLocalizerModule:
         "cached camera calibration")
 
     ol = init_from_config(cfg)
-    # Strict load — raises CalibrationMissingError if intrinsics/extrinsics are
-    # not cached (calibration is the M4 deliverable; surface that here).
-    calibration = load_calibration(Path(ol.cache_dir), str(dataset_id))
+    store_root = OmegaConf.select(cfg, "store.root") if cfg is not None else None
+    if not store_root:
+      raise ValueError(
+        "ObjectLocalizerModule reads calibration from the artifact store; "
+        "set store.root in the config")
+    # Strict load — raises MissingArtifact if intrinsics/extrinsics are not
+    # in the store (calibration is the M4 deliverable; surface that here).
+    calibration, _versions = load_calibration(
+      ArtifactStore(Path(store_root)), str(dataset_id))
     estimator = ObjectPoseEstimator(
       calibration=calibration,
       mesh_path=Path(ol.mesh_path),

@@ -1,177 +1,200 @@
-"""Tests for ``import-lerobot --doctor`` (``_doctor_import_lerobot``).
+"""Tests for the declaration- and store-driven doctor (``lerobot.doctor``).
 
-The doctor's whole point is to be *generic*: it drives the same
-:class:`Run` the importer would use, iterating each selected episode's
-pipeline and reporting every stage's ``requirements()`` without hard-coding
-any artifact. We verify that with a fake ``Run`` whose pipeline yields fake
-stages whose requirements we control, then assert the doctor's pass/fail
-result and its emitted lines.
+The doctor derives every leaf input from the node declarations of the run's
+pipeline and checks it against the artifact store / assets at the resolved
+scope key — no per-node ``requirements()`` lists. These tests drive it with
+a fake ``Run`` whose pipeline yields fake nodes with controlled
+declarations, over a real :class:`ArtifactStore` in a tmp dir.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
-from chuck_dreamer.lerobot import cli as lcli
-from chuck_dreamer.lerobot.stages import Requirement
+import pytest
+from omegaconf import OmegaConf
+
+from chuck_dreamer.lerobot.context import RunContext
+from chuck_dreamer.lerobot.doctor import doctor_run
+from chuck_dreamer.store import (
+  ArtifactStore,
+  annotation_record,
+  for_camera,
+  for_dataset,
+  for_episode,
+)
+
+DS = "user/ds"
 
 
-class _FakeStage:
-  def __init__(self, name, reqs):
-    self.name = name
-    self._reqs = reqs
-    self.requires = ()
-    self.produces = ()
-
-  def requirements(self):
-    return self._reqs
+def _node(name, inputs, outputs=()):
+  return SimpleNamespace(
+    name=name,
+    inputs=tuple(SimpleNamespace(name=i) for i in inputs),
+    outputs=tuple(SimpleNamespace(name=o) for o in outputs),
+  )
 
 
 class _FakeRun:
-  """Stand-in for Run: the doctor reads .spec/.with_* and calls
-  read_slices() + pipeline(ep_idx). We yield the same fake stages for every
-  episode and expose a configurable selected-episode list."""
-
-  def __init__(self, stages, *, episodes=(0,), with_ee_pos=True,
-               with_object_pose=True, dataset_id="user/ds"):
-    self.spec = SimpleNamespace(dataset_id=dataset_id)
-    self.params = {"with_ee_pos": with_ee_pos,
-                   "with_object_pose": with_object_pose}
-    self._stages = stages
+  def __init__(self, nodes, ctx, *, episodes=(0,), params=None):
+    self.spec = SimpleNamespace(dataset_id=DS)
+    self.params = params or {}
+    self.ctx = ctx
+    self._nodes = nodes
     self._episodes = episodes
 
   def read_slices(self):
-    slices = [SimpleNamespace(episode_index=i) for i in self._episodes]
-    return slices, "observation.images.wrist"
+    return [SimpleNamespace(episode_index=i) for i in self._episodes], "k"
 
   def pipeline(self, episode_index):
-    return list(self._stages)
+    self.ctx.episode_index = episode_index
+    return list(self._nodes)
 
 
-def _doctor(run, episode_config_path=None):
-  return lcli._doctor_import_lerobot(run, episode_config_path=episode_config_path)
+@pytest.fixture
+def store(tmp_path):
+  return ArtifactStore(tmp_path / "store")
 
 
-def _existing(tmp_path, name="ok.json") -> Path:
-  p = tmp_path / name
-  p.write_text("{}")
-  return p
+@pytest.fixture
+def ctx(tmp_path, store):
+  cfg = OmegaConf.create({"store": {"root": str(store.root)}})
+  c = RunContext(source_repo=DS, config=cfg)
+  mesh = tmp_path / "mesh.obj"
+  mesh.write_text("o mesh\n")
+  c._ol_cfg = SimpleNamespace(mesh_path=str(mesh))
+  return c
 
 
-def _missing(tmp_path, name="missing.json") -> Path:
-  return tmp_path / name
+INTRINSICS = {
+  "image_size": [4, 3],
+  "K": [[1.0, 0.0, 2.0], [0.0, 1.0, 1.5], [0.0, 0.0, 1.0]],
+  "dist": [0.0] * 5,
+  "rms_px": 0.1,
+  "n_frames_used": 1,
+}
+EXTRINSICS = {
+  "R": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+  "t": [0.0, 0.0, 500.0],
+  "rms_px": 0.2,
+}
+
+
+def _seed_calibration(store):
+  store.put("intrinsics", for_camera("front"), INTRINSICS,
+            annotation_record("intrinsics", for_camera("front"), "test"))
+  store.put("dataset_config", for_dataset(DS),
+            {"camera_id": "front", "touchpoint_variant": None},
+            annotation_record("dataset_config", for_dataset(DS), "test"))
+  store.put("extrinsics", for_dataset(DS), EXTRINSICS,
+            annotation_record("extrinsics", for_dataset(DS), "test"))
+
+
+def _seed_prompts(store, episodes=(0,)):
+  for ep in episodes:
+    store.put("object_prompts", for_episode(DS, ep), {"0": [1, 2]},
+              annotation_record("object_prompts", for_episode(DS, ep), "test"))
 
 
 # ---------------------------------------------------------------------------
-# all present / some missing
+# pass / fail per leaf kind
 # ---------------------------------------------------------------------------
 
 
-def test_doctor_passes_when_all_requirements_satisfied(tmp_path):
-  reqs = [Requirement("artifact A", _existing(tmp_path, "a"), "make a")]
-  assert _doctor(_FakeRun([_FakeStage("s", reqs)])) is True
+def test_doctor_passes_when_store_holds_everything(store, ctx, capsys):
+  _seed_calibration(store)
+  _seed_prompts(store)
+  nodes = [_node("segmentation", ["object_prompts", "dataset.episodes"]),
+           _node("object_pose", ["intrinsics", "extrinsics", "object_mesh"])]
+  assert doctor_run(_FakeRun(nodes, ctx)) is True
+  out = capsys.readouterr().out
+  assert "MISS" not in out
 
 
-def test_doctor_fails_when_a_requirement_missing(tmp_path):
-  reqs = [
-    Requirement("present", _existing(tmp_path, "a"), "make a"),
-    Requirement("absent", _missing(tmp_path, "b"), "make b"),
+def test_doctor_reports_missing_extrinsics_with_remediation(store, ctx, capsys):
+  _seed_calibration(store)
+  # wipe extrinsics only
+  (store.root / "dataset").exists()
+  import shutil
+  shutil.rmtree(store.root)
+  store.put("dataset_config", for_dataset(DS),
+            {"camera_id": "front", "touchpoint_variant": None},
+            annotation_record("dataset_config", for_dataset(DS), "test"))
+  nodes = [_node("object_pose", ["extrinsics"])]
+  assert doctor_run(_FakeRun(nodes, ctx)) is False
+  out = capsys.readouterr().out
+  assert "extrinsics" in out and "MISS" in out
+
+
+def test_doctor_reports_table_to_arm_remediation(store, ctx, capsys):
+  nodes = [_node("ee_pos_table", ["table_to_arm"])]
+  assert doctor_run(_FakeRun(nodes, ctx)) is False
+  out = capsys.readouterr().out
+  assert "extract-table-to-arm" in out
+
+
+def test_doctor_names_missing_prompt_tool(store, ctx, capsys):
+  nodes = [_node("segmentation", ["object_prompts"])]
+  assert doctor_run(_FakeRun(nodes, ctx)) is False
+  out = capsys.readouterr().out
+  assert "prompt-episodes" in out
+
+
+# ---------------------------------------------------------------------------
+# declaration-derived leaves
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_skips_inputs_produced_upstream(store, ctx, capsys):
+  # object_masks is produced by segmentation, so obj_uv_extraction's input
+  # must not be treated as a leaf.
+  _seed_prompts(store)
+  nodes = [
+    _node("segmentation", ["object_prompts"], outputs=["object_masks"]),
+    _node("obj_uv_extraction", ["object_masks", "image"]),
   ]
-  assert _doctor(_FakeRun([_FakeStage("s", reqs)])) is False
+  assert doctor_run(_FakeRun(nodes, ctx)) is True
+  assert "object_masks" not in capsys.readouterr().out
 
 
-def test_doctor_reports_remediation_for_missing(tmp_path, capsys):
-  reqs = [Requirement("absent", _missing(tmp_path), "run the fix command")]
-  _doctor(_FakeRun([_FakeStage("s", reqs)]))
+def test_doctor_skips_dataset_supplied_inputs(store, ctx, capsys):
+  nodes = [_node("ee", ["timestamp", "image", "joint_qpos", "dataset.episodes"])]
+  assert doctor_run(_FakeRun(nodes, ctx)) is True
   out = capsys.readouterr().out
-  assert "absent" in out
-  assert "run the fix command" in out
+  assert "timestamp" not in out
 
 
-def test_doctor_is_generic_over_whatever_stages_declare(tmp_path, capsys):
-  # The doctor must surface requirements from arbitrary stages — proving it
-  # doesn't hard-code the known artifact set.
-  reqs = [Requirement("totally novel artifact", _missing(tmp_path), "do it")]
-  ok = _doctor(_FakeRun([_FakeStage("brand_new_stage", reqs)]))
-  assert ok is False
-  assert "totally novel artifact" in capsys.readouterr().out
+def test_doctor_is_generic_over_declarations(store, ctx, capsys):
+  # A brand-new node consuming a known leaf type is checked with no doctor
+  # edit — the declarations drive everything.
+  nodes = [_node("brand_new_node", ["intrinsics"])]
+  assert doctor_run(_FakeRun(nodes, ctx)) is False
+  assert "intrinsics" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
-# dedup by (label, path)
+# scope keys: per-episode checks + dedupe
 # ---------------------------------------------------------------------------
 
 
-def test_doctor_dedups_requirements_sharing_a_path(tmp_path, capsys):
-  # Two stages naming the same artifact (e.g. segmentation + pose both want
-  # the mesh) should print it once — even though it recurs across every
-  # episode's pipeline.
-  shared = _missing(tmp_path, "mesh.obj")
-  s1 = _FakeStage("a", [Requirement("object mesh", shared, "set mesh")])
-  s2 = _FakeStage("b", [Requirement("object mesh", shared, "set mesh")])
-  _doctor(_FakeRun([s1, s2], episodes=(0, 1, 2)))
+def test_doctor_checks_prompts_per_episode(store, ctx, capsys):
+  _seed_prompts(store, episodes=(0,))   # ep 1 unannotated
+  nodes = [_node("segmentation", ["object_prompts"])]
+  assert doctor_run(_FakeRun(nodes, ctx, episodes=(0, 1))) is False
   out = capsys.readouterr().out
-  assert out.count("object mesh") == 1
+  assert "episode 0" in out and "episode 1" in out
 
 
-# ---------------------------------------------------------------------------
-# per-episode requirements (distinct label) are checked once each
-# ---------------------------------------------------------------------------
-
-
-def test_doctor_checks_per_episode_requirements_separately(tmp_path, capsys):
-  # A stage whose requirement label varies per episode must be reported for
-  # each episode, not deduped away.
-  class _PerEpStage:
-    name = "seg"
-    requires = ()
-    produces = ()
-
-    def __init__(self, run):
-      self._run = run
-
-    def requirements(self):
-      ep = self._run._current_ep
-      return [Requirement(f"prompt (ep {ep})", _missing(tmp_path), "prompt it")]
-
-  run = _FakeRun([], episodes=(0, 1))
-
-  # Track which episode pipeline() was asked for so the stage can label by it.
-  run._current_ep = 0
-  stage = _PerEpStage(run)
-
-  def pipeline(episode_index):
-    run._current_ep = episode_index
-    return [stage]
-
-  run.pipeline = pipeline
-  _doctor(run)
+def test_doctor_dedups_shared_leaves(store, ctx, capsys):
+  # Two nodes and three episodes naming the same DATASET-scoped artifact
+  # print it once.
+  nodes = [_node("a", ["extrinsics"]), _node("b", ["extrinsics"])]
+  doctor_run(_FakeRun(nodes, ctx, episodes=(0, 1, 2)))
   out = capsys.readouterr().out
-  assert "prompt (ep 0)" in out
-  assert "prompt (ep 1)" in out
+  assert out.count("extrinsics @") == 1
 
 
-# ---------------------------------------------------------------------------
-# episode-config / T_world_arm branch (importer-level, not a stage)
-# ---------------------------------------------------------------------------
-
-
-def test_doctor_checks_episode_config_and_fk_when_path_given(tmp_path, capsys):
-  # No stage requirements; the episode-config branch must still check the
-  # config file AND the FK model (FK runs for T_world_arm regardless of
-  # --with-ee-pos).
-  ep_cfg = _existing(tmp_path, "fk_episode_config.json")
-  _doctor(
-    _FakeRun([], with_ee_pos=False, with_object_pose=False),
-    episode_config_path=ep_cfg)
-  out = capsys.readouterr().out
-  assert "fk_episode_config.json" in out
-  assert "FK MuJoCo model" in out
-
-
-def test_doctor_no_episode_config_skips_that_branch(capsys):
-  ok = _doctor(_FakeRun([], with_ee_pos=False, with_object_pose=False))
-  out = capsys.readouterr().out
-  # Nothing to check → passes, and the episode-config artifact isn't named.
-  assert ok is True
-  assert "fk_episode_config.json" not in out
+def test_doctor_fk_model_checked_against_repo_asset(store, ctx, capsys):
+  # The FK model ships in the repo, so this leaf is present.
+  nodes = [_node("ee_pos_arm", ["fk_model", "joint_qpos"])]
+  assert doctor_run(_FakeRun(nodes, ctx)) is True
+  assert "fk_model" in capsys.readouterr().out

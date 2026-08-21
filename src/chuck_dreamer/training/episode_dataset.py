@@ -77,10 +77,58 @@ _HDF5_DATASET = {
   "reward": "rewards",
   "timestamp": "timestamps",
   "joint_qpos": "joint_qpos",
-  "ee_pos": "ee_pos",
-  "ee_quat": "ee_quat",
-  "object_xy": "object_xy",
 }
+
+# Coordinate tracks: optional in the file. New-scheme names carry an explicit
+# frame suffix and are in millimetres; legacy names (sim collector and
+# pre-rename imports) are read as-is. ``_normalize_raw`` below maps whichever
+# is present onto the legacy in-memory keys the trainer consumes.
+_COORD_KEYS = (
+  "ee_pos", "ee_quat", "object_xy", "object_uv",             # legacy on-disk
+  "ee_pos_arm", "ee_quat_arm", "ee_pos_table", "ee_quat_table",
+  "obj_pos_table", "obj_pos_arm", "obj_uv",                  # frame-suffixed, mm
+)
+
+_ACTION_KEYS = ("joint_action", "ee_action", "ee_action_arm", "ee_action_table")
+
+
+def _normalize_raw(raw: dict[str, Any], path: str | Path) -> dict[str, Any]:
+  """Map frame-suffixed mm tracks onto the legacy in-memory keys.
+
+  The trainer consumes ``ee_pos`` (m, arm frame), ``ee_quat``, ``ee_action``
+  (m + quat), ``object_xy`` (mm, table) and ``object_uv`` (px) — the
+  runtime feeds the same convention live, so the on-disk rename converts at
+  this boundary instead of rippling through the model stack:
+
+    * ``ee_pos``    ← ``ee_pos_arm`` / 1000
+    * ``ee_quat``   ← ``ee_quat_arm``
+    * ``ee_action`` ← ``ee_action_arm`` with mm position channels / 1000
+    * ``object_xy`` ← ``obj_pos_table[:, :2]``  (already mm)
+    * ``object_uv`` ← ``obj_uv``
+
+  Coordinate tracks a file simply doesn't carry (its import stages were
+  disabled) are zero-filled, preserving the historical importer behavior.
+  Validity siblings follow their track.
+  """
+  def alias(dst: str, src: str, convert=None) -> None:
+    if dst not in raw and src in raw:
+      arr = np.asarray(raw[src], dtype=np.float32)
+      raw[dst] = convert(arr) if convert is not None else arr
+      if f"{src}.valid" in raw and f"{dst}.valid" not in raw:
+        raw[f"{dst}.valid"] = raw[f"{src}.valid"]
+
+  alias("ee_pos", "ee_pos_arm", lambda a: a / 1000.0)
+  alias("ee_quat", "ee_quat_arm")
+  alias("ee_action", "ee_action_arm",
+        lambda a: np.concatenate([a[:, :3] / 1000.0, a[:, 3:]], axis=1))
+  alias("object_xy", "obj_pos_table", lambda a: a[:, :2])
+  alias("object_uv", "obj_uv")
+
+  T = len(np.asarray(raw["timestamp"]))
+  for key, dim in (("ee_pos", 3), ("ee_quat", 4), ("object_xy", 2)):
+    if key not in raw:
+      raw[key] = np.zeros((T, dim), dtype=np.float32)
+  return raw
 
 
 def _load_hdf5_episode(path: str | Path) -> RawEpisode:
@@ -96,17 +144,30 @@ def _load_hdf5_episode(path: str | Path) -> RawEpisode:
     for key, dataset in _HDF5_DATASET.items():
       raw[key] = np.asarray(f[dataset][()])
 
-    if "object_uv" in f:
-      raw["object_uv"] = np.asarray(f["object_uv"][()], dtype=np.float32)
+    # Optional: imported LeRobot episodes carry the radians conversion as its
+    # own dataset; sim-collected ones have only joint_qpos (already radians).
+    if "joint_qpos_rad" in f:
+      raw["joint_qpos_rad"] = np.asarray(f["joint_qpos_rad"][()])
 
-    has_joint = "joint_action" in f
-    has_ee    = "ee_action"    in f
-    if has_joint:
-      raw["joint_action"] = np.asarray(f["joint_action"][()])
-    if has_ee:
-      raw["ee_action"] = np.asarray(f["ee_action"][()])
-    if not (has_joint or has_ee):
-      raise KeyError(f"{path}: missing action dataset (joint_action and/or ee_action)")
+    for key in _COORD_KEYS:
+      if key in f:
+        raw[key] = np.asarray(f[key][()], dtype=np.float32)
+
+    # Validity siblings written by the import harness (`<name>.valid`,
+    # (T,) bool) — picked up generically so a new validity-carrying track
+    # needs no reader edit.
+    for key in f.keys():
+      if key.endswith(".valid"):
+        raw[key] = np.asarray(f[key][()], dtype=bool)
+
+    found_action = False
+    for key in _ACTION_KEYS:
+      if key in f:
+        raw[key] = np.asarray(f[key][()])
+        found_action = True
+    if not found_action:
+      raise KeyError(f"{path}: missing action dataset (joint_action and/or an "
+                     "ee_action variant)")
 
     if "segmentation" in f:
       seg_grp = f["segmentation"]
@@ -124,7 +185,7 @@ def _load_hdf5_episode(path: str | Path) -> RawEpisode:
         raw["tags"] = tuple(
           t.decode("utf-8") if isinstance(t, bytes) else str(t) for t in raw_tags
         )
-  return EpisodeData.from_arrays(raw)
+  return EpisodeData.from_arrays(_normalize_raw(raw, path))
 
 
 def _collect_rerun_chunks(path: str | Path) -> tuple[dict[str, list[Any]], dict[str, dict]]:
@@ -273,28 +334,35 @@ def _load_rerun_episode(path: str | Path) -> RawEpisode:
     return _ordered_scalar_column(by_entity[entity])
 
   raw: dict[str, Any] = {}
-  has_joint = "/joint_action" in by_entity
-  has_ee    = "/ee_action"    in by_entity
-  if has_joint:
-    raw["joint_action"] = _scalars("/joint_action")
-  if has_ee:
-    raw["ee_action"] = _scalars("/ee_action")
-  if not (has_joint or has_ee):
-    raise KeyError(f"{path}: missing action entity (/joint_action and/or /ee_action)")
+  found_action = False
+  for key in _ACTION_KEYS:
+    if f"/{key}" in by_entity:
+      raw[key] = _scalars(f"/{key}")
+      found_action = True
+  if not found_action:
+    raise KeyError(f"{path}: missing action entity (/joint_action and/or an "
+                   "/ee_action variant)")
 
   raw["reward"] = _scalars("/reward").reshape(-1)
   raw["joint_qpos"] = _scalars("/joint_qpos")
-  raw["ee_pos"] = _scalars("/ee_pos")
-  raw["ee_quat"] = _scalars("/ee_quat")
-  raw["object_xy"] = _scalars("/object_xy")
-  if "/object_uv" in by_entity:
-    raw["object_uv"] = _scalars("/object_uv").astype(np.float32, copy=False)
+  # Optional: imported LeRobot episodes carry the radians conversion as its
+  # own track; sim-collected ones have only joint_qpos (already radians).
+  if "/joint_qpos_rad" in by_entity:
+    raw["joint_qpos_rad"] = _scalars("/joint_qpos_rad")
+  for key in _COORD_KEYS:
+    if f"/{key}" in by_entity:
+      raw[key] = _scalars(f"/{key}").astype(np.float32, copy=False)
+
+  # Validity siblings (`<name>.valid`) — logged as 0/1 scalars by the writer.
+  for entity in by_entity:
+    if entity.endswith(".valid"):
+      raw[entity.lstrip("/")] = _scalars(entity).reshape(-1).astype(bool)
 
   _load_rerun_camera(by_entity, static, raw, path)
   _load_rerun_segmentation(by_entity, raw)
   _load_rerun_metadata(static, raw)
 
-  return EpisodeData.from_arrays(raw)
+  return EpisodeData.from_arrays(_normalize_raw(raw, path))
 
 
 def _load_rerun_camera(

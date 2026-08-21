@@ -15,6 +15,7 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import re
 from pathlib import Path
 from typing import Any
 
@@ -169,9 +170,10 @@ def _sha256(data: bytes) -> str:
   return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-def _slug(dataset_id: str) -> str:
-  from .calibration_cache import dataset_slug
-  return dataset_slug(dataset_id)
+def dataset_slug(dataset_id: str) -> str:
+  """Filesystem-safe slug for a HF-style ``user/dataset`` id."""
+  s = dataset_id.replace("/", "__")
+  return re.sub(r"[^A-Za-z0-9_.\-]", "_", s)
 
 
 @dataclass(frozen=True)
@@ -196,7 +198,7 @@ class ArtifactStore:
     if scope.level == "camera":
       return self.root / "camera" / scope.camera          # type: ignore[operator]
     assert scope.dataset is not None
-    d = self.root / "dataset" / _slug(scope.dataset)
+    d = self.root / "dataset" / dataset_slug(scope.dataset)
     if scope.level == "episode":
       d = d / "episode" / f"{scope.episode:05d}"
     return d

@@ -104,47 +104,59 @@ def test_parallel_ee_pos_matches_serial(tmp_path, fake_repo):
 
 
 def test_worker_main_reads_masks_off_episode_and_writes(tmp_path, fake_repo, monkeypatch):
-  # The worker subprocess re-imports stage modules under ``spawn`` and so can't
+  # The worker subprocess re-imports node modules under ``spawn`` and so can't
   # be monkeypatched across the boundary; instead drive ``_worker_main``
-  # directly in-process with the real ``ObjectPoseStage`` replaced (in the
-  # registry it builds from) by a stamp stage. This covers the worker loop's
-  # contract: build worker-lane stages → apply → pop _name_suffix → write → put
-  # _Result, and that the masks ride to the stage *on the episode* (no ctx).
+  # directly in-process with the real ``ObjectPoseNode`` replaced (in the
+  # NODE_TYPES registry it builds from) by a stamp node. This covers the
+  # worker loop's contract: build worker-lane nodes → run through the harness
+  # → pop _name_suffix → write → put _Result, and that the masks (values +
+  # validity) ride to the node *on the episode* (no ctx).
   import queue as _queue
 
-  import chuck_dreamer.lerobot.stages.registry as registry
+  import chuck_dreamer.lerobot.nodes as nodes_pkg
+  from chuck_dreamer.common.tracks import Track, TrackSpec
   from chuck_dreamer.lerobot import parallel
+  from chuck_dreamer.lerobot.harness import InputDecl
   from chuck_dreamer.lerobot.pipeline import Run
 
   seen_masks = {}
 
-  class _StampStage:
+  class _StampNode:
     name = "object_pose"
-    produces = ("object_xy",)
-    requires = ()
+    scope_level = "episode"
     lane = "worker"
+    inputs = (InputDecl("image"), InputDecl("object_masks"))
+    outputs = (TrackSpec("object_xy", np.float32, (2,)),)
 
     def __init__(self, ctx):
       self.ctx = ctx
 
-    def apply(self, episode, metadata):
-      idx = int(metadata["config"]["episode_index"])
-      seen_masks[idx] = episode.get("object_masks")
-      T = len(episode["image"])
-      episode["object_xy"] = np.full((T, 2), float(idx + 1), dtype=np.float32)
+    def requirements(self):
+      return []
 
-  # build_registry references ObjectPoseStage from its own module namespace.
-  monkeypatch.setattr(registry, "ObjectPoseStage", _StampStage)
+    def run(self, view):
+      idx = view.scope.episode_index
+      masks = view.track("object_masks")
+      seen_masks[idx] = (masks.values, masks.valid)
+      T = len(view.track("image"))
+      return [Track(self.outputs[0],
+                    np.full((T, 2), float(idx + 1), dtype=np.float32))]
 
-  # Assemble a real episode the way a producer would, then attach the masks as
-  # a non-persisted scratch field (what segment:object does in the producer).
+  monkeypatch.setitem(nodes_pkg.NODE_TYPES, "object_pose", _StampNode)
+
+  # Assemble a real episode the way a producer would, then attach the masks
+  # as the non-persisted scratch fields the segmentation node commits
+  # (dense stack + validity sibling).
   run = Run(None, es.EpisodeSpec.parse(str(fake_repo)),
             {"with_ee_pos": False, "with_object_pose": False})
   sl = run.slices[0]
   episode, metadata, name_suffix = li.assemble_episode(run, sl)
   metadata["_name_suffix"] = name_suffix
-  masks = [np.ones((H, W), dtype=bool)] * len(episode["image"])
-  episode.set("object_masks", masks, persist=False)
+  T = len(episode["image"])
+  dense = np.ones((T, H, W), dtype=bool)
+  valid = np.ones((T,), dtype=bool)
+  episode.set("object_masks", dense, persist=False)
+  episode.set("object_masks.valid", valid, persist=False)
 
   out = tmp_path / "out"
   task_q: _queue.Queue = _queue.Queue()
@@ -158,14 +170,17 @@ def test_worker_main_reads_masks_off_episode_and_writes(tmp_path, fake_repo, mon
   res = result_q.get_nowait()
   assert res.error is None and res.out_path is not None
   assert Path(res.out_path).exists()
-  # masks rode in on the episode and the stamp ran.
-  assert seen_masks[sl.episode_index] is masks
+  # masks (values + validity) rode in on the episode and the stamp ran.
+  values, seen_valid = seen_masks[sl.episode_index]
+  np.testing.assert_array_equal(values, dense)
+  np.testing.assert_array_equal(seen_valid, valid)
   ep = _episode_arrays(out / "episode-00000.hdf5")
   assert np.all(ep["object_xy"] == sl.episode_index + 1)
   # The scratch masks field was NOT persisted to disk.
   import h5py
   with h5py.File(out / "episode-00000.hdf5", "r") as f:
     assert "object_masks" not in f
+    assert "object_masks.valid" not in f
   # _name_suffix was popped, not persisted into metadata.
   assert "_name_suffix" not in metadata
 
@@ -173,23 +188,27 @@ def test_worker_main_reads_masks_off_episode_and_writes(tmp_path, fake_repo, mon
 def test_worker_main_reports_error_without_crashing(tmp_path, fake_repo, monkeypatch):
   import queue as _queue
 
-  import chuck_dreamer.lerobot.stages.registry as registry
+  import chuck_dreamer.lerobot.nodes as nodes_pkg
   from chuck_dreamer.lerobot import parallel
   from chuck_dreamer.lerobot.pipeline import Run
 
-  class _BoomStage:
+  class _BoomNode:
     name = "object_pose"
-    produces = ()
-    requires = ()
+    scope_level = "episode"
     lane = "worker"
+    inputs = ()
+    outputs = ()
 
     def __init__(self, ctx):
       self.ctx = ctx
 
-    def apply(self, episode, metadata):
+    def requirements(self):
+      return []
+
+    def run(self, view):
       raise ValueError("boom")
 
-  monkeypatch.setattr(registry, "ObjectPoseStage", _BoomStage)
+  monkeypatch.setitem(nodes_pkg.NODE_TYPES, "object_pose", _BoomNode)
 
   run = Run(None, es.EpisodeSpec.parse(str(fake_repo)),
             {"with_ee_pos": False, "with_object_pose": False})

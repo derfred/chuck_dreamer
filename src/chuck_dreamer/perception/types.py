@@ -3,7 +3,7 @@
 Pure dataclass <-> JSON conversion, shared by the import pipeline, the
 annotation tools, and the runtime ``ObjectPoseEstimator``. Persistence
 (where these live on disk) is the store's concern —
-``chuck_dreamer.store.calibration_cache``.
+``chuck_dreamer.store``.
 """
 from __future__ import annotations
 

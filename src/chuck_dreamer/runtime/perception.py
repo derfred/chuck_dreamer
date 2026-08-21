@@ -6,7 +6,7 @@ modules **inline at the start of each policy step**, in order — so slow
 perception reduces the effective policy rate but never touches the control loop
 (which keeps slewing the last published setpoint). This mirrors the offline
 ``Stage`` protocol's ``produces`` / ``requires`` idea
-(``lerobot/stages/base.py``) but is online and stateful: a module may hold
+(``lerobot/nodes``) but is online and stateful: a module may hold
 per-episode warm-start state, cleared by :meth:`PerceptionModule.reset` at the
 top of each episode.
 

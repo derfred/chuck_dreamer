@@ -28,6 +28,8 @@ dependencies = [
     # Robotics and RL
     "gymnasium>=0.29.0",
     "mujoco>=3.0.0",
+    # URDF forward kinematics (chuck_dreamer.common.fk)
+    "pin>=3.0.0",
     # Tensor operations
     "einops>=0.7.0",
     "jax>=0.4.0",
@@ -112,7 +114,7 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [[tool.mypy.overrides]]
-module = ["mlx", "mlx.*", "mujoco", "mujoco.*", "h5py", "rerun", "tqdm", "tqdm.*", "scipy", "scipy.*", "sam2.*"]
+module = ["mlx", "mlx.*", "mujoco", "mujoco.*", "pinocchio", "pinocchio.*", "h5py", "rerun", "tqdm", "tqdm.*", "scipy", "scipy.*", "sam2.*"]
 ignore_missing_imports = true
 
 [dependency-groups]

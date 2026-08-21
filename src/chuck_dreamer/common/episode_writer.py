@@ -79,15 +79,6 @@ def EpisodeWriter(output_dir: str, format: str = "hdf5"):
 # ---------------------------------------------------------------------------
 
 
-# Per-step columns shared by all action modes for sim writes.
-# ``joint_action`` and ``ee_action`` may both ride along — the file is
-# action-space-agnostic and the training pipeline picks which to read.
-_REQUIRED_KEYS = (
-    "image", "reward", "timestamp",
-    "joint_qpos", "ee_pos", "ee_quat", "object_xy",
-)
-
-
 def _serialize_metadata_config(metadata: dict[str, Any] | None) -> str | None:
     """Return the ``config`` field of metadata as a JSON string, or None."""
     if metadata is None:
@@ -108,12 +99,13 @@ def _collect_actions(episode: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]
     ``config.env.act_mode``. At least one must be present.
     """
     out: dict[str, np.ndarray] = {}
-    for key in ("joint_action", "ee_action"):
+    for key in ("joint_action", "ee_action", "ee_action_arm", "ee_action_table"):
         if key in episode:
             out[key] = np.asarray(episode[key], dtype=np.float32)
     if not out:
         raise KeyError(
-            "episode is missing an action field (expected joint_action and/or ee_action)")
+            "episode is missing an action field (expected joint_action "
+            "and/or an ee_action variant)")
     return out
 
 
@@ -246,14 +238,16 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
 
         images          (T, H, W, 3)    uint8
         joint_action    (T, n_joints)   float32   — optional, present when the caller supplies it
-        ee_action       (T, 7)          float32   — optional, present when the caller supplies it
+        ee_action*      (T, 7)          float32   — optional, present when the caller supplies it
         rewards         (T,)            float32
         timestamps      (T,)            float32
         joint_qpos      (T, n_joints)   float32
-        ee_pos          (T, 3)          float32
-        ee_quat         (T, 4)          float32
-        object_xy       (T, 2)          float32
-        object_uv       (T, 2)          float32   — optional, pixel centroid of the target mask
+        ee_pos_arm      (T, 3)          float32   mm  (ee_pos_table when the
+                                                       table transform is known;
+                                                       legacy sim files: ee_pos, m)
+        ee_quat_arm     (T, 4)          float32
+        obj_pos_table   (T, 3)          float32   mm  (legacy: object_xy, (T, 2))
+        obj_uv          (T, 2)          float32   — optional, pixel centroid of the target mask
         segmentation/                              — optional, present iff env produced masks
             target      (T, H, W)       bool
             goal        (T, H, W)       bool
@@ -383,6 +377,12 @@ class HDF5EpisodeWriter(_BaseEpisodeWriter):
                     }
                     meta_grp.create_dataset(
                         "T_world_arm", data=json.dumps(blob))
+                # Per-track provenance assembled by the import harness:
+                # {track: {"node", "input_versions"}} as one JSON string.
+                provenance = metadata.get("provenance")
+                if provenance:
+                    meta_grp.create_dataset(
+                        "provenance", data=json.dumps(provenance))
 
         return ep_path
 
@@ -499,16 +499,14 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         src = (metadata or {}).get("source_video")
         if isinstance(src, dict) and src.get("path"):
             try:
-                vbytes, media, pts = stream_copy_window(
-                    src["path"], float(src["from_ts"]), float(src["to_ts"]))
+                vbytes, media, pts = stream_copy_window(src["path"], float(src["from_ts"]), float(src["to_ts"]))
                 if len(pts) == T:
                     return vbytes, media, pts
                 logger.warning(
                     "source video window yielded %d frames, episode has %d; "
                     "re-encoding instead", len(pts), T)
             except Exception as exc:  # noqa: BLE001 — any decode/remux failure → re-encode
-                logger.warning("stream copy of %s failed (%s); re-encoding",
-                               src.get("path"), exc)
+                logger.warning("stream copy of %s failed (%s); re-encoding", src.get("path"), exc)
 
         fps = _video_fps(metadata, images, T)
         return reencode_mp4(images[:T], fps=fps)
@@ -538,14 +536,11 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         RGBA frame: the target's colour where the mask is set, fully
         transparent elsewhere — so it composites over the video as a tinted
         overlay rather than rendering as an all-black ``{0,1}`` image."""
-        m = np.asarray(mask) > 0
-        rgba = np.zeros((*m.shape[:2], 4), dtype=np.uint8)
+        m       = np.asarray(mask) > 0
+        rgba    = np.zeros((*m.shape[:2], 4), dtype=np.uint8)
         rgba[m] = cls._SEG_RGBA.get(name, (0, 200, 255, 110))
         return rgba
 
-    # Per-step fields the Rerun writer consumes *structurally* rather than as
-    # generic scalar entities: ``image`` becomes the video, ``timestamp`` drives
-    # the time axis. Everything else SCALAR/ACTION is logged as ``rr.Scalars``.
     _RERUN_STRUCTURAL = ("image", "timestamp")
 
     def write_episode(
@@ -564,7 +559,7 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         import rerun as rr
 
         ep_path = self._path_for(EPISODE_FILENAME_PREFIX, name_suffix)
-        rec = self._new_recording(f"{EPISODE_FILENAME_PREFIX}-{name_suffix}")
+        rec     = self._new_recording(f"{EPISODE_FILENAME_PREFIX}-{name_suffix}")
         rec.save(str(ep_path))
 
         props = _rerun_metadata_props(metadata)
@@ -575,8 +570,6 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             mat = np.asarray(metadata["mat_centre"], dtype=np.float32)
             props["mat_centre"] = f"[{float(mat[0])}, {float(mat[1])}]"
         if metadata is not None and metadata.get("tags"):
-            # Tags ride as a comma-joined string since Rerun metadata props are
-            # dict[str, str]. The reader splits on commas to recover the tuple.
             props["tags"] = ",".join(str(t) for t in metadata["tags"])
         if metadata is not None and metadata.get("T_world_arm") is not None:
             props["T_world_arm"] = json.dumps({
@@ -584,20 +577,19 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
                 "arm_diagnostics": metadata.get("arm_diagnostics"),
                 "arm_metadata":    metadata.get("arm_metadata"),
             })
+        if metadata is not None and metadata.get("provenance"):
+            props["provenance"] = json.dumps(metadata["provenance"])
         self._log_metadata(rec, props)
 
         timestamps = np.asarray(episode["timestamp"], dtype=np.float32)
-        images     = np.asarray(episode["image"],     dtype=np.uint8)
 
-        # Bucket the persisted per-step fields by kind. SCALAR/ACTION fields
-        # (minus the structural ones) become ``rr.Scalars`` entities named by
-        # the field; MASK fields become tinted PNG overlays under camera/seg/;
-        # the OVERLAY field becomes camera/mesh_overlay. This dispatch replaces
-        # the old hardcoded per-field blocks, so a new field is logged per its
-        # declared kind with no edit here.
+        img_field = episode.field("image") if "image" in episode else None
+        images    = (np.asarray(img_field.value, dtype=np.uint8)
+                     if img_field is not None and img_field.persist else None)
+
         scalar_fields: dict[str, np.ndarray] = {}
-        seg_masks: dict[str, np.ndarray] = {}
-        mesh_overlay: np.ndarray | None = None
+        seg_masks: dict[str, np.ndarray]     = {}
+        mesh_overlay: np.ndarray | None      = None
         for name, fld in episode.persisted():
             if fld.kind in (FieldKind.SCALAR, FieldKind.ACTION):
                 if name in self._RERUN_STRUCTURAL:
@@ -608,20 +600,20 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             elif fld.kind is FieldKind.OVERLAY:
                 mesh_overlay = np.asarray(fld.value)
 
-        # RGB rides as one encoded video blob (logged once, static) plus a
-        # per-step VideoFrameReference, instead of a raw rr.Image per frame —
-        # this is the bulk of the old multi-GB .rrd size.
-        video_bytes, media_type, frame_pts = self._build_camera_video(
-            images, metadata, T)
-        rec.log("camera/video",
-                rr.AssetVideo(contents=video_bytes, media_type=media_type),
-                static=True)
+        frame_pts: list[float] | None = None
+        if images is not None:
+            video_bytes, media_type, frame_pts = self._build_camera_video(
+                images, metadata, T)
+            rec.log("camera/video",
+                    rr.AssetVideo(contents=video_bytes, media_type=media_type),
+                    static=True)
 
         for i in range(T):
             rec.set_time("step", sequence=i)
             rec.set_time("time", duration=float(timestamps[i]))
 
-            rec.log("camera/video", rr.VideoFrameReference(seconds=frame_pts[i]))
+            if frame_pts is not None:
+                rec.log("camera/video", rr.VideoFrameReference(seconds=frame_pts[i]))
             for name, arr in scalar_fields.items():
                 cell = arr[i]
                 if cell.ndim:
@@ -632,9 +624,7 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
                     value = cell.item()
                 rec.log(name, rr.Scalars(value))
 
-            # Masks ride as transparent RGBA PNGs (tinted where set) so they
-            # composite over the video, rather than raw SegmentationImage. Masks
-            # whose name has no dedicated colour fall back to the target tint.
+            # Masks ride as transparent RGBA PNGs (tinted where set) so they composite over the video
             for name, mask in seg_masks.items():
                 rec.log(f"camera/seg/{name}",
                         rr.EncodedImage(
@@ -645,14 +635,10 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
             if mesh_overlay is not None:
                 rec.log("camera/mesh_overlay",
                         rr.EncodedImage(
-                            contents=self._png_bytes(
-                                self._mask_rgba(mesh_overlay[i], "mesh")),
+                            contents=self._png_bytes(self._mask_rgba(mesh_overlay[i], "mesh")),
                             media_type="image/png"))
 
-        # Force all chunks to disk before returning. The file sink flushes on
-        # a background thread; without this an immediately-following read (or
-        # the next episode's heavy video re-encode starving the flush) can
-        # see a half-written, entity-less recording.
+        # Force all chunks to disk before returning
         rec.flush(timeout_sec=30.0)
         return ep_path
 
@@ -689,7 +675,7 @@ class RerunEpisodeWriter(_BaseEpisodeWriter):
         component_arrays: dict[str, dict[str, np.ndarray]] = {}
         for name, arr in obs.items():
             component_arrays[name] = {
-                "obs":             np.asarray(arr,                  dtype=np.float32),
+                "obs":             np.asarray(arr,                   dtype=np.float32),
                 "recon_posterior": np.asarray(recon_posterior[name], dtype=np.float32),
                 "recon_prior":     np.asarray(recon_prior[name],     dtype=np.float32),
             }

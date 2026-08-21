@@ -87,7 +87,6 @@ training:
     tag_weights: {}
 
     warmup_num_workers: null   # null = os.cpu_count(); 0 = sequential load
-    shuffle: true
     buffer_size: 10000
 
   optimizer:
@@ -96,14 +95,12 @@ training:
     critic_lr: 8e-5
     adam_eps: 1e-5
     gradient_clipping: 100.0
-    weight_decay: 0
 
   losses:
     recon_scale: 1.0
     reward_scale: 1.0
     kl_scale: 1.0
     free_nats: 3.0
-    entropy_scale: 1.0
     # Auxiliary head loss (object_xy + ee_pos regression from the latent).
     aux_scale: 0.0
     focus_masks: ["segmentation_target", "segmentation_arm", "segmentation_goal"]  # obs keys to apply "focus" weighting to
@@ -153,107 +150,14 @@ eval:
 hardware:
   device: "mlx"  # "auto", "mlx", "cpu", "cuda", "mps"
 
+# CEM planner params, read by `sim/cli.py`'s `show-scene` command.
 real:
-  # Camera opened via cv2.VideoCapture. ``source`` accepts an integer index
-  # (``"0"``, ``"1"``) or a device path (``"/dev/video0"``); strings that
-  # parse cleanly as ints are converted to ints so the OpenCV V4L2 backend
-  # picks them up correctly.
-  camera:
-    source:   "0"
-    width:    640
-    height:   480
-    fps:      30
-    flip:     false   # mirror the frame horizontally before showing/feeding the policy
-
-  # Calibration bundle (intrinsics + extrinsics + mat detection) written
-  # by `python main.py annotate-live --output <path>`. When set, the
-  # runner reprojects the mat geometry over the live camera feed (same
-  # lines as `annotate-mat --review`). Null disables the overlay.
-  # CLI override: `python main.py run --calibration <path>`.
-  calibration: null
-
-  # SO-101 follower over USB. ``port`` is the serial device the lerobot bus
-  # opens (e.g. ``"/dev/tty.usbmodem58FA0834521"`` on macOS,
-  # ``"/dev/ttyACM0"`` on Linux). Leave null to run without an arm:
-  # the camera window and policy still come up, the IK solver still
-  # computes joint targets, but nothing is sent to hardware. EE/joint
-  # readings come from the IK model's idle pose. ``calibration_id``
-  # selects which calibration file the lerobot bus reads from disk;
-  # leave null to use whichever ships with the arm.
-  arm:
-    port:                          null
-    calibration_id:                null
-    disable_torque_on_disconnect:  true
-    # Per-step delta cap. `null` matches upstream `lerobot-teleoperate`
-    # — at 60 Hz the natural leader→follower sample delta is small
-    # enough that the clamp only adds catch-up lag without adding
-    # safety. For autonomous policies override from the CLI to a low
-    # number (e.g. 5.0) as a kill-switch against a runaway action.
-    max_relative_target:           null
-    use_degrees:                   true
-
-  # Policy used to control the arm. ``type`` selects the implementation;
-  # the matching subsection feeds its kwargs.
   policy:
-    type: "manual"   # "manual" | "dreamer" | "cem" | "corner_touch"
-    manual:
-      # Serial port for the SO-101 *leader* arm (the one the operator
-      # moves by hand). The manual policy reads its joint positions
-      # each tick and mirrors them onto the follower.
-      port:           null
-      calibration_id: null
-      use_degrees:    true
-    dreamer:
-      checkpoint: null     # path to .safetensors written by `main.py train`
-      sample:     false    # if true, draw from the actor distribution; else use the mode
     cem:
-      checkpoint:     null
       horizon:        12
       num_samples:    256
       num_elites:     32
       num_iterations: 4
-      discount:       1.0    # geometric reward discount over the plan horizon
-    # Scripted demo policy: cycle through corner waypoints expressed in
-    # mat/world-frame mm (relative to the `origin` touch). Requires
-    # T_world_arm to be present in the calibration bundle (i.e. you
-    # ran `annotate-live` with the arm step) and `--calibration` to
-    # point at it. Goes through IK → joints just like CEM/Dreamer EE
-    # actions, so the runner's IK adapter is reused.
-    corner_touch:
-      # XY corners in mat-frame mm relative to the origin touch point.
-      corners_xy_mm: [[-150, -80], [150, -80], [150, 80], [-150, 80]]
-      hover_z_mm:    30.0     # height above the mat plane (z=0) per waypoint
-      dwell_s:       15
-      # Path shape. Each A→B leg is broken into N linearly-interpolated
-      # EE poses so the IK stays in one solution branch and the arm
-      # moves smoothly instead of teleporting. Total time per leg is
-      # roughly interpolation_steps * debug_period_s.
-      interpolation_steps: 30
-      advance_mode:        "auto"
-      # Step throttle. With interpolation_steps=30 and 0.1 s/step that
-      # is 3 s per leg — slow enough to read the print, fast enough to
-      # not be tedious. Set to null/0 to use the runner's default
-      # cadence (60 Hz, way too fast for visual inspection).
-      debug_period_s:      0.1
-
-  # Safety guards applied by the runner around the policy → arm path.
-  # These are last-line-of-defence clamps; the policy should normally
-  # already respect them on its own.
-  safety:
-    # World-frame z floor for EE-mode actions (mm). Any 7-D EE action
-    # commanding a z below this gets clipped back up before IK. Only
-    # active when the calibration bundle carries T_world_arm. Set
-    # generously above the actual mat thickness — the gripper is at the
-    # ee_tip frame, not the contact patch.
-    min_hover_z_mm:    10.0
-
-  # Control loop pacing. 60 Hz matches upstream `lerobot-teleoperate`
-  # and is what the leader→follower teleop needs to feel direct;
-  # autonomous (dreamer / cem) policies can override to a slower
-  # cadence from the CLI if their inference dominates.
-  control_dt:        1  # seconds between policy steps (≈60 Hz)
-  # Keys captured globally; "s" starts the policy, "q" or ESC quits.
-  start_key:         "s"
 
 env:
   difficulty: "real"
@@ -414,9 +318,7 @@ runtime:
   # it draws the commanded setpoint + current EE markers; the task-space
   # safety box overlay is deferred to M5.
   viewer:
-    enabled:       false
-    draw_setpoint: true
-    draw_ee:       true
+    enabled: false
 
 # Object-localization pipeline (chuck_dreamer.real.object_localization).
 # Used by `python main.py calibrate-intrinsics` + `python main.py annotate-mat`
@@ -426,12 +328,6 @@ runtime:
 object_localization:
   # Camera frame key shared across calibration datasets.
   camera_key: "observation.images.front"
-
-  # Cache root for per-dataset intrinsics/extrinsics/verification artifacts.
-  cache_dir: "./calibration_cache"
-  # Legacy alias kept so older configs / scripts that read
-  # ``calibration_cache`` continue to work; the package reads cache_dir.
-  calibration_cache: "./calibration_cache"
 
   # Episode indices (shared across calibration datasets).
   episodes:
@@ -477,7 +373,6 @@ object_localization:
 
   intrinsics:
     n_frames_target:   5       # sample this many frames from the checkerboard episode
-    n_frames_min:      5        # abort if fewer usable detections
     rms_threshold_px:  1.0      # warn (not fail) above this
     coverage_grid:    [6, 4]    # >=80% of cells must contain >=1 detected corner
     # Distortion model. 5 -> Brown-Conrady (k1, k2, p1, p2, k3); 2 ->
@@ -511,30 +406,14 @@ object_localization:
       search_range_px:  25
       max_iter:         50
 
-  # Per-episode RTS smoother (chuck_dreamer.real.object_localization.smoother).
-  # Consumes the per-frame ObjectPose stream from the estimator and
-  # produces a gap-free (x, y) trajectory + per-frame object_gap_too_long
-  # flag that the LeRobot import processor writes onto the augmented
-  # dataset. See data/specs/object_localization_spec.md, Deliverable 4.
-  smoother:
-    fps:               30.0     # frame rate; dt = 1 / fps
-    friction_alpha:    0.92     # per-frame velocity retention; identify empirically
-    process_noise:
-      pos_mm:          0.5      # std of position perturbation per frame
-      vel_mm_s:        200.0    # std of velocity perturbation per second
-    observation_noise:
-      base_sigma_mm:     1.0    # obs std at confidence=1.0, residual=0
-      confidence_floor:  0.05   # epsilon to avoid division by zero
-      residual_scale:    2.0    # k: mm-per-pixel multiplier on the reprojection residual
-    gating:
-      mahalanobis_threshold: 9.21   # chi2(2 dof, 0.99) — rejects bad locks
-    initial:
-      pos_sigma_mm:    2.0      # initial position uncertainty (trust first frame)
-      vel_sigma_mm_s:  500.0    # initial velocity uncertainty (push direction unknown)
-    gap_too_long_frames: 30     # mark frames inside longer occlusion gaps as untrustworthy
-
   # Paths read by the `import-lerobot --with-object-pose` stage.
   mesh_path: "assets/RobotLearning_Rhombicuboctahedron_Object.3mf"
   use_sam2:  true   # set false to force the color-heuristic segmenter
   device:    "auto"  # "auto" | "cpu" | "cuda" | "mps"
 
+
+# Artifact store (docs/trainer/artifact_store.md): persisted pipeline
+# artifacts + provenance records. The segmentation stage caches its SAM2
+# masks here so re-imports skip the GPU pass. Unset/empty disables caching.
+store:
+  root: "store"

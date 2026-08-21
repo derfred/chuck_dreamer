@@ -159,9 +159,16 @@ _REAL_GOAL_RIGHT_PROBABILITY = 2.0 / 3.0
 # ratio — render resolution doesn't have to match the calibration size).
 # Principal-point offset and lens distortion are ignored: MuJoCo's renderer is
 # a centred pinhole, so undistort real frames at capture time to match it.
-_INTRINSICS_JSON = (
-    Path(__file__).parent.parent.parent.parent / "calibration_cache" / "intrinsics.json"
+_STORE_CAMERA_DIR = (
+    Path(__file__).parent.parent.parent.parent / "store" / "camera"
 )
+
+
+def _find_intrinsics_json() -> Path | None:
+  """First camera intrinsics payload in the artifact store, if any."""
+  if not _STORE_CAMERA_DIR.exists():
+    return None
+  return next(iter(sorted(_STORE_CAMERA_DIR.glob("*/intrinsics.json"))), None)
 
 
 def _parse_render_size(render_size: str) -> tuple[int, int]:
@@ -222,11 +229,12 @@ def _project_points_to_pixels(
 
 
 def _load_real_camera_fovy_deg() -> float | None:
-  """Return vertical FOV (degrees) derived from intrinsics.json, or None."""
-  if not _INTRINSICS_JSON.exists():
+  """Return vertical FOV (degrees) derived from the stored intrinsics, or None."""
+  intrinsics_json = _find_intrinsics_json()
+  if intrinsics_json is None:
     return None
   try:
-    data = json.loads(_INTRINSICS_JSON.read_text())
+    data = json.loads(intrinsics_json.read_text())
     fy = float(data["K"][1][1])
     img_h = float(data["image_size"][1])
   except (KeyError, ValueError, TypeError, json.JSONDecodeError):

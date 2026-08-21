@@ -2,7 +2,7 @@
 
 For every (dataset, episode) implied by one or more CALIBRATION_SOURCE
 specs, opens an OpenCV click window at each configured keyframe and saves
-the click to ``calibration_cache/<slug>/object_prompts.json``. Subsequent
+the click to the EPISODE-scoped ``object_prompts`` store artifact. Subsequent
 ``import-lerobot`` runs (with the same processor) read the cached prompts
 and use them as cold-start anchors for the pose estimator.
 
@@ -45,13 +45,12 @@ import numpy as np
 from chuck_dreamer.config import load_config
 
 from .dataset import all_episode_bounds_from_meta, get_frame
-from .prompts import (
-  click_object, load_keyframe_prompts, save_keyframe_prompt, sidecar_path,
-)
+from .prompts import click_object, load_keyframe_prompts, save_keyframe_prompt
+from .store_sync import require_store
 from chuck_dreamer.perception.config import init_from_config
 from .scene_bg import ensure_scene_bg
 from chuck_dreamer.perception.types import CameraCalibration
-from chuck_dreamer.store import load_calibration
+from chuck_dreamer.store import MissingArtifact, load_calibration
 from chuck_dreamer.cli import override_option
 from chuck_dreamer.lerobot.episode_spec import EpisodeSpec
 
@@ -112,7 +111,7 @@ def prompt_episodes_cmd(ctx, sources: tuple[str, ...],
                         ee_guard_px: int, bg_samples: int, rebuild_bg: bool,
                         ee_key: str,
                         overrides: tuple[str, ...]) -> None:
-  """Click each keyframe's object, save to object_prompts.json.
+  """Click each keyframe's object; save as `object_prompts` store artifacts.
 
   Runs in two phases. First, a manual click pass over every keyframe
   named in ``--keyframes`` (plain tokens and the endpoints of every
@@ -126,7 +125,10 @@ def prompt_episodes_cmd(ctx, sources: tuple[str, ...],
   """
   cfg = load_config(ctx.obj["config_path"], overrides=overrides)
   ol_cfg = init_from_config(cfg)
-  cache_root = Path(ol_cfg.cache_dir)
+  try:
+    store = require_store(cfg, "prompt-episodes")
+  except RuntimeError as e:
+    raise click.ClickException(str(e))
 
   parsed = EpisodeSpec.parse_many(
     sources, allow_frames=False, command="prompt-episodes")
@@ -164,7 +166,7 @@ def prompt_episodes_cmd(ctx, sources: tuple[str, ...],
       raise click.ClickException(
         f"{did} ep {ep}: episode too short (len={ep_len}); this command "
         f"only makes sense on episodes of non-zero length.")
-    existing = load_keyframe_prompts(cache_root, did, ep) if not force else {}
+    existing = load_keyframe_prompts(store, did, ep) if not force else {}
     for offset in manual_offsets:
       rel = _resolve_keyframe_offset(offset, ep_len)
       if rel is None:
@@ -181,13 +183,13 @@ def prompt_episodes_cmd(ctx, sources: tuple[str, ...],
              f"{len(todo)} need a click.")
 
   if todo:
-    _run_click_pass(todo, cache_root, ol_cfg.camera_key)
+    _run_click_pass(todo, store, ol_cfg.camera_key)
   else:
     click.echo("nothing to click; --force to re-click.")
 
   if ranges:
     _run_augment_pass(
-      pending, ranges, cache_root, ol_cfg,
+      pending, ranges, store, ol_cfg,
       search_radius_px=search_radius_px, area_ratio_min=area_ratio_min,
       min_confidence=min_confidence, max_residual_px=max_residual_px,
       ee_guard_px=ee_guard_px, bg_samples=bg_samples, rebuild_bg=rebuild_bg,
@@ -200,7 +202,7 @@ def prompt_episodes_cmd(ctx, sources: tuple[str, ...],
 
 
 def _run_click_pass(todo: list[tuple[str, int, int, int]],
-                    cache_root: Path, camera_key: str) -> None:
+                    store, camera_key: str) -> None:
   """Open a click window for each (dataset, episode, rel) keyframe."""
   from lerobot.datasets.lerobot_dataset import LeRobotDataset  # type: ignore
 
@@ -227,9 +229,9 @@ def _run_click_pass(todo: list[tuple[str, int, int, int]],
     if prompt is None:
       click.echo("    skipped.")
       continue
-    save_keyframe_prompt(cache_root, did, ep, rel, prompt)
+    save_keyframe_prompt(store, did, ep, rel, prompt)
     click.echo(f"    saved: u={prompt[0]} v={prompt[1]}  -> "
-               f"{sidecar_path(cache_root, did)}")
+               f"store object_prompts @ {did} ep {ep}")
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +366,7 @@ class _ChainState:
 
 def _run_augment_pass(pending: list[tuple[str, int, int]],
                       ranges: list[_AugmentRange],
-                      cache_root: Path, ol_cfg, *,
+                      store, ol_cfg, *,
                       search_radius_px: int, area_ratio_min: float,
                       min_confidence: float, max_residual_px: float,
                       ee_guard_px: int, bg_samples: int, rebuild_bg: bool,
@@ -386,8 +388,8 @@ def _run_augment_pass(pending: list[tuple[str, int, int]],
   for did, episodes in by_ds.items():
     click.echo(f"\n=== augment {did} ({len(episodes)} episodes) ===")
     try:
-      cal = load_calibration(cache_root, did)
-    except FileNotFoundError as e:
+      cal, cal_versions = load_calibration(store, did)
+    except MissingArtifact as e:
       raise click.ClickException(f"{did}: {e}")
 
     mesh_path = Path(ol_cfg.mesh_path)
@@ -398,7 +400,7 @@ def _run_augment_pass(pending: list[tuple[str, int, int]],
     click.echo(f"  preparing scene background from episode "
                f"{ol_cfg.episode_empty} ({bg_samples} samples) ...")
     scene_bg = ensure_scene_bg(
-      cache_root, did, ol_cfg.camera_key,
+      did, ol_cfg.camera_key,
       ol_cfg.episode_empty, n_samples=bg_samples, rebuild=rebuild_bg,
       calibration=cal, ol_cfg=ol_cfg,
     )
@@ -420,7 +422,7 @@ def _run_augment_pass(pending: list[tuple[str, int, int]],
 
     for ep, ep_len in episodes:
       ep_count, ep_accept = _process_episode(
-        ds, did, ep, ep_len, cache_root, estimator, ol_cfg.camera_key,
+        ds, did, ep, ep_len, store, cal_versions, estimator, ol_cfg.camera_key,
         cal, ranges,
         search_radius_px=search_radius_px,
         area_ratio_min=area_ratio_min,
@@ -437,7 +439,8 @@ def _run_augment_pass(pending: list[tuple[str, int, int]],
 
 
 def _process_episode(ds, dataset_id: str, episode_idx: int, ep_len: int,
-                     cache_root: Path, estimator, camera_key: str,
+                     store, cal_versions: dict[str, str],
+                     estimator, camera_key: str,
                      calibration: CameraCalibration,
                      ranges: list[_AugmentRange],
                      *,
@@ -468,7 +471,7 @@ def _process_episode(ds, dataset_id: str, episode_idx: int, ep_len: int,
   prone middle frames of long gaps usually have at least one direction
   that produces a clean fit.
   """
-  manual = load_keyframe_prompts(cache_root, dataset_id, episode_idx)
+  manual = load_keyframe_prompts(store, dataset_id, episode_idx)
 
   try:
     ep_fr, ep_to = next(
@@ -580,11 +583,13 @@ def _process_episode(ds, dataset_id: str, episode_idx: int, ep_len: int,
         quit_episode = True
         break
       if decision == 'a' and kept is not None:
-        save_keyframe_prompt(cache_root, dataset_id, episode_idx,
-                             kept.ep_rel, kept.uv)
+        # Assisted proposal: the estimator leaned on the calibration, so
+        # record its versions as advisory (re-annotation hints, spec §9.3).
+        save_keyframe_prompt(store, dataset_id, episode_idx,
+                             kept.ep_rel, kept.uv, advisory=cal_versions)
         click.echo(f"    saved rel={kept.ep_rel} u={kept.uv[0]} "
-                   f"v={kept.uv[1]} -> "
-                   f"{sidecar_path(cache_root, dataset_id)}")
+                   f"v={kept.uv[1]} -> store object_prompts @ "
+                   f"{dataset_id} ep {episode_idx}")
         n_accepted += 1
 
   return n_proposed, n_accepted

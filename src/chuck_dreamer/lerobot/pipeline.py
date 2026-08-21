@@ -1,19 +1,19 @@
-"""The import-run object: stages, run context, and dataset access in one place.
+"""The import-run object: pipeline nodes, run context, and dataset access.
 
 A :class:`Run` ties an :class:`EpisodeSpec` to one set of importer flags. It
 owns the shared, run-level :class:`RunContext` (so the FK evaluator and the
 object-localization runtime config stay cached across episodes), resolves the
-dataset's on-disk root + selected episode slices, and
-is the single factory for a per-episode, dependency-ordered stage list. Both
-the importer (which calls ``stage.apply``) and ``import-lerobot --doctor``
-(which calls ``stage.requirements``) drive a :class:`Run`, so the
-context/root/slice/stage wiring lives in exactly one place.
+dataset's on-disk root + selected episode slices, and is the single factory
+for a per-episode, dependency-ordered node list. Both the importer (which
+runs the nodes through the harness) and ``import-lerobot doctor`` (which
+prints each node's ``requirements()``) drive a :class:`Run`, so the
+context/root/slice/node wiring lives in exactly one place.
 
 A :class:`Run` also hides *all* LeRobot dataset access behind lazy accessors:
 the :class:`LeRobotDataset` is constructed on first use, frames are grouped by
 episode lazily, and :meth:`Run.episode_frames` hands back the stacked arrays
 for one episode as an :class:`EpisodeFrames`. The importer never imports
-``lerobot`` nor indexes a raw frame dict; it asks the run for slices, stage
+``lerobot`` nor indexes a raw frame dict; it asks the run for slices, node
 lists, and per-episode frame arrays.
 """
 from __future__ import annotations
@@ -25,8 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from .stages.base import RunContext, Stage
-from .stages.registry import build_registry, resolve_stages
+from .context import RunContext
 
 if TYPE_CHECKING:
   from chuck_dreamer.lerobot.episode_spec import EpisodeSlice, EpisodeSpec
@@ -66,20 +65,18 @@ class Run:
   """One import run: an :class:`EpisodeSpec` plus the importer flags.
 
   Owns the shared :class:`RunContext`, is the sole factory for the per-episode
-  stage list, and is the single point of LeRobot dataset access. The importer
-  and the doctor share the same context/root/slice resolution and flag→stage
+  node list, and is the single point of LeRobot dataset access. The importer
+  and the doctor share the same context/root/slice resolution and flag→node
   wiring through it.
   """
 
   def __init__(self, config, spec: EpisodeSpec, params: dict[str, bool], video_key: str | None = None) -> None:
-    self.spec             = spec
-    self.params           = params
-    self._video_key_pref  = video_key
-    self.ctx              = RunContext(config=config, source_repo=spec.dataset_id)
-    # A directory dataset_id is an on-disk LeRobot root; HF repo ids aren't.
-    self.local_root: Path | None = (
-      Path(spec.dataset_id) if Path(spec.dataset_id).is_dir() else None)
-    self._registry = build_registry(self.ctx)
+    self.spec                     = spec
+    self.params                   = params
+    self._video_key_pref          = video_key
+    self.ctx                      = RunContext(config=config, source_repo=spec.dataset_id)
+    self.local_root: Path | None  = (Path(spec.dataset_id) if Path(spec.dataset_id).is_dir() else None)
+    self._nodes: list[Any] | None = None  # built lazily, reused per episode
 
   @property
   def dataset_id(self) -> str:
@@ -157,6 +154,7 @@ class Run:
       action.append(np.asarray(frame["action"], dtype=np.float32))
       state.append(np.asarray(frame["observation.state"], dtype=np.float32))
       timestamp.append(float(frame["timestamp"]))
+
     return EpisodeFrames(
       images=np.stack(images, axis=0),
       action=np.stack(action, axis=0),
@@ -164,36 +162,91 @@ class Run:
       timestamp=np.asarray(timestamp, dtype=np.float32),
     )
 
-  # ---- per-episode stage list ---------------------------------------------
-  def pipeline(self, episode_index: int) -> list[Stage]:
-    """The dependency-ordered stages for one episode, bound to this run's
-    shared context and stage registry.
+  @cached_property
+  def _dataset_meta(self) -> Any:
+    """The dataset's ``LeRobotDatasetMetadata`` (full episode table), read
+    once per run — :meth:`episode_joint_values` may be called for many
+    touchpoint episodes in a row."""
+    from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # type: ignore
 
-    Sets the context's episode index, then resolves the enabled flags into a
-    dependency-ordered list (auto-pulling each stage's ``requires``). Inter-stage
-    mask state lives on the :class:`Episode` now, so there is no per-episode ctx
-    cache to reset here."""
+    return LeRobotDatasetMetadata(self.dataset_id, root=self.local_root)
+
+  def episode_joint_values(self, episode_index: int) -> np.ndarray:
+    """``(T, J)`` float32 ``observation.state`` for one episode, read from
+    the data parquet sidecars only — no video download or decode.
+
+    Unlike :attr:`slices` this consults the dataset's *full* episode table,
+    so it reaches episodes outside this run's selection: the touchpoint
+    captures consumed by ``extract_table_to_arm`` are typically excluded
+    from the imported episode range."""
+    import pandas as pd  # type: ignore[import-untyped]
+
+    meta = self._dataset_meta
+    row  = next((r for r in meta.episodes if int(r["episode_index"]) == episode_index), None)
+    if row is None:
+      raise ValueError(
+        f"{self.dataset_id}: episode {episode_index} not in the dataset")
+
+    parquet = Path(meta.root) / meta.data_path.format(
+      chunk_index=int(row["data/chunk_index"]),
+      file_index=int(row["data/file_index"]))
+    df     = pd.read_parquet(parquet, columns=["episode_index", "observation.state"])
+    values = df.loc[df["episode_index"] == episode_index, "observation.state"]
+    return np.stack(values.to_numpy()).astype(np.float32)
+
+  # ---- per-episode node list ------------------------------------------------
+  def pipeline(self, episode_index: int) -> list[Any]:
+    """The dependency-ordered pipeline nodes for one episode, bound to this
+    run's shared context.
+
+    Sets the context's episode index, then builds the node list from the
+    enabled flags: the arm-frame EE chain (``normalize_joints`` →
+    ``ee_pos_arm`` → ``ee_rotation`` → ``ee_action_arm``) for
+    ``with_ee_pos``, the object chain (``segmentation`` →
+    ``obj_uv_extraction`` → ``object_pose``) for ``with_object_pose``, and
+    the table-frame variants (``ee_pos_table`` / ``ee_quat_table`` /
+    ``ee_action_table`` / ``obj_pos_arm``, all consuming the dataset's
+    ``table_to_arm`` transform) for ``with_table_frame``. Node instances
+    are built once and reused across episodes (they are episode-stateless;
+    per-episode state flows through the
+    :class:`~chuck_dreamer.lerobot.trackset.TrackSet`). The importer runs
+    the list through
+    :func:`~chuck_dreamer.lerobot.trackset.run_episode`."""
+    from .nodes import (
+      build_ee_nodes,
+      build_ee_table_nodes,
+      build_object_nodes,
+      build_object_table_nodes,
+    )
+
     self.ctx.episode_index = episode_index
-    # Expose this run's slices (video window / MP4 path) to stages so a
-    # segmentation stage can decode the video without re-reading metadata.
+    # Expose this run's slices (video window / MP4 path) to nodes so the
+    # segmentation node can decode the video without re-reading metadata.
     if not self.ctx.slices_by_index:
       self.ctx.slices_by_index = {sl.episode_index: sl for sl in self.slices}
 
-    enabled: set[str] = set()
-    if self.params.get("with_ee_pos", False):
-      enabled.add("ee_pos")
-    if self.params.get("with_object_pose", False):
-      enabled.add("object_pose")
-    return resolve_stages(enabled, self.ctx, registry=self._registry)
+    if self._nodes is None:
+      table_frame = self.params.get("with_table_frame", False)
+      nodes: list[Any] = []
+      if self.params.get("with_ee_pos", False):
+        nodes.extend(build_ee_nodes(self.ctx))
+        if table_frame:
+          nodes.extend(build_ee_table_nodes(self.ctx))
+      if self.params.get("with_object_pose", False):
+        nodes.extend(build_object_nodes(self.ctx))
+        if table_frame:
+          nodes.extend(build_object_table_nodes(self.ctx))
+      self._nodes = nodes
+    return self._nodes
 
-  def lane_pipeline(self, episode_index: int, lane: str) -> list[Stage]:
-    """The subset of :meth:`pipeline` whose stages run on ``lane``, in the
+  def lane_pipeline(self, episode_index: int, lane: str) -> list[Any]:
+    """The subset of :meth:`pipeline` whose nodes run on ``lane``, in the
     same dependency order.
 
-    Used by the parallel importer to split each episode's stages at the
-    GPU/CPU boundary: the ``"producer"`` lane (decode-adjacent + SAM2
+    Used by the parallel importer to split each episode's nodes at the
+    GPU/CPU boundary: the ``"producer"`` lane (the EE chain + SAM2
     segmentation) runs on the GPU producer, the ``"worker"`` lane (the
     object-pose fit) runs in the CPU pool. Because :meth:`pipeline` already
     sets the context's episode index and slice map, this just filters its
     result — call it once per lane for the same episode."""
-    return [s for s in self.pipeline(episode_index) if getattr(s, "lane", "worker") == lane]
+    return [n for n in self.pipeline(episode_index) if getattr(n, "lane", "worker") == lane]

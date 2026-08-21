@@ -91,18 +91,31 @@ _SEG_PREFIX = "segmentation_"
 
 FIELD_REGISTRY: dict[str, tuple[FieldKind, bool]] = {
   # Core persisted per-step signals.
-  "image":        (FieldKind.IMAGE,  True),
-  "reward":       (FieldKind.SCALAR, True),
-  "timestamp":    (FieldKind.SCALAR, True),
-  "joint_qpos":   (FieldKind.SCALAR, True),
+  "image":          (FieldKind.IMAGE,  True),
+  "reward":         (FieldKind.SCALAR, True),
+  "timestamp":      (FieldKind.SCALAR, True),
+  "joint_qpos":     (FieldKind.SCALAR, True),
+  "joint_qpos_rad": (FieldKind.SCALAR, True),
+  # Coordinate tracks: explicit frame suffix, millimetres (import pipeline).
+  "ee_pos_arm":      (FieldKind.SCALAR, True),
+  "ee_quat_arm":     (FieldKind.SCALAR, True),
+  "ee_pos_table":    (FieldKind.SCALAR, True),
+  "ee_quat_table":   (FieldKind.SCALAR, True),
+  "obj_pos_table":   (FieldKind.SCALAR, True),
+  "obj_pos_arm":     (FieldKind.SCALAR, True),
+  "obj_uv":          (FieldKind.SCALAR, True),
+  # Legacy coordinate names, still produced by the sim collector.
   "ee_pos":       (FieldKind.SCALAR, True),
   "ee_quat":      (FieldKind.SCALAR, True),
   "object_xy":    (FieldKind.SCALAR, True),
   "object_uv":    (FieldKind.SCALAR, True),
-  "object_gap_too_long": (FieldKind.SCALAR, True),
+  # Validity siblings (`<name>.valid`, (T,) bool) ride as plain scalars;
+  # the harness sets their persistence explicitly when committing a track.
   # Actions — at least one required by the writers.
-  "joint_action": (FieldKind.ACTION, True),
-  "ee_action":    (FieldKind.ACTION, True),
+  "joint_action":    (FieldKind.ACTION, True),
+  "ee_action":       (FieldKind.ACTION, True),
+  "ee_action_arm":   (FieldKind.ACTION, True),
+  "ee_action_table": (FieldKind.ACTION, True),
   # Segmentation masks (also matched by the ``segmentation_`` prefix below).
   "segmentation_target":     (FieldKind.MASK, True),
   "segmentation_goal":       (FieldKind.MASK, True),

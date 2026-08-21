@@ -19,16 +19,15 @@ from .calibration.interactive import (
   reset_popup_state,
 )
 from .dataset import episode_bounds, get_frame, sample_episode_frames
-from chuck_dreamer.perception.config import init_from_config
-from chuck_dreamer.perception.types import MatDetection
-from chuck_dreamer.store import (
-  dataset_cache_dir,
-  read_extrinsics,
-  read_intrinsics,
-  read_mat_annotation,
-  write_extrinsics,
-  write_mat_annotation,
+from .store_sync import (
+  camera_id_from_key,
+  get_intrinsics,
+  put_extrinsics,
+  require_store,
 )
+from chuck_dreamer.perception.config import init_from_config
+from chuck_dreamer.perception.types import Intrinsics, MatDetection
+from chuck_dreamer.store import MissingArtifact, for_dataset
 from chuck_dreamer.cli import override_option
 
 logger = logging.getLogger(__name__)
@@ -37,9 +36,9 @@ logger = logging.getLogger(__name__)
 @click.command("annotate-mat")
 @click.argument("dataset_ids", nargs=-1, required=True)
 @click.option("--force", is_flag=True, default=False,
-              help="Re-annotate even if extrinsics.json already exists.")
+              help="Re-annotate even if extrinsics are already in the store.")
 @click.option("--review", is_flag=True, default=False,
-              help="Skip the click UI; reload mat_annotation.json, re-solve, "
+              help="Skip the click UI; reload the stored clicks, re-solve, "
                    "re-render verification, prompt to overwrite.")
 @override_option
 @click.pass_context
@@ -49,29 +48,29 @@ def annotate_mat_cmd(ctx, dataset_ids: tuple[str, ...],
   """Annotate the mat fiducials and solve per-dataset extrinsics."""
   cfg = load_config(ctx.obj["config_path"], overrides=overrides)
   ol_cfg = init_from_config(cfg)
-  cache_root = Path(ol_cfg.cache_dir)
+  try:
+    store = require_store(cfg, "annotate-mat")
+  except RuntimeError as e:
+    raise click.ClickException(str(e))
+  camera_id = camera_id_from_key(ol_cfg.camera_key)
 
   for dataset_id in dataset_ids:
-    out_dir   = dataset_cache_dir(cache_root, dataset_id)
-    extr_path = out_dir / "extrinsics.json"
+    ds_scope = for_dataset(dataset_id)
+    stored_extr = (store.get("extrinsics", ds_scope)[0]
+                   if store.has("extrinsics", ds_scope) else None)
 
-    if extr_path.exists() and not force and not review:
-      try:
-        cached = read_extrinsics(cache_root, dataset_id)
-        click.echo(f"{dataset_id}: extrinsics already cached "
-                   f"(rms={cached.rms_px:.2f}px), skipping. "
-                   f"(use --force or --review)")
-        continue
-      except Exception as e:
-        click.echo(f"{dataset_id}: cached extrinsics unreadable ({e}); re-solving.")
+    if stored_extr is not None and not force and not review:
+      rms = stored_extr.get("rms_px")
+      click.echo(f"{dataset_id}: extrinsics already in store"
+                 f"{f' (rms={rms:.2f}px)' if rms is not None else ''},"
+                 f" skipping. (use --force or --review)")
+      continue
 
     try:
-      intrinsics = read_intrinsics(cache_root, dataset_id)
-    except Exception:
-      raise click.ClickException(
-        f"{dataset_id}: intrinsics.json missing under {out_dir}. "
-        f"Run `python main.py import-lerobot calibrate-intrinsics "
-        f"{out_dir / 'intrinsics.json'} --episodes {dataset_id}` first.")
+      intr_payload, intr_record = get_intrinsics(store, camera_id)
+    except MissingArtifact as e:
+      raise click.ClickException(str(e))
+    intrinsics = Intrinsics.from_json(intr_payload)
 
     click.echo(f"{dataset_id}: loading LeRobotDataset (episode "
                f"{ol_cfg.episode_empty}, frame {ol_cfg.extrinsics_annotation_frame}) ...")
@@ -91,12 +90,13 @@ def annotate_mat_cmd(ctx, dataset_ids: tuple[str, ...],
 
     detection: MatDetection | None
     if review:
-      try:
-        detection = read_mat_annotation(cache_root, dataset_id)
-      except Exception:
+      mat_blob = (stored_extr or {}).get("mat_annotation")
+      if mat_blob is None:
         raise click.ClickException(
-          f"{dataset_id}: --review requires mat_annotation.json under {out_dir}.")
-      click.echo(f"{dataset_id}: re-using cached mat_annotation.json.")
+          f"{dataset_id}: --review requires stored extrinsics with embedded "
+          "clicks; run annotate-mat without --review first.")
+      detection = MatDetection.from_json(mat_blob)
+      click.echo(f"{dataset_id}: re-using the stored fiducial clicks.")
     else:
       reset_popup_state()
       try:
@@ -125,7 +125,7 @@ def annotate_mat_cmd(ctx, dataset_ids: tuple[str, ...],
                  f"phase_offset={result.phase_offset}  "
                  f"reverse={result.reverse}")
 
-    verify_dir = out_dir / "extrinsics_verify"
+    verify_dir = Path("extrinsics_verify") / dataset_id.replace("/", "__")
     verify_dir.mkdir(parents=True, exist_ok=True)
     overlay = render_extrinsics_overlay(
       frame, result.extrinsics, intrinsics.K, intrinsics.dist, ol_cfg,
@@ -163,19 +163,90 @@ def annotate_mat_cmd(ctx, dataset_ids: tuple[str, ...],
       click.echo(f"{dataset_id}: rejected; nothing written.")
       continue
 
-    write_mat_annotation(cache_root, dataset_id, detection, extra={
-      "annotation_frame": int(ol_cfg.extrinsics_annotation_frame),
-      "episode_empty":    int(ol_cfg.episode_empty),
-      "phase_offset":     int(result.phase_offset),
-      "reverse":          bool(result.reverse),
+    payload = result.extrinsics.to_json()
+    payload.update({
+      "phase_offset": int(result.phase_offset),
+      "reverse":      bool(result.reverse),
+      "seed_rms_px":  float(result.seed_rms_px),
+      # Raw fiducial clicks embedded so the fit can be reviewed / re-run
+      # without re-clicking (spec §5).
+      "mat_annotation": {
+        **detection.to_json(),
+        "meta": {
+          "annotation_frame": int(ol_cfg.extrinsics_annotation_frame),
+          "episode_empty":    int(ol_cfg.episode_empty),
+          "phase_offset":     int(result.phase_offset),
+          "reverse":          bool(result.reverse),
+        },
+      },
     })
-    write_extrinsics(cache_root, dataset_id, result.extrinsics, extra={
-      "phase_offset":     int(result.phase_offset),
-      "reverse":          bool(result.reverse),
-      "seed_rms_px":      float(result.seed_rms_px),
-      "annotation_source": "mat_annotation.json",
-    })
-    click.echo(f"{dataset_id}: wrote {out_dir / 'extrinsics.json'}")
+    # The intrinsics the fit ran against: advisory only — a re-calibration
+    # never makes the accepted extrinsics stale, it just suggests re-running
+    # this tool (spec §9.3).
+    put_extrinsics(store, dataset_id, payload, camera_id=camera_id,
+                   advisory={"intrinsics": intr_record.payload_hash})
+
+
+@click.command("annotate-mat-jpeg")
+@click.argument("image", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--calib", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=Path("store/camera/front/intrinsics.json"), show_default=True,
+              help="intrinsics.json (top-level 'K'/'dist').")
+@click.option("--out", type=click.Path(file_okay=False, path_type=Path),
+              default=Path("annotate_mat_out"), show_default=True,
+              help="Output directory for overlays + extrinsics.json.")
+@override_option
+@click.pass_context
+def annotate_mat_jpeg_cmd(ctx, image: Path, calib: Path, out: Path,
+                          overrides: tuple[str, ...]) -> None:
+  """Run the mat-annotation UI on a single JPEG and solve extrinsics.
+
+  A calibration scratch tool: unlike ``annotate-mat`` it neither reads a
+  LeRobot dataset nor writes the calibration cache / artifact store — the
+  solved extrinsics land in --out for inspection."""
+  import json
+
+  import cv2
+  import numpy as np
+
+  cfg = load_config(ctx.obj["config_path"], overrides=overrides)
+  ol_cfg = init_from_config(cfg)
+
+  bgr = cv2.imread(str(image), cv2.IMREAD_COLOR)
+  if bgr is None:
+    raise click.ClickException(f"could not read {image}")
+  rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+  blob = json.loads(calib.read_text())
+  K = np.asarray(blob["K"], dtype=np.float64)
+  dist = np.asarray(blob["dist"], dtype=np.float64)
+
+  reset_popup_state()
+  try:
+    detection = annotate_mat_cv2(rgb)
+  finally:
+    close_popup_window()
+  if detection is None:
+    raise click.ClickException("annotation aborted")
+
+  result = solve_extrinsics(detection, K, dist, ol_cfg)
+  click.echo(f"rms={result.refined_rms_px:.3f}px  "
+             f"phase_offset={result.phase_offset}  reverse={result.reverse}")
+
+  out.mkdir(parents=True, exist_ok=True)
+  overlay = render_extrinsics_overlay(rgb, result.extrinsics, K, dist, ol_cfg,
+                                      detection, result)
+  axes = render_world_axes(rgb, result.extrinsics, K, dist)
+  cv2.imwrite(str(out / "overlay.png"), overlay)
+  cv2.imwrite(str(out / "world_axes.png"), axes)
+  (out / "extrinsics.json").write_text(json.dumps({
+    "R": result.extrinsics.R.tolist(),
+    "t": result.extrinsics.t.tolist(),
+    "rms_px": float(result.refined_rms_px),
+    "phase_offset": int(result.phase_offset),
+    "reverse": bool(result.reverse),
+  }, indent=2))
+  click.echo(f"wrote {out}/")
 
 
 def _preview(paths: list[Path]) -> None:

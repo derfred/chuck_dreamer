@@ -22,8 +22,6 @@ from chuck_dreamer.config import lookup_device
 @dataclass
 class ObjectLocalizationConfig:
   camera_key: str
-  cache_dir: str
-  calibration_cache: str        # legacy alias, mirrors cache_dir
 
   episode_empty: int
   episode_checkerboard: int
@@ -120,9 +118,6 @@ def _parse(raw: dict[str, Any]) -> ObjectLocalizationConfig:
   D = _float(_req(mat, "line_separation_mm", "mat."))
   r = _float(_req(mat, "circle_radius_mm",   "mat."))
 
-  cache_dir = str(raw.get("cache_dir") or raw.get("calibration_cache") or "./calibration_cache")
-  legacy_cache = str(raw.get("calibration_cache") or cache_dir)
-
   mesh_path = str(object_block.get("mesh_path") or raw.get("mesh_path") or "")
 
   coverage = intrinsics.get("coverage_grid", [6, 4])
@@ -130,8 +125,6 @@ def _parse(raw: dict[str, Any]) -> ObjectLocalizationConfig:
 
   return ObjectLocalizationConfig(
     camera_key             = str(_req(raw, "camera_key", "")),
-    cache_dir              = cache_dir,
-    calibration_cache      = legacy_cache,
 
     episode_empty          = int(_req(episodes, "empty",        "episodes.")),
     episode_checkerboard   = int(_req(episodes, "checkerboard", "episodes.")),

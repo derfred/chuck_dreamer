@@ -18,6 +18,14 @@ import numpy as np
 
 
 class Frame(str, Enum):
+  """Reference frames for spatial tracks.
+
+  ``TABLE`` is the world frame defined by the mat fiducials (origin at the
+  circle center, Z = 0 on the mat) — older code and docs call it the "world"
+  frame; the two names are the same frame. ``ARM`` is the arm-base frame FK
+  outputs live in; the ``table_to_arm`` transform (spec §7.2) bridges the
+  two, and a track only crosses frames through an explicit node.
+  """
   IMAGE  = "image"
   CAMERA = "camera"
   ARM    = "arm"
