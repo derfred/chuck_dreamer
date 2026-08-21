@@ -7,9 +7,21 @@ a bounded in-memory log of anomaly events (S5.1/S5.3), and computes the
 any intervention — that is Slice 6; supervisor receives, caches, and surfaces.
 
 Health (`vision.healthy` / `audio.healthy`) is supervisor's interpretation of
-heartbeat freshness: a heartbeat (vision) / level message (audio) seen within
-`staleness_s` => healthy. The clock is injectable so the freshness logic is
-deterministic in tests.
+freshness. Audio: a level message seen within `staleness_s` => healthy.
+
+Vision needs BOTH checks, because the two fail independently:
+  - the heartbeat itself must be fresh (the video process is alive), AND
+  - the heartbeat's `last_frame_at` must be recent (the pipeline is actually
+    delivering frames).
+A `v4l2src` that silently stops producing buffers keeps the process — and so
+the heartbeat — perfectly healthy while `last_frame_at` freezes, so heartbeat
+freshness alone reports green through a total camera stall. Checking only
+liveness once hid a five-day outage.
+
+Two clocks, because the two checks measure different things: `now` is
+monotonic (heartbeat arrival, measured here) and `wall_now` is wall-clock
+(compared against `last_frame_at`, which video stamps with `time.time()`).
+Both are injectable so the freshness logic is deterministic in tests.
 
 The log is in-memory — a supervisor restart loses it. Durable storage is Loki
 via promtail in Slice 7; this is the convenient live view. Thread-safe: the
@@ -23,6 +35,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from datetime import datetime, timezone
 
 from fessel_schemas import (
   AnomalyLogEntry,
@@ -52,13 +65,17 @@ class AnomalyTracker:
     log_cap: int = 100,
     recent_cap: int = 10,
     staleness_s: float = 6.0,
+    frame_staleness_s: float = 30.0,
     now: Callable[[], float] = time.monotonic,
+    wall_now: Callable[[], float] = time.time,
   ) -> None:
     self._lock = threading.Lock()
     self._log: deque[AnomalyLogEntry] = deque(maxlen=log_cap)
     self._recent_cap = recent_cap
     self._staleness_s = staleness_s
+    self._frame_staleness_s = frame_staleness_s
     self._now = now
+    self._wall_now = wall_now
 
     # Live vision values (from the ~1 Hz summary) + heartbeat freshness.
     self._activity_score_ema = 0.0
@@ -141,7 +158,7 @@ class AnomalyTracker:
       return VisionState(
         activity_score_ema=round(self._activity_score_ema, 4),
         last_frame_at=self._last_frame_at,
-        healthy=self._fresh(self._vision_hb_at),
+        healthy=self._fresh(self._vision_hb_at) and self._frames_flowing(),
       )
 
   def audio_state(self) -> AudioState:
@@ -165,3 +182,23 @@ class AnomalyTracker:
     if at is None:
       return False
     return (self._now() - at) < self._staleness_s
+
+  def _frames_flowing(self) -> bool:
+    """Whether the vision pipeline is still delivering frames, from the
+    heartbeat's `last_frame_at` (wall-clock, stamped by video's `time.time()`).
+
+    Unset/unparseable => False: a heartbeat that cannot say when it last saw a
+    frame is not evidence that frames are flowing, and silently passing here is
+    the failure this check exists to catch. Callers hold `self._lock`."""
+    if self._last_frame_at is None:
+      return False
+    try:
+      parsed = datetime.fromisoformat(self._last_frame_at.replace("Z", "+00:00"))
+    except ValueError:
+      return False
+    if parsed.tzinfo is None:
+      parsed = parsed.replace(tzinfo=timezone.utc)
+    age = self._wall_now() - parsed.timestamp()
+    # Clamp at 0: the Pi and supervisor clocks drift independently, and a
+    # slightly-ahead video clock (age < 0) is skew, not a stall.
+    return max(0.0, age) < self._frame_staleness_s

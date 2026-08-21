@@ -436,7 +436,9 @@ class VisionState(BaseModel):
   """The `vision` field of supervisor /state (S5.2).
 
   `healthy` is supervisor's interpretation of the vision heartbeat: false when
-  the heartbeat is stale. Not a separate safety state, just a flag Slice 6 reads.
+  the heartbeat is stale OR when its `last_frame_at` has stopped advancing (a
+  wedged capture keeps the process heartbeating while no frames flow). Not a
+  separate safety state, just a flag Slice 6 reads.
   """
 
   activity_score_ema: float = 0.0

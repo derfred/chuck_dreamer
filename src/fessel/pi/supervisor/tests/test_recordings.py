@@ -2,6 +2,7 @@
 ring proxy (S4.3), recordings listing (S4.4), recording-segment proxy, and the
 upload-progress cache (B4.6). Uses a FakeMqtt (no broker) and a tmp SSD."""
 
+from datetime import datetime, timezone
 from typing import ClassVar
 
 import paho.mqtt.client as mqtt
@@ -275,9 +276,17 @@ def test_state_includes_vision_audio_and_recent_anomalies(client):
   with client:
     relay = client.app.state.relay
     relay._mqtt.deliver("arm/video/vision/summary", {"activity_score_ema": 0.12})
+    # A *current* frame stamp: vision.healthy now also requires that frames are
+    # still flowing, so a fixed past date would read (correctly) as unhealthy.
+    # This test is about /state aggregation; health semantics live in
+    # tests/test_anomalies.py.
     relay._mqtt.deliver(
       "arm/video/vision/heartbeat",
-      {"last_frame_at": "2026-06-05T00:00:00Z", "frames_processed": 10, "frames_dropped": 0},
+      {
+        "last_frame_at": datetime.now(timezone.utc).isoformat(),
+        "frames_processed": 10,
+        "frames_dropped": 0,
+      },
     )
     relay._mqtt.deliver("arm/video/audio/level", {"rms_db": -33.0, "peak_db": -30.0})
     relay._mqtt.deliver(
