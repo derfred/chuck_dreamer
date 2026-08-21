@@ -212,6 +212,11 @@ def _build_observation(
   if needs_image:
     if image_size is None:
       raise ValueError(f"obs_mode={obs_mode!r} includes 'image' but image_size is None")
+    if "image" not in raw:
+      raise KeyError(
+        f"obs_mode={obs_mode!r} includes 'image' but this recording carries no "
+        "frames (written by `import-lerobot run --no-video`); re-import "
+        "without --no-video, or train on a vector-only obs_mode")
     components[IMAGE] = np.asarray(raw["image"], dtype=np.uint8)
     fmask = _union_focus_mask(raw, focus_mask_sources)
 

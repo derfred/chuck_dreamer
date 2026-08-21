@@ -46,8 +46,12 @@ class EpisodeFrames:
   Built by :meth:`Run.episode_frames` from the raw LeRobot frame dicts so
   the importer never touches a frame dict or a video key directly. ``T`` is
   the decoded frame count.
+
+  ``images`` is ``None`` when the run skipped video decoding entirely
+  (``--no-video`` with no frame-consuming node enabled) — see
+  :meth:`Run.decodes_video`.
   """
-  images: np.ndarray      # (T, H, W, 3) uint8
+  images: np.ndarray | None  # (T, H, W, 3) uint8, or None when not decoded
   action: np.ndarray      # (T, A) float32
   state: np.ndarray       # (T, J) float32
   timestamp: np.ndarray   # (T,) float32
@@ -125,6 +129,31 @@ class Run:
       return self.slices, self.video_key
     return self.spec.read_episodes(video_key=video_key, root=self.local_root)
 
+  # ---- video-decode requirement -------------------------------------------
+  @property
+  def drop_video(self) -> bool:
+    """``--no-video``: omit the RGB stack from the *written* episodes.
+
+    Rides :attr:`params` alongside the stage flags, so it reaches the
+    producers and workers through the same run clone the others do."""
+    return self.params.get("no_video", False)
+
+  @cached_property
+  def decodes_video(self) -> bool:
+    """Whether this run opens the MP4s at all.
+
+    False only when ``--no-video`` is set *and* no enabled node declares
+    ``image`` as an input — i.e. the frames would reach neither a stage nor
+    the output file. Derived from the node declarations rather than the flag
+    names, so a new frame-consuming node is accounted for without editing
+    this. The node set is flag-driven, not episode-driven, so the answer is
+    the same for every episode and is cached per run."""
+    if not self.drop_video:
+      return True
+    return any(decl.name == "image"
+               for node in self.pipeline(self.slices[0].episode_index)
+               for decl in node.inputs)
+
   # ---- lazy, per-episode LeRobot dataset access ---------------------------
   def episode_frames(self, episode_index: int) -> EpisodeFrames | None:
     """Decoded, stacked arrays for **one** episode, or ``None`` if no frames
@@ -136,21 +165,37 @@ class Run:
     selected episodes up front (the previous approach) held tens to hundreds
     of GB for a multi-episode import and was OOM-killed.
 
+    When :attr:`decodes_video` is false the MP4s are never opened and
+    ``images`` comes back ``None``: the proprio columns are read straight off
+    the underlying ``hf_dataset`` rows instead of through
+    ``LeRobotDataset.__getitem__``, which decodes a video frame per item
+    unconditionally whenever the dataset has video keys (``download_videos``
+    only governs *fetching* the files, not decoding them).
+
     The ``lerobot`` import is deferred to here so merely constructing a
     :class:`Run` (the doctor's case) never pulls in the stack."""
     from lerobot.datasets.lerobot_dataset import LeRobotDataset  # type: ignore
 
+    decode = self.decodes_video
     ds = LeRobotDataset(
       self.dataset_id, root=self.local_root,
-      episodes=[episode_index], download_videos=True)
+      episodes=[episode_index], download_videos=decode)
     if len(ds) == 0:
       return None
 
-    vkey = self.video_key
+    if not decode:
+      rows = ds.hf_dataset
+      return EpisodeFrames(
+        images=None,
+        action=np.stack([np.asarray(r, dtype=np.float32) for r in rows["action"]], axis=0),
+        state=np.stack([np.asarray(r, dtype=np.float32) for r in rows["observation.state"]], axis=0),
+        timestamp=np.asarray([float(t) for t in rows["timestamp"]], dtype=np.float32),
+      )
+
     images, action, state, timestamp = [], [], [], []
     for i in range(len(ds)):
       frame = ds[i]
-      images.append(_frame_to_image(frame[vkey]))
+      images.append(_frame_to_image(frame[self.video_key]))
       action.append(np.asarray(frame["action"], dtype=np.float32))
       state.append(np.asarray(frame["observation.state"], dtype=np.float32))
       timestamp.append(float(frame["timestamp"]))
@@ -164,9 +209,6 @@ class Run:
 
   @cached_property
   def _dataset_meta(self) -> Any:
-    """The dataset's ``LeRobotDatasetMetadata`` (full episode table), read
-    once per run — :meth:`episode_joint_values` may be called for many
-    touchpoint episodes in a row."""
     from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # type: ignore
 
     return LeRobotDatasetMetadata(self.dataset_id, root=self.local_root)
@@ -187,11 +229,9 @@ class Run:
       raise ValueError(
         f"{self.dataset_id}: episode {episode_index} not in the dataset")
 
-    parquet = Path(meta.root) / meta.data_path.format(
-      chunk_index=int(row["data/chunk_index"]),
-      file_index=int(row["data/file_index"]))
-    df     = pd.read_parquet(parquet, columns=["episode_index", "observation.state"])
-    values = df.loc[df["episode_index"] == episode_index, "observation.state"]
+    parquet = Path(meta.root) / meta.data_path.format(chunk_index=int(row["data/chunk_index"]), file_index=int(row["data/file_index"]))
+    df      = pd.read_parquet(parquet, columns=["episode_index", "observation.state"])
+    values  = df.loc[df["episode_index"] == episode_index, "observation.state"]
     return np.stack(values.to_numpy()).astype(np.float32)
 
   # ---- per-episode node list ------------------------------------------------

@@ -38,14 +38,6 @@ def assemble_episode(
   tags: tuple[str, ...] = (),
   name_prefix: str | None = None,
 ) -> tuple[Episode, dict[str, Any], str] | None:
-  """Decode one episode and build its ``(episode, metadata, name_suffix)``,
-  *before* any analysis stage runs. Returns ``None`` if no frames decoded.
-
-  This is the shared assembler for both the serial loop and the parallel
-  producer, so the :class:`Episode` / metadata construction lives in
-  exactly one place. The caller is responsible for running the stages (serially
-  in :func:`import_dataset`, split across producer/worker lanes in
-  :mod:`chuck_dreamer.lerobot.parallel`) and writing the result."""
   frames = run.episode_frames(sl.episode_index)
   if frames is None:
     logger.warning("episode %d: no frames decoded, skipping", sl.episode_index)
@@ -57,13 +49,15 @@ def assemble_episode(
       "episode %d: decoded length %d != meta length %d",
       sl.episode_index, T, sl.length)
 
-  episode = Episode.from_arrays({
-    "image":        frames.images,
+  arrays: dict[str, Any] = {
     "joint_action": frames.action,
     "reward":       np.zeros((T,),          dtype=np.float32),
     "timestamp":    frames.timestamp,
     "joint_qpos":   frames.state,
-  })
+  }
+  if frames.images is not None:
+    arrays["image"] = frames.images
+  episode = Episode.from_arrays(arrays)
   metadata = {
     "config": {
       "source_repo":   run.dataset_id,
@@ -77,7 +71,7 @@ def assemble_episode(
     "outcome": "imported",
     "number_of_frames": T,
   }
-  if sl.video_path is not None:
+  if sl.video_path is not None and frames.images is not None:
     window = float(sl.video_to_ts) - float(sl.video_from_ts)
     metadata["source_video"] = {
       "path":    str(sl.video_path),
@@ -94,6 +88,12 @@ def assemble_episode(
     name_suffix = f"{sl.episode_index:05d}"
 
   return episode, metadata, name_suffix
+
+
+def drop_video_field(episode: Episode) -> None:
+  """Suppress the RGB stack from an episode's *written* output (``--no-video``)."""
+  if "image" in episode:
+    episode.set("image", episode["image"], persist=False)
 
 
 def import_dataset(
@@ -131,6 +131,13 @@ def import_dataset(
       / ``ee_quat_table`` / ``ee_action_table`` / ``obj_pos_arm``), which
       need the dataset's ``table_to_arm`` transform in the store.
 
+  ``--no-video`` (``run.drop_video``) omits the RGB stack from the written
+  files, which carry the derived tracks at a small fraction of the size (and
+  are not usable for image-observation training). When a stage still consumes
+  the pixels the frames are decoded as usual and only their persistence is
+  switched off, right before the write; when nothing reads them the decode is
+  skipped outright — see :attr:`Run.decodes_video`.
+
   ``tags`` are stamped onto each written episode's metadata. The
   importer is the canonical way to mark recordings as e.g. ``"real"``
   so the replay buffer's tag-protection and tag-weighting can pick
@@ -165,6 +172,10 @@ def import_dataset(
 
   writer = EpisodeWriter(output_dir, format=format)
 
+  if not run.decodes_video:
+    logger.info("--no-video and no frame-consuming stage enabled: "
+                "skipping video decode entirely")
+
   for sl in slices:
     assembled = assemble_episode(
       run, sl, tags=tags, name_prefix=name_prefix)
@@ -175,6 +186,9 @@ def import_dataset(
     ts = TrackSet(
       EpisodeScope(run.dataset_id, sl.episode_index), episode, metadata)
     run_episode(run.pipeline(sl.episode_index), ts)
+
+    if run.drop_video:
+      drop_video_field(episode)
 
     out_path = writer.write_episode(
       episode, metadata=metadata, name_suffix=name_suffix)

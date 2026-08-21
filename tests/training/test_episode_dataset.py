@@ -295,6 +295,43 @@ def test_episode_from_file_rerun_round_trip(tmp_path):
   assert float(ep.data["image"][3].mean()) == 3.0
 
 
+@pytest.mark.parametrize("fmt,suffix", [("hdf5", "hdf5"), ("rerun", "rrd")])
+def test_episode_from_file_reads_video_less_episode(tmp_path, fmt, suffix):
+  # `import-lerobot run --no-video` writes episodes with no RGB stack. The
+  # reader must load them and still recover every other track — including the
+  # timestamps, which the rerun path normally sources off the camera entity.
+  from chuck_dreamer.lerobot.importer import drop_video_field
+  from chuck_dreamer.common.episode import Episode as EpisodeContainer
+
+  raw = _make_raw_episode(20)
+  container = EpisodeContainer.from_arrays(raw)
+  drop_video_field(container)
+  EpisodeWriter(str(tmp_path), format=fmt).write_episode(
+    container, metadata={"seed": 7, "source": "test"}, name_suffix="00000")
+
+  ep = Episode.from_file(tmp_path / f"episode-00000.{suffix}")
+
+  assert not ep.has("image")
+  assert ep.num_steps == 20
+  assert ep.data["joint_action"].shape == (20, 3)
+  assert ep.data["reward"].shape == (20,)
+  np.testing.assert_allclose(
+    np.asarray(ep.data["timestamp"]), raw["timestamp"], rtol=0, atol=1e-5)
+  np.testing.assert_allclose(ep.data["joint_qpos"][7], [0.7] * 6, rtol=0, atol=1e-5)
+
+
+def test_image_obs_mode_on_video_less_episode_raises_clear_error():
+  # An image obs_mode over a --no-video recording is a real misconfiguration;
+  # it must say so rather than surfacing a bare KeyError('image').
+  raw = _make_raw_episode(4)
+  del raw["image"]
+
+  from chuck_dreamer.training.episode_processor import _build_observation
+
+  with pytest.raises(KeyError, match="--no-video"):
+    _build_observation(raw, obs_mode=("image",), image_size=(8, 8))
+
+
 def test_rerun_round_trip_recovers_png_masks(tmp_path):
   # Masks are written as lossless PNG EncodedImage blobs; the reader must
   # decode them back to the exact (T, H, W) bool arrays.

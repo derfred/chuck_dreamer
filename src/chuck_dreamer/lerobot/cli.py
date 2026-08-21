@@ -44,6 +44,7 @@ def _import_dataset(
     f"with_ee_pos={run.params.get('with_ee_pos', False)}, "
     f"with_object_pose={run.params.get('with_object_pose', False)}, "
     f"tags={list(tags)}, name_prefix={name_prefix!r}, "
+    f"no_video={run.drop_video}, "
     f"jobs={jobs}, devices={devices or 'configured'}, "
     f"episodes={'all' if episode_filter is None else sorted(episode_filter)})"
   )
@@ -113,6 +114,13 @@ def _stage_options(fn):
          "dataset's table_to_arm transform in the store "
          "(`main.py import-lerobot extract-table-to-arm`).")(fn)
   fn = click.option(
+    "--no-video", "no_video", is_flag=True, default=False,
+    help="Drop the RGB frames from the written episodes — the bulk of an "
+         "episode file. Stages that consume the pixels still run (the video "
+         "is decoded and merely left out of the output); with no such stage "
+         "enabled the decode is skipped entirely. The resulting files are "
+         "not usable for image-observation training.")(fn)
+  fn = click.option(
     "--video-key", default=None, type=str,
     help="Video feature key (e.g. observation.images.wrist). "
          "Defaults to the first one.")(fn)
@@ -162,7 +170,7 @@ def import_lerobot_cmd():
 @click.pass_context
 def import_lerobot_run_cmd(ctx, repo_id, output, fmt, video_key,
                            with_ee_pos, with_object_pose, with_table_frame,
-                           tags, name_prefix, jobs, gpus):
+                           no_video, tags, name_prefix, jobs, gpus):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
 
   Loads the dataset through ``LeRobotDataset`` (which decodes video frames
@@ -180,6 +188,13 @@ def import_lerobot_run_cmd(ctx, repo_id, output, fmt, video_key,
        ee_quat_table / ee_action_table / obj_pos_arm) via the dataset's
        table_to_arm transform.
 
+  ``--no-video`` drops the RGB frames from the written files, removing
+  nearly all of an episode file's size when only the derived tracks are
+  wanted. Stages 3-4 consume the pixels, so with them enabled the video is
+  still decoded and merely left out of the output; with
+  ``--no-video --no-object-pose`` nothing reads the frames and the decode is
+  skipped outright (proprio is read from the parquet sidecars).
+
   ``REPO_ID`` accepts the same ``DATASET[#EPISODES]`` syntax used by
   ``calibrate-intrinsics`` and ``prompt-episodes`` — e.g.
   ``user/dataset#8-99`` to import only episodes 8 onward. ``:FRAMES``
@@ -188,7 +203,7 @@ def import_lerobot_run_cmd(ctx, repo_id, output, fmt, video_key,
   """
   spec   = EpisodeSpec.parse(repo_id, allow_frames=False, command="import-lerobot run")
   cfg    = load_config(ctx.obj["config_path"])
-  params = dict(with_ee_pos=with_ee_pos, with_object_pose=with_object_pose, with_table_frame=with_table_frame)
+  params = dict(with_ee_pos=with_ee_pos, with_object_pose=with_object_pose, with_table_frame=with_table_frame, no_video=no_video)
   run    = Run(cfg, spec, params, video_key=video_key)
 
   n_episodes             = len(run.slices)

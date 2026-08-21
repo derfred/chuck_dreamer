@@ -142,6 +142,10 @@ def _load_hdf5_episode(path: str | Path) -> RawEpisode:
   raw: dict[str, Any] = {}
   with h5py.File(path, "r") as f:
     for key, dataset in _HDF5_DATASET.items():
+      # ``images`` is optional: ``import-lerobot run --no-video`` writes
+      # proprio-only episodes. Every other mapped dataset is required.
+      if key == "image" and dataset not in f:
+        continue
       raw[key] = np.asarray(f[dataset][()])
 
     # Optional: imported LeRobot episodes carry the radians conversion as its
@@ -376,6 +380,10 @@ def _load_rerun_camera(
   select the episode's frames by their reference timestamps. Older
   recordings that pre-date the video switch logged a raw ``rr.Image`` per
   frame on ``/camera/image`` — fall back to that path for them.
+
+  A recording may carry no camera entity at all (``import-lerobot run
+  --no-video``): leave ``image`` unset and recover the timestamps from any
+  other per-step entity, which rides the same ``step`` / ``time`` timeline.
   """
   from chuck_dreamer.common.rerun_video import decode_frames, video_frame_timestamps
 
@@ -385,6 +393,10 @@ def _load_rerun_camera(
     raw["timestamp"] = _ordered_video_times(vchunks)
     video_bytes = _asset_video_blob(static, "/camera/video", path)
     raw["image"] = decode_frames(video_bytes, list(frame_pts))
+    return
+
+  if "/camera/image" not in by_entity:
+    raw["timestamp"] = _timestamps_without_camera(by_entity)
     return
 
   img_chunks = by_entity["/camera/image"]
@@ -404,6 +416,22 @@ def _asset_video_blob(static: dict[str, dict], entity: str, path: str | Path) ->
   if not cells:
     raise KeyError(f"{path}: no AssetVideo:blob on {entity}")
   return np.asarray(cells[0], dtype=np.uint8).tobytes()
+
+
+def _timestamps_without_camera(by_entity: dict[str, list[Any]]) -> np.ndarray:
+  """Per-step timestamps for a recording with no camera entity.
+
+  Every per-step entity is logged on the same ``step`` / ``time`` timeline, so
+  any of them recovers the episode's timestamps; the camera is simply where
+  the reader normally picks them up. Preferring an action entity keeps the
+  length aligned with what defines ``T`` everywhere else."""
+  for key in (*_ACTION_KEYS, "joint_qpos", "reward"):
+    chunks = by_entity.get(f"/{key}")
+    if chunks:
+      times = _ordered_video_times(chunks)
+      if times.size:
+        return times
+  return np.empty((0,), dtype=np.float32)
 
 
 def _ordered_video_times(record_batches: list[Any]) -> np.ndarray:

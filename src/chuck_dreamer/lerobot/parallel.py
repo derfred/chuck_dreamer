@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 from chuck_dreamer.common.episode import Episode
 from chuck_dreamer.common.episode_writer import EpisodeWriter
 
+from .importer import drop_video_field
 from .trackset import EpisodeScope, TrackSet, run_episode
 
 if TYPE_CHECKING:
@@ -93,6 +94,8 @@ def _worker_main(
   worker_node_names: tuple[str, ...],
   task_q: "mp.Queue[Any]",
   result_q: "mp.Queue[_Result]",
+  *,
+  drop_video: bool = False,
 ) -> None:
   """Worker-process entrypoint: build a CPU-only context + the run's worker-lane
   nodes once, then drain ``task_q``, running those nodes from the handed-in
@@ -126,12 +129,12 @@ def _worker_main(
     task: _Task = item
     try:
       ctx.episode_index = task.episode_index
-      ts = TrackSet(EpisodeScope(source_repo, task.episode_index),
-                    task.episode, task.metadata)
+      ts                = TrackSet(EpisodeScope(source_repo, task.episode_index), task.episode, task.metadata)
       run_episode(nodes, ts)
+      if drop_video:
+        drop_video_field(task.episode)
       name_suffix = task.metadata.pop("_name_suffix")
-      out_path    = writer.write_episode(
-        task.episode, metadata=task.metadata, name_suffix=name_suffix)
+      out_path    = writer.write_episode(task.episode, metadata=task.metadata, name_suffix=name_suffix)
       result_q.put(_Result(task.episode_index, out_path=out_path))
     except Exception as exc:  # noqa: BLE001 — ship the failure back, don't crash the pool
       logger.exception("worker: episode %d failed", task.episode_index)
@@ -206,6 +209,8 @@ def _producer_main(
       else:
         # Nothing for the worker pool — write here.
         assert writer is not None
+        if run.drop_video:
+          drop_video_field(episode)
         out_path = writer.write_episode(
           episode, metadata=metadata, name_suffix=name_suffix)
         result_q.put(_Result(sl.episode_index, out_path=out_path))
@@ -256,6 +261,12 @@ def import_dataset_parallel(
     if getattr(n, "lane", "worker") == "worker")
   has_worker_stages = bool(worker_node_names)
 
+  # As in the serial path: with --no-video and no frame-consuming node, the
+  # decode is skipped outright instead of decoded-then-discarded.
+  if not run.decodes_video:
+    logger.info("--no-video and no frame-consuming stage enabled: "
+                "skipping video decode entirely")
+
   # ``spawn`` (not fork): the workers must not inherit any CUDA context, and a
   # producer thread may have initialised CUDA in this process by the time a
   # worker starts.
@@ -277,6 +288,7 @@ def import_dataset_parallel(
         target=_worker_main,
         args=(run.ctx.config, run.dataset_id, output_dir, format,
               worker_node_names, task_q, result_q),
+        kwargs={"drop_video": run.drop_video},
         daemon=True,
       )
       p.start()

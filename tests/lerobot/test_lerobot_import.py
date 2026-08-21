@@ -186,7 +186,9 @@ def test_read_episodes_applies_spec_filter(monkeypatch):
 def _import(out, root, **kw):
   from chuck_dreamer.lerobot.pipeline import Run
   spec = es.EpisodeSpec.parse(str(root), **kw.pop("parse_kw", {}))
-  run = Run(None, spec, {"with_ee_pos": False, "with_object_pose": False})
+  params = {"with_ee_pos": False, "with_object_pose": False,
+            "no_video": kw.pop("no_video", False)}
+  run = Run(None, spec, params)
   return list(li.import_dataset(
     run, str(out), format=kw.pop("format", "hdf5"), **kw))
 
@@ -241,6 +243,97 @@ def test_import_dataset_zero_fills_missing_signals(tmp_path, fake_repo):
   assert np.all(ep0["ee_pos"]    == 0)
   assert np.all(ep0["ee_quat"]   == 0)
   assert np.all(ep0["object_xy"] == 0)
+
+
+def test_no_video_omits_images_but_keeps_other_tracks(tmp_path, fake_repo):
+  # --no-video drops only the RGB stack; every other per-step track is
+  # written exactly as it would be otherwise.
+  import h5py
+
+  out = tmp_path / "out"
+  _import(out, fake_repo, no_video=True)
+
+  with h5py.File(out / "episode-00000.hdf5", "r") as f:
+    assert "images" not in f
+    assert f["joint_action"].shape == (6, 6)
+    assert f["joint_qpos"].shape == (6, 6)
+    assert f["timestamps"].shape == (6,)
+
+
+def test_no_video_file_is_much_smaller(tmp_path, fake_repo):
+  with_video = tmp_path / "with"
+  without    = tmp_path / "without"
+  _import(with_video, fake_repo)
+  _import(without, fake_repo, no_video=True)
+
+  big   = (with_video / "episode-00000.hdf5").stat().st_size
+  small = (without / "episode-00000.hdf5").stat().st_size
+  assert small < big
+
+
+def test_no_video_without_frame_consumers_skips_decode(tmp_path, fake_repo,
+                                                       monkeypatch):
+  # With no node declaring ``image``, --no-video must not decode the video at
+  # all: the run reports decodes_video False and the frames come back with
+  # images=None.
+  from chuck_dreamer.lerobot.pipeline import Run
+
+  seen: list[bool] = []
+  original = Run.episode_frames
+
+  def spy(self, episode_index):
+    seen.append(self.decodes_video)
+    frames = original(self, episode_index)
+    assert frames is not None and frames.images is None
+    return frames
+
+  monkeypatch.setattr(Run, "episode_frames", spy)
+
+  out = tmp_path / "out"
+  _import(out, fake_repo, no_video=True)
+
+  assert seen and not any(seen), seen
+  assert (out / "episode-00000.hdf5").exists()
+
+
+def test_no_video_with_frame_consumer_still_decodes(tmp_path, fake_repo,
+                                                    monkeypatch):
+  # A node that declares ``image`` forces the decode even under --no-video;
+  # the frames are used and then simply left out of the written file.
+  import h5py
+
+  from chuck_dreamer.common.tracks import Frame
+  from chuck_dreamer.lerobot.harness import InputDecl
+  from chuck_dreamer.lerobot.pipeline import Run
+
+  class _NeedsFrames:
+    name = "needs_frames"
+    lane = "producer"
+    inputs = (InputDecl("image", frame=Frame.IMAGE),)
+    outputs = ()
+
+    def run(self, view):
+      view.track("image")  # actually consume the pixels
+      return []
+
+  monkeypatch.setattr(Run, "pipeline",
+                      lambda self, episode_index: [_NeedsFrames()])
+
+  seen: list[bool] = []
+  original = Run.episode_frames
+
+  def spy(self, episode_index):
+    seen.append(self.decodes_video)
+    return original(self, episode_index)
+
+  monkeypatch.setattr(Run, "episode_frames", spy)
+
+  out = tmp_path / "out"
+  _import(out, fake_repo, no_video=True)
+
+  assert seen and all(seen), seen
+  with h5py.File(out / "episode-00000.hdf5", "r") as f:
+    assert "images" not in f  # decoded, used, but not persisted
 
 
 def test_import_dataset_carries_action_state_and_timestamps(tmp_path, fake_repo):
