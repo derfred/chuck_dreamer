@@ -22,7 +22,7 @@ from typing import Any
 
 import numpy as np
 
-from chuck_dreamer.perception.geometry import circle_samples_world, line_world_points
+from chuck_dreamer.perception.geometry import circle_samples_world, line_world_points, mat_circle_center_x_mm
 from chuck_dreamer.perception.config import ObjectLocalizationConfig
 from chuck_dreamer.perception.types import Extrinsics, MatDetection
 
@@ -54,8 +54,8 @@ def solve_extrinsics(
     detection.line2_near,
     detection.line2_far,
   ], axis=0).astype(np.float64)
-  line_world = line_world_points(ol_cfg.mat_line_length_mm,
-                                 ol_cfg.mat_line_separation_mm)
+  line_world = line_world_points(ol_cfg.mat_line_length_mm, ol_cfg.mat_line_separation_mm)
+  circle_cx  = mat_circle_center_x_mm(ol_cfg.mat_line_length_mm)
   # Re-order line_world to match line_img: (line1_near, line1_far, line2_near, line2_far)
   # line_world_points returns them already in this order.
 
@@ -68,7 +68,8 @@ def solve_extrinsics(
   for reverse in (False, True):
     for k in range(N):
       world = circle_samples_world(ol_cfg.mat_circle_radius_mm, N,
-                                   phase_offset=k, reverse=reverse)
+                                   phase_offset=k, reverse=reverse,
+                                   center_x_mm=circle_cx)
       proj, _ = cv2.projectPoints(world, seed_rvec, seed_tvec, K, dist)
       diff = proj.reshape(-1, 2) - circle_uv
       err = float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
@@ -77,7 +78,8 @@ def solve_extrinsics(
   assert best is not None
   _, k_best, reverse_best = best
   circle_world = circle_samples_world(ol_cfg.mat_circle_radius_mm, N,
-                                      phase_offset=k_best, reverse=reverse_best)
+                                      phase_offset=k_best, reverse=reverse_best,
+                                      center_x_mm=circle_cx)
 
   world_pts = np.concatenate([line_world, circle_world], axis=0)
   img_pts   = np.concatenate([line_img, circle_uv], axis=0)
@@ -95,9 +97,9 @@ def solve_extrinsics(
   # share reprojection RMS so SQPNP can pick either; we check by
   # comparing camera positions and, if they differ in sign, fall back
   # to ITERATIVE seeded with the IPPE solution to lock the basin.
-  R_sq, _ = cv2.Rodrigues(rvec)
-  cam_pos_sq = -R_sq.T @ tvec.reshape(3)
-  R_seed, _  = cv2.Rodrigues(seed_rvec)
+  R_sq, _      = cv2.Rodrigues(rvec)
+  cam_pos_sq   = -R_sq.T @ tvec.reshape(3)
+  R_seed, _    = cv2.Rodrigues(seed_rvec)
   cam_pos_seed = -R_seed.T @ seed_tvec.reshape(3)
   if cam_pos_sq[2] * cam_pos_seed[2] < 0:
     logger.warning("SQPNP picked the mirror twin of the IPPE seed "
@@ -174,7 +176,7 @@ def _seed_pnp(world: np.ndarray, image: np.ndarray,
 
   candidates: list[tuple[float, int, float]] = []   # (cam_z, index, rms)
   for i, (rvec_i, tvec_i, err_i) in enumerate(zip(rvecs, tvecs, errs)):
-    R_i, _ = cv2.Rodrigues(rvec_i)
+    R_i, _  = cv2.Rodrigues(rvec_i)
     cam_pos = -R_i.T @ tvec_i.reshape(3)
     candidates.append((float(cam_pos[2]), i, float(err_i)))
 
@@ -203,9 +205,9 @@ def _seed_pnp(world: np.ndarray, image: np.ndarray,
       candidates[0][2], candidates[0][0])
 
   rvec, tvec = rvecs[chosen_idx], tvecs[chosen_idx]
-  proj, _ = cv2.projectPoints(world, rvec, tvec, K, dist)
-  diff = proj.reshape(-1, 2) - image
-  rms = float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
+  proj, _    = cv2.projectPoints(world, rvec, tvec, K, dist)
+  diff       = proj.reshape(-1, 2) - image
+  rms        = float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
   return rvec, tvec, rms
 
 
@@ -218,30 +220,29 @@ def render_extrinsics_overlay(
   import cv2
 
   rvec, _ = cv2.Rodrigues(extrinsics.R)
-  tvec = extrinsics.t.reshape(3)
-  canvas = cv2.cvtColor(frame_rgb.copy(), cv2.COLOR_RGB2BGR)
+  tvec    = extrinsics.t.reshape(3)
+  canvas  = cv2.cvtColor(frame_rgb.copy(), cv2.COLOR_RGB2BGR)
 
-  line_world = line_world_points(ol_cfg.mat_line_length_mm,
-                                 ol_cfg.mat_line_separation_mm)
+  line_world   = line_world_points(ol_cfg.mat_line_length_mm, ol_cfg.mat_line_separation_mm)
   line_proj, _ = cv2.projectPoints(line_world, rvec, tvec, K, dist)
-  line_proj = line_proj.reshape(-1, 2)
+  line_proj    = line_proj.reshape(-1, 2)
   cv2.line(canvas, _ipt(line_proj[0]), _ipt(line_proj[1]), (0, 255, 0), 2)
   cv2.line(canvas, _ipt(line_proj[2]), _ipt(line_proj[3]), (0, 0, 255), 2)
 
-  circle_world = circle_samples_world(ol_cfg.mat_circle_radius_mm, 256)
+  circle_world   = circle_samples_world(ol_cfg.mat_circle_radius_mm, 256, center_x_mm=mat_circle_center_x_mm(ol_cfg.mat_line_length_mm))
   circle_proj, _ = cv2.projectPoints(circle_world, rvec, tvec, K, dist)
-  circle_proj = circle_proj.reshape(-1, 2)
-  pts = np.array([_ipt(p) for p in circle_proj], dtype=np.int32)
+  circle_proj    = circle_proj.reshape(-1, 2)
+  pts            = np.array([_ipt(p) for p in circle_proj], dtype=np.int32)
   cv2.polylines(canvas, [pts], isClosed=True, color=(0, 165, 255), thickness=2)
 
   # Mat border (configured world bbox) — green polyline. Each edge is
   # sampled at multiple points so wide-angle lens distortion shows as
   # the curved projection it actually is, rather than straight chords
   # between the 4 corner points.
-  border_world = _mat_border_samples_world(ol_cfg, n_per_edge=32)
+  border_world   = _mat_border_samples_world(ol_cfg, n_per_edge=32)
   border_proj, _ = cv2.projectPoints(border_world, rvec, tvec, K, dist)
-  border_proj = border_proj.reshape(-1, 2)
-  border_pts = np.array([_ipt(p) for p in border_proj], dtype=np.int32)
+  border_proj    = border_proj.reshape(-1, 2)
+  border_pts     = np.array([_ipt(p) for p in border_proj], dtype=np.int32)
   cv2.polylines(canvas, [border_pts], isClosed=True, color=(80, 255, 80), thickness=2)
 
   if detection is not None:
@@ -261,8 +262,8 @@ def render_extrinsics_overlay(
   if result is not None:
     for i, (img_pt, world_pt) in enumerate(zip(result.image_points, result.world_points)):
       proj_pt, _ = cv2.projectPoints(world_pt.reshape(1, 3), rvec, tvec, K, dist)
-      proj_pt = proj_pt.reshape(2)
-      err = float(np.linalg.norm(proj_pt - img_pt))
+      proj_pt    = proj_pt.reshape(2)
+      err        = float(np.linalg.norm(proj_pt - img_pt))
       if i < 4 or i % 8 == 0:
         cv2.putText(canvas, f"{err:.1f}", (_ipt(img_pt)[0] + 4, _ipt(img_pt)[1] + 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1, cv2.LINE_AA)
@@ -284,25 +285,24 @@ def draw_extrinsics_overlay_bgr(
   import cv2
 
   rvec, _ = cv2.Rodrigues(extrinsics.R)
-  tvec = extrinsics.t.reshape(3)
+  tvec    = extrinsics.t.reshape(3)
 
-  line_world = line_world_points(ol_cfg.mat_line_length_mm,
-                                 ol_cfg.mat_line_separation_mm)
+  line_world   = line_world_points(ol_cfg.mat_line_length_mm, ol_cfg.mat_line_separation_mm)
   line_proj, _ = cv2.projectPoints(line_world, rvec, tvec, K, dist)
-  line_proj = line_proj.reshape(-1, 2)
+  line_proj    = line_proj.reshape(-1, 2)
   cv2.line(canvas_bgr, _ipt(line_proj[0]), _ipt(line_proj[1]), (0, 255, 0), 2)
   cv2.line(canvas_bgr, _ipt(line_proj[2]), _ipt(line_proj[3]), (0, 0, 255), 2)
 
-  circle_world = circle_samples_world(ol_cfg.mat_circle_radius_mm, 256)
+  circle_world   = circle_samples_world(ol_cfg.mat_circle_radius_mm, 256, center_x_mm=mat_circle_center_x_mm(ol_cfg.mat_line_length_mm))
   circle_proj, _ = cv2.projectPoints(circle_world, rvec, tvec, K, dist)
-  circle_proj = circle_proj.reshape(-1, 2)
-  pts = np.array([_ipt(p) for p in circle_proj], dtype=np.int32)
+  circle_proj    = circle_proj.reshape(-1, 2)
+  pts            = np.array([_ipt(p) for p in circle_proj], dtype=np.int32)
   cv2.polylines(canvas_bgr, [pts], isClosed=True, color=(0, 165, 255), thickness=2)
 
-  border_world = _mat_border_samples_world(ol_cfg, n_per_edge=32)
+  border_world   = _mat_border_samples_world(ol_cfg, n_per_edge=32)
   border_proj, _ = cv2.projectPoints(border_world, rvec, tvec, K, dist)
-  border_proj = border_proj.reshape(-1, 2)
-  border_pts = np.array([_ipt(p) for p in border_proj], dtype=np.int32)
+  border_proj    = border_proj.reshape(-1, 2)
+  border_pts     = np.array([_ipt(p) for p in border_proj], dtype=np.int32)
   cv2.polylines(canvas_bgr, [border_pts], isClosed=True, color=(80, 255, 80), thickness=2)
 
 
@@ -313,8 +313,8 @@ def render_world_axes(
   """Draw a world-frame triad at the origin."""
   import cv2
   rvec, _ = cv2.Rodrigues(extrinsics.R)
-  tvec = extrinsics.t.reshape(3)
-  canvas = cv2.cvtColor(frame_rgb.copy(), cv2.COLOR_RGB2BGR)
+  tvec    = extrinsics.t.reshape(3)
+  canvas  = cv2.cvtColor(frame_rgb.copy(), cv2.COLOR_RGB2BGR)
   pts3d = np.array([
     [0, 0, 0],
     [axis_mm, 0, 0],
@@ -322,17 +322,15 @@ def render_world_axes(
     [0, 0, axis_mm],
   ], dtype=np.float64)
   proj, _ = cv2.projectPoints(pts3d, rvec, tvec, K, dist)
-  proj = proj.reshape(-1, 2)
-  origin = _ipt(proj[0])
+  proj    = proj.reshape(-1, 2)
+  origin  = _ipt(proj[0])
+
   cv2.arrowedLine(canvas, origin, _ipt(proj[1]), (0, 0, 255), 2, tipLength=0.2)
   cv2.arrowedLine(canvas, origin, _ipt(proj[2]), (0, 255, 0), 2, tipLength=0.2)
   cv2.arrowedLine(canvas, origin, _ipt(proj[3]), (255, 0, 0), 2, tipLength=0.2)
-  cv2.putText(canvas, "+X", _ipt(proj[1] + np.array([6, -6])),
-              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
-  cv2.putText(canvas, "+Y", _ipt(proj[2] + np.array([6, -6])),
-              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
-  cv2.putText(canvas, "+Z", _ipt(proj[3] + np.array([6, -6])),
-              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1, cv2.LINE_AA)
+  cv2.putText(canvas, "+X", _ipt(proj[1] + np.array([6, -6])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+  cv2.putText(canvas, "+Y", _ipt(proj[2] + np.array([6, -6])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+  cv2.putText(canvas, "+Z", _ipt(proj[3] + np.array([6, -6])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1, cv2.LINE_AA)
   return canvas
 
 

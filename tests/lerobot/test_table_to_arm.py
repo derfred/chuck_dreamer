@@ -42,9 +42,15 @@ def _rig_arm_points(p_table: np.ndarray, theta_deg: float, distance: float,
                     touch_z: float) -> np.ndarray:
   """Arm-frame touches for a rig at yaw ``theta_deg``, whose base sits
   ``distance`` behind the middle target along the arm's +x axis, touching at
-  height ``touch_z``."""
+  height ``touch_z``.
+
+  Mirrors the fit's translation convention: the middle target — the one
+  nearest the row centroid, wherever the table origin happens to be — is
+  what sits ``distance`` along the arm's +x axis."""
   R = _rz(theta_deg)
-  t = -R @ np.array([distance, 0.0, 0.0])
+  middle = p_table[np.argmin(
+    np.linalg.norm(p_table[:, :2] - p_table[:, :2].mean(axis=0), axis=1))]
+  t = middle - R @ np.array([distance, 0.0, 0.0])
   t[2] = -touch_z
   return _arm_points(p_table, R, t)
 
@@ -145,8 +151,14 @@ def rig(tmp_path):
   ctx._store_resolved = True
   ctx._fk = lambda q_rad: np.asarray(q_rad[:3], dtype=np.float64)
 
+  # Same convention as the fit: the middle target (row centroid) is what
+  # sits 0.28 m along the arm's +x axis, not the table origin.
+  _targets = np.array([[x / 1000.0, y / 1000.0, 0.0]
+                       for x, y in TOUCHPOINT_VARIANTS[3].values()])
+  _middle = _targets[np.argmin(
+    np.linalg.norm(_targets[:, :2] - _targets[:, :2].mean(axis=0), axis=1))]
   R_true = _rz(30.0)
-  t_true = -R_true @ np.array([0.28, 0.0, 0.0])
+  t_true = _middle - R_true @ np.array([0.28, 0.0, 0.0])
   t_true[2] = -0.015
   joints: dict[int, np.ndarray] = {}
   for ep, (x_mm, y_mm) in TOUCHPOINT_VARIANTS[3].items():

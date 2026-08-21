@@ -139,8 +139,8 @@ def _parse(raw: dict[str, Any]) -> ObjectLocalizationConfig:
     mat_line_separation_mm = D,
     mat_circle_radius_mm   = r,
     mat_circle_samples     = int(mat.get("circle_samples", 64)),
-    mat_extent_xmin_mm     = float(mat.get("extent_xmin_mm", -L - 200.0)),
-    mat_extent_xmax_mm     = float(mat.get("extent_xmax_mm", r + 200.0)),
+    mat_extent_xmin_mm     = float(mat.get("extent_xmin_mm", -L / 2 - 200.0)),
+    mat_extent_xmax_mm     = float(mat.get("extent_xmax_mm", L / 2 + r + 200.0)),
     mat_extent_ymin_mm     = float(mat.get("extent_ymin_mm", -D / 2 - 200.0)),
     mat_extent_ymax_mm     = float(mat.get("extent_ymax_mm",  D / 2 + 200.0)),
 

@@ -208,7 +208,7 @@ def import_lerobot_run_cmd(ctx, repo_id, output, fmt,
 @click.pass_context
 def import_lerobot_doctor_cmd(ctx, repo_id,
                               with_ee_pos, with_object_pose,
-                              with_table_frame):
+                              with_table_frame, no_video):
   """Check that every artifact the requested pipeline needs is present,
   without importing anything.
 
@@ -222,7 +222,7 @@ def import_lerobot_doctor_cmd(ctx, repo_id,
 
   spec   = EpisodeSpec.parse(repo_id, allow_frames=False, command="import-lerobot doctor")
   cfg    = load_config(ctx.obj["config_path"])
-  params = dict(with_ee_pos=with_ee_pos, with_object_pose=with_object_pose, with_table_frame=with_table_frame)
+  params = dict(with_ee_pos=with_ee_pos, with_object_pose=with_object_pose, with_table_frame=with_table_frame, no_video=no_video)
   run    = Run(cfg, spec, params)
 
   ok = doctor_run(run)
