@@ -8,6 +8,7 @@ import pytest
 from fessel_schemas import ModeTriplet
 
 from video.pipeline import (
+  SOURCE_WATCHDOG_TIMEOUT_MS,
   build_audio_launch,
   build_capture_launch,
   build_recording_launch,
@@ -225,6 +226,33 @@ def test_capture_launch_bakes_in_the_warm_live_encoder():
   assert "bitrate=1000 " in launch
   # The drop branch keeps the warm encoder flowing while unwatched.
   assert "tee_live. ! queue ! fakesink sync=false" in launch
+
+
+def test_source_chain_watchdogs_the_camera():
+  """A silently-stalled USB camera posts nothing on the bus (no ERROR, no EOS),
+  so v4l2src starvation is invisible without a watchdog. It must sit directly
+  after the source, before jpegdec, so it times camera silence and not decode."""
+  launch = _capture_launch(device="/dev/video0", use_test_source=False)
+  assert f"watchdog timeout={SOURCE_WATCHDOG_TIMEOUT_MS}" in launch
+  src = launch.index("v4l2src")
+  wd = launch.index("watchdog")
+  dec = launch.index("jpegdec")
+  assert src < wd < dec
+
+
+def test_source_chain_watchdog_present_on_test_source_too():
+  """Dev and prod pipelines stay structurally identical: videotestsrc does not
+  stall, but a shape that differs between them hides bugs in the one that does."""
+  launch = _capture_launch(use_test_source=True)
+  assert f"watchdog timeout={SOURCE_WATCHDOG_TIMEOUT_MS}" in launch
+  assert launch.index("videotestsrc") < launch.index("watchdog")
+
+
+def test_capture_launch_watchdogs_the_single_camera_once():
+  """The camera is opened once, so it is watchdogged once — one guard on the
+  one source, not one per consuming branch."""
+  launch = _capture_launch(ring_dir="/r", device="/dev/video0", use_test_source=False)
+  assert launch.count("watchdog") == 1
 
 
 def test_capture_launch_real_camera_opens_v4l2src_once():

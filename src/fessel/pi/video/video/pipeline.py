@@ -8,6 +8,9 @@ Every cap below is load-bearing on the Pi hardware:
   - v4l2h264enc requires explicit input cap video/x-raw,format=I420.
   - encoder bitrate is set via extra-controls, not a property.
   - output cap video/x-h264,level=(string)4 is required for negotiation.
+  - a `watchdog` follows the source: a silently-stalled USB camera posts
+    nothing on the bus, so without it the pipeline starves undetectably
+    (SOURCE_WATCHDOG_TIMEOUT_MS).
 
 Live path (architecture §2.2, warm-but-detached / Variant B):
   - A dedicated live encoder at a FIXED deploy-time profile is built into the
@@ -48,6 +51,22 @@ if TYPE_CHECKING:
   from gi.repository import Gst
 
 log = logging.getLogger(__name__)
+
+# How long the source may go silent before the `watchdog` element posts a bus
+# ERROR (milliseconds).
+#
+# A USB camera can stop delivering buffers while staying enumerated with a
+# valid fd: v4l2src then blocks in VIDIOC_DQBUF forever, posting NOTHING on the
+# bus — no ERROR, no EOS. The pipeline sits in PLAYING with every sink starved,
+# the process keeps heartbeating, and systemd's Restart=on-failure never fires
+# because nothing failed. That is invisible by construction; it once ran for
+# five days. `watchdog` is the element that turns that silence into the bus
+# ERROR the capture bus watch already handles.
+#
+# 10s is ~300 frames at 30fps: far beyond any legitimate hiccup (a USB retry,
+# a scheduling stall, an encoder backpressure blip), but short enough that the
+# fault is caught in seconds rather than days.
+SOURCE_WATCHDOG_TIMEOUT_MS = 10_000
 
 # Element name for the warm live encoder, so the pipeline handle can look it
 # up to send a force-key-unit (IDR) event on activation (V2.2). Stable name
@@ -104,22 +123,36 @@ def _wh(resolution: str) -> tuple[int, int]:
   return w, h
 
 
-def _source_chain(device: str, width: int, height: int, fps: int, use_test_source: bool) -> str:
+def _source_chain(
+  device: str,
+  width: int,
+  height: int,
+  fps: int,
+  use_test_source: bool,
+  watchdog_timeout_ms: int = SOURCE_WATCHDOG_TIMEOUT_MS,
+) -> str:
   """Capture front of the pipeline.
 
-  Real camera: v4l2src MJPG -> jpegdec -> videoconvert -> I420.
-  Dev fallback: videotestsrc -> I420 (no camera needed).
+  Real camera: v4l2src MJPG -> watchdog -> jpegdec -> videoconvert -> I420.
+  Dev fallback: videotestsrc -> watchdog -> I420 (no camera needed).
+
+  The `watchdog` sits directly downstream of the source, before any decode, so
+  it times exactly one thing: buffers arriving from the camera. See
+  SOURCE_WATCHDOG_TIMEOUT_MS for why it is here at all.
   """
+  watchdog = f"watchdog timeout={watchdog_timeout_ms}"
   if use_test_source:
     return (
       f"videotestsrc is-live=true pattern=ball "
       f"! video/x-raw,width={width},height={height},framerate={fps}/1 "
+      f"! {watchdog} "
       f"! videoconvert "
       f"! video/x-raw,format=I420"
     )
   return (
     f"v4l2src device={device} "
     f"! image/jpeg,width={width},height={height},framerate={fps}/1 "
+    f"! {watchdog} "
     f"! jpegdec "
     f"! videoconvert "
     f"! video/x-raw,format=I420"
