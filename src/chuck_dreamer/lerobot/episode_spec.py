@@ -164,7 +164,6 @@ class EpisodeSpec:
   # ---- resolution to LeRobot episode metadata ----------------------------
   def read_episodes(
     self, *,
-    video_key: str | None = None,
     root: str | Path | None = None,
   ) -> tuple[list[EpisodeSlice], str]:
     """Read this spec's dataset and return ``(slices, resolved_video_key)``:
@@ -173,10 +172,11 @@ class EpisodeSpec:
     video fields were populated from.
 
     Reads only the parquet sidecars under ``meta/`` via
-    ``LeRobotDatasetMetadata`` (no video touch). ``video_key`` selects
-    which ``observation.images.*`` feature's chunk/file/timestamp columns
-    populate the video fields (defaults to the dataset's first video key);
-    ``root`` points at an on-disk dataset directory.
+    ``LeRobotDatasetMetadata`` (no video touch). Every dataset the importer
+    handles is single-camera, so the dataset's first (and only)
+    ``observation.images.*`` feature supplies the chunk/file/timestamp
+    columns that populate the video fields; ``root`` points at an on-disk
+    dataset directory.
 
     The LeRobot import is deferred to call time so that merely parsing a
     spec string (the CLIs' common case) doesn't pull in the LeRobot stack.
@@ -184,12 +184,15 @@ class EpisodeSpec:
     from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # type: ignore
 
     meta = LeRobotDatasetMetadata(self.dataset_id, root=root)
-    vkey = _resolve_video_key(meta, self.dataset_id, video_key)
+    video_keys = [str(k) for k in meta.video_keys]
+    if not video_keys:
+      raise ValueError(f"{self.dataset_id}: no video features found")
+    vkey = video_keys[0]
 
     vcol_chunk = f"videos/{vkey}/chunk_index"
-    vcol_file = f"videos/{vkey}/file_index"
-    vcol_from = f"videos/{vkey}/from_timestamp"
-    vcol_to = f"videos/{vkey}/to_timestamp"
+    vcol_file  = f"videos/{vkey}/file_index"
+    vcol_from  = f"videos/{vkey}/from_timestamp"
+    vcol_to    = f"videos/{vkey}/to_timestamp"
 
     # ``meta.video_path`` is a formattable template (videos/{video_key}/
     # chunk-{:03d}/file-{:03d}.mp4) relative to ``meta.root``; resolve each
@@ -199,11 +202,10 @@ class EpisodeSpec:
 
     slices: list[EpisodeSlice] = []
     for row in meta.episodes:
-      tasks = row.get("tasks") or []
+      tasks  = row.get("tasks") or []
       vchunk = int(row[vcol_chunk])
       vfile  = int(row[vcol_file])
-      vpath  = root_dir / vpath_tpl.format(
-        video_key=vkey, chunk_index=vchunk, file_index=vfile)
+      vpath  = root_dir / vpath_tpl.format(video_key=vkey, chunk_index=vchunk, file_index=vfile)
       slices.append(EpisodeSlice(
         episode_index=int(row["episode_index"]),
         data_from=int(row["dataset_from_index"]),
@@ -220,18 +222,6 @@ class EpisodeSpec:
       ))
     slices.sort(key=lambda s: s.episode_index)
     return self._select_episodes(slices), vkey
-
-
-def _resolve_video_key(meta, dataset_id: str, video_key: str | None) -> str:
-  video_keys = [str(k) for k in meta.video_keys]
-  if video_key is not None:
-    if video_key not in video_keys:
-      raise ValueError(
-        f"{dataset_id}: video key {video_key!r} not among {video_keys}")
-    return video_key
-  if not video_keys:
-    raise ValueError(f"{dataset_id}: no video features found")
-  return video_keys[0]
 
 
 # ---------------------------------------------------------------------------

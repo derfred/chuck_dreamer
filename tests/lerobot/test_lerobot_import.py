@@ -132,7 +132,7 @@ class _FakeMetaNoVideo(_FakeMeta):
 # ---------------------------------------------------------------------------
 
 
-def test_read_episodes_picks_first_video_key_when_unspecified(monkeypatch):
+def test_read_episodes_resolves_the_datasets_single_video_key(monkeypatch):
   monkeypatch.setattr(
     "lerobot.datasets.lerobot_dataset.LeRobotDatasetMetadata", _FakeMeta)
   slices, vkey = es.EpisodeSpec("any/repo").read_episodes()
@@ -148,20 +148,6 @@ def test_read_episodes_resolves_absolute_video_path(monkeypatch):
   slices, _ = es.EpisodeSpec("any/repo").read_episodes(root="/data/repo")
   assert str(slices[0].video_path) == (
     f"/data/repo/videos/{VIDEO_KEY}/chunk-000/file-000.mp4")
-
-
-def test_read_episodes_honors_preferred_video_key(monkeypatch):
-  monkeypatch.setattr(
-    "lerobot.datasets.lerobot_dataset.LeRobotDatasetMetadata", _FakeMeta)
-  _, vkey = es.EpisodeSpec("any/repo").read_episodes(video_key=VIDEO_KEY)
-  assert vkey == VIDEO_KEY
-
-
-def test_read_episodes_rejects_unknown_video_key(monkeypatch):
-  monkeypatch.setattr(
-    "lerobot.datasets.lerobot_dataset.LeRobotDatasetMetadata", _FakeMeta)
-  with pytest.raises(ValueError, match="not among"):
-    es.EpisodeSpec("any/repo").read_episodes(video_key="observation.images.nope")
 
 
 def test_read_episodes_raises_when_no_video_features(monkeypatch):
@@ -384,16 +370,6 @@ def test_import_dataset_respects_source_episode_filter(tmp_path, fake_repo):
   assert [idx for idx, _ in results2] == [1]
   assert (out2 / "episode-00001.hdf5").exists()
   assert not (out2 / "episode-00000.hdf5").exists()
-
-
-def test_import_dataset_rejects_unknown_video_key(tmp_path, fake_repo):
-  from chuck_dreamer.lerobot.pipeline import Run
-  out = tmp_path / "out"
-  spec = es.EpisodeSpec.parse(str(fake_repo))
-  run = Run(None, spec, {"with_ee_pos": False, "with_object_pose": False},
-            video_key="observation.images.nope")
-  with pytest.raises(ValueError, match="not among"):
-    list(li.import_dataset(run, str(out), format="hdf5"))
 
 
 def test_import_dataset_stamps_tags_on_each_episode(tmp_path, fake_repo):

@@ -99,7 +99,7 @@ def doctor_run(run: "Run") -> bool:
     f"with_table_frame={params.get('with_table_frame', False)}")
 
   try:
-    slices, _ = run.read_slices()
+    slices = run.slices
   except Exception as e:  # noqa: BLE001 - surface metadata-read failures as doctor output
     click.echo(click.style(f"  ERROR  could not read episodes: {e}", fg="red"))
     return False

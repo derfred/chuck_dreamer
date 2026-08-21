@@ -74,10 +74,9 @@ class Run:
   wiring through it.
   """
 
-  def __init__(self, config, spec: EpisodeSpec, params: dict[str, bool], video_key: str | None = None) -> None:
+  def __init__(self, config, spec: EpisodeSpec, params: dict[str, bool]) -> None:
     self.spec                     = spec
     self.params                   = params
-    self._video_key_pref          = video_key
     self.ctx                      = RunContext(config=config, source_repo=spec.dataset_id)
     self.local_root: Path | None  = (Path(spec.dataset_id) if Path(spec.dataset_id).is_dir() else None)
     self._nodes: list[Any] | None = None  # built lazily, reused per episode
@@ -106,7 +105,7 @@ class Run:
   def _resolved(self) -> tuple[list[EpisodeSlice], str]:
     """``(selected slices, resolved video key)``, read once from ``meta/``
     (no video touch) and cached for the run's lifetime."""
-    return self.spec.read_episodes(video_key=self._video_key_pref, root=self.local_root)
+    return self.spec.read_episodes(root=self.local_root)
 
   @property
   def slices(self) -> list[EpisodeSlice]:
@@ -118,16 +117,6 @@ class Run:
     """The resolved ``observation.images.*`` feature key the slices' video
     fields were populated from."""
     return self._resolved[1]
-
-  def read_slices(self, video_key: str | None = None) -> tuple[list[EpisodeSlice], str]:
-    """Resolve this spec's selected episode slices + the video key, reading
-    only the offline ``meta/`` sidecars (no video touch).
-
-    Kept for callers that want to override the run's video key; the no-arg
-    form just returns the cached :attr:`slices` / :attr:`video_key`."""
-    if video_key is None or video_key == self._video_key_pref:
-      return self.slices, self.video_key
-    return self.spec.read_episodes(video_key=video_key, root=self.local_root)
 
   # ---- video-decode requirement -------------------------------------------
   @property

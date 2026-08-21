@@ -42,8 +42,9 @@ class _FakeRun:
     self._nodes = nodes
     self._episodes = episodes
 
-  def read_slices(self):
-    return [SimpleNamespace(episode_index=i) for i in self._episodes], "k"
+  @property
+  def slices(self):
+    return [SimpleNamespace(episode_index=i) for i in self._episodes]
 
   def pipeline(self, episode_index):
     self.ctx.episode_index = episode_index

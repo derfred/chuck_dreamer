@@ -387,5 +387,5 @@ def _clone_run_for_producer(run: Run) -> Run:
     from omegaconf import OmegaConf
     config = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
 
-  clone = Run(config, run.spec, dict(run.params), video_key=run.video_key)
+  clone = Run(config, run.spec, dict(run.params))
   return clone

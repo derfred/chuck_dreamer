@@ -120,10 +120,6 @@ def _stage_options(fn):
          "is decoded and merely left out of the output); with no such stage "
          "enabled the decode is skipped entirely. The resulting files are "
          "not usable for image-observation training.")(fn)
-  fn = click.option(
-    "--video-key", default=None, type=str,
-    help="Video feature key (e.g. observation.images.wrist). "
-         "Defaults to the first one.")(fn)
   return fn
 
 
@@ -168,7 +164,7 @@ def import_lerobot_cmd():
                    "raising the segmentation throughput ceiling ~Nx. Default: "
                    "the configured object_localization.device, one producer.")
 @click.pass_context
-def import_lerobot_run_cmd(ctx, repo_id, output, fmt, video_key,
+def import_lerobot_run_cmd(ctx, repo_id, output, fmt,
                            with_ee_pos, with_object_pose, with_table_frame,
                            no_video, tags, name_prefix, jobs, gpus):
   """Convert a LeRobot v3 HF dataset (REPO_ID) into the repo's episode files.
@@ -188,14 +184,7 @@ def import_lerobot_run_cmd(ctx, repo_id, output, fmt, video_key,
        ee_quat_table / ee_action_table / obj_pos_arm) via the dataset's
        table_to_arm transform.
 
-  ``--no-video`` drops the RGB frames from the written files, removing
-  nearly all of an episode file's size when only the derived tracks are
-  wanted. Stages 3-4 consume the pixels, so with them enabled the video is
-  still decoded and merely left out of the output; with
-  ``--no-video --no-object-pose`` nothing reads the frames and the decode is
-  skipped outright (proprio is read from the parquet sidecars).
-
-  ``REPO_ID`` accepts the same ``DATASET[#EPISODES]`` syntax used by
+         ``REPO_ID`` accepts the same ``DATASET[#EPISODES]`` syntax used by
   ``calibrate-intrinsics`` and ``prompt-episodes`` — e.g.
   ``user/dataset#8-99`` to import only episodes 8 onward. ``:FRAMES``
   syntax is rejected here (frame-range filtering doesn't make sense
@@ -204,7 +193,7 @@ def import_lerobot_run_cmd(ctx, repo_id, output, fmt, video_key,
   spec   = EpisodeSpec.parse(repo_id, allow_frames=False, command="import-lerobot run")
   cfg    = load_config(ctx.obj["config_path"])
   params = dict(with_ee_pos=with_ee_pos, with_object_pose=with_object_pose, with_table_frame=with_table_frame, no_video=no_video)
-  run    = Run(cfg, spec, params, video_key=video_key)
+  run    = Run(cfg, spec, params)
 
   n_episodes             = len(run.slices)
   resolved_jobs, devices = _resolve_jobs_and_devices(jobs, gpus, n_episodes)
@@ -217,7 +206,7 @@ def import_lerobot_run_cmd(ctx, repo_id, output, fmt, video_key,
 @click.argument("repo_id", type=str, metavar="REPO_ID[#EPISODES]")
 @_stage_options
 @click.pass_context
-def import_lerobot_doctor_cmd(ctx, repo_id, video_key,
+def import_lerobot_doctor_cmd(ctx, repo_id,
                               with_ee_pos, with_object_pose,
                               with_table_frame):
   """Check that every artifact the requested pipeline needs is present,
@@ -234,7 +223,7 @@ def import_lerobot_doctor_cmd(ctx, repo_id, video_key,
   spec   = EpisodeSpec.parse(repo_id, allow_frames=False, command="import-lerobot doctor")
   cfg    = load_config(ctx.obj["config_path"])
   params = dict(with_ee_pos=with_ee_pos, with_object_pose=with_object_pose, with_table_frame=with_table_frame)
-  run    = Run(cfg, spec, params, video_key=video_key)
+  run    = Run(cfg, spec, params)
 
   ok = doctor_run(run)
   ctx.exit(0 if ok else 1)

@@ -34,15 +34,15 @@ def _ctx(**kw) -> RunContext:
 
 class _FakeSpec:
   """Minimal EpisodeSpec stand-in: Run only reads .dataset_id and calls
-  .read_episodes(video_key=, root=)."""
+  .read_episodes(root=)."""
 
   def __init__(self, dataset_id="user/ds", slices=(("ep", 0), ("ep", 1))):
     self.dataset_id = dataset_id
     self._slices = [SimpleNamespace(episode_index=i) for _, i in slices]
     self.read_calls: list[dict] = []
 
-  def read_episodes(self, *, video_key=None, root=None):
-    self.read_calls.append({"video_key": video_key, "root": root})
+  def read_episodes(self, *, root=None):
+    self.read_calls.append({"root": root})
     return self._slices, "observation.images.wrist"
 
 
@@ -64,12 +64,11 @@ def test_run_local_root_set_for_on_disk_dataset(tmp_path):
   assert Run(None, _FakeSpec(str(tmp_path)), {}).local_root == tmp_path
 
 
-def test_run_read_slices_passes_root_and_video_key(tmp_path):
+def test_run_slices_passes_local_root(tmp_path):
   spec = _FakeSpec(str(tmp_path))
   run = Run(None, spec, {})
-  run.read_slices(video_key="observation.images.wrist")
-  assert spec.read_calls == [
-    {"video_key": "observation.images.wrist", "root": tmp_path}]
+  assert [s.episode_index for s in run.slices] == [0, 1]
+  assert spec.read_calls == [{"root": tmp_path}]
 
 
 def test_run_pipeline_threads_flags():
