@@ -175,20 +175,12 @@ env:
 
   reward: "goal_distance"
 
-# SO-101 pushing runtime (chuck_dreamer.runtime). Drives the arm through a
-# trusted control kernel (synchronized slew + joint velocity limit +
-# authoritative clamp + HOLD/NORMAL/ESTOP mode machine) behind a backend
-# protocol. Launched by `python main.py run`. M0/M1: no policy yet — the arm
-# is driven by a scripted setpoint source. This block is read only by the
-# runtime; the rest of the config is untouched by it.
+
 runtime:
-  # Loop rates (Hz). 50 Hz control (read-every-tick) is the recommended
-  # default; the scripted source publishes setpoints at the slower policy rate.
   control_rate_hz: 50
   policy_rate_hz:  10
 
-  # Run length. null -> run until SIGINT (Ctrl-C). A float bounds the run,
-  # used by demos and tests. CLI: `--duration 2` or `-o runtime.duration_s=2`.
+  # Run length used by demos and tests. null -> run until SIGINT (Ctrl-C)
   duration_s: null
 
   # Backend selection (import-path-plus-params, spec §3.2/§8). FakeBackend
@@ -231,11 +223,7 @@ runtime:
       k: 0.1           # s; scalar (all joints) or per-joint list
       T: 0.15          # s
 
-  # Sensors (M3, spec §3.1/§4.2): latest-value producer slots sampled at
-  # policy-step time. Each declares the modalities it produces; the startup
-  # composition fails fast if a required modality is unproduced. Empty by
-  # default — cameras are backend-specific, so enable one explicitly.
-  # `render_size` reuses the "HxW" convention.
+  # Sensors (M3, spec §3.1/§4.2):
   # MuJoCo scene render (needs MujocoBackend):
   #   - target: "chuck_dreamer.runtime.sensors:SimCameraSensor"
   #     params: { camera: "main_camera", name: "camera/front", render_size: "240x320" }
@@ -244,11 +232,7 @@ runtime:
   #     params: { device_index: 0, render_size: "480x640" }
   sensors: []
 
-  # Perception pipeline (M3, spec §3.2/§3.3): ordered modules run inline at the
-  # start of each policy step, each declaring consumed/emitted modalities. Empty
-  # by default (the scaffold). EePoseModule is cheap + real-time (FK only);
-  # ObjectLocalizerModule wraps the SAM2 pose estimator and needs M4 calibration
-  # (and a first_frame_prompt, since there's no UI until M7) — keep it off here.
+  # Perception pipeline (M3, spec §3.2/§3.3):
   perception: []
     # - target: "chuck_dreamer.runtime.perception:EePoseModule"
     # - target: "chuck_dreamer.runtime.perception_object:ObjectLocalizerModule"
@@ -271,19 +255,8 @@ runtime:
       freq_hz:   0.25         # Hz; scalar or per-joint
       phase:     0.0          # rad; scalar or per-joint
 
-  # Leader arm (M2, spec §3.8). The leader is a *sensor*, decoupled from the
-  # policy: when `enabled`, a background thread polls it and exposes its joints
-  # as the `leader_qpos` observation modality regardless of `source.kind`. Any
-  # policy may read that modality; `source.kind: manual` (ManualPolicy) passes
-  # it straight through as the joint-space action (the kernel's slew/clamp still
-  # bounds motion to the envelope). With no leader enabled, `leader_qpos` is
-  # absent and ManualPolicy simply holds.
-  #
-  # The reader is import-path-plus-params so it is swappable: the default target
-  # is the FakeLeaderReader (no hardware) so sim/headless/tests run as-is; the
-  # real arm is a target swap (or `--leader-port`, which also flips `enabled`).
-  # The follower jaw bounds the gripper percentage maps into are injected from
-  # the resolved safety envelope, not configured here.
+  # Leader arm (M2, spec §3.8).
+  # TODO: move to sensors
   leader:
     enabled: false   # start the reader whenever a leader is configured
     target: "chuck_dreamer.runtime.teleop:FakeLeaderReader"
@@ -302,21 +275,14 @@ runtime:
   watchdog:
     timeout_s: 0.1
 
-  # Telemetry -> Rerun (spec §3.11). The flat per-tick record shape is unchanged
-  # from M0; M3 swaps the sink from CSV to a Rerun .rrd (one per episode) that
-  # also carries the policy thread's sensor frames, perception outputs, and
-  # composed observations on a shared timeline. `queue_maxsize` bounds the
-  # control telemetry queue; `obs_queue_maxsize` bounds the policy-thread
-  # observation queue (drop-on-full so the policy loop never blocks on encoding).
+  # Telemetry -> Rerun (spec §3.11)
   logging:
     queue_maxsize: 10000
     rerun:
       rrd_dir: "runtime_logs/rrd"
       obs_queue_maxsize: 256
 
-  # Optional MuJoCo viewer (off by default -> headless / test-safe). When on
-  # it draws the commanded setpoint + current EE markers; the task-space
-  # safety box overlay is deferred to M5.
+  # Optional MuJoCo viewer (off by default -> headless / test-safe)
   viewer:
     enabled: false
 
