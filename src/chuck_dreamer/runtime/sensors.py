@@ -61,7 +61,7 @@ class SimCameraSensor:
   buffer under the lock (a ~0.1 ms copy + ``mj_forward``), then the lock is
   released and ``render()`` runs lock-free against the scratch buffer. Holding
   the lock across the full ~5 ms render starved the control loop (which needs
-  the same lock every tick) badly enough to trip the watchdog — exactly the
+  the same lock every tick), collapsing its tick rate — exactly the
   "slow perception must not affect the control loop" invariant (spec §3.2/§4.1).
   The scratch buffer mirrors ``MujocoBackend._fk_ee``'s pattern.
 

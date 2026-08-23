@@ -1,34 +1,3 @@
-"""``FeetechBackend`` — the real SO-101 follower as a :class:`RobotBackend`.
-
-The hardware swap-in for the M1 control kernel (project plan, keystone
-decision): the kernel, control loop, and everything above them are developed
-against ``FakeBackend`` / ``MujocoBackend`` and this is the only seam to the
-real arm — 6 STS3215 servos on one TTL bus, driven through lerobot's
-``SO101Follower``. The control thread owns the bus exclusively: a sync write
-(``send_action``) every tick and a sync read (``get_observation``) on a
-decimated/diagnostic schedule (the ~2.5 ms write / ~7 ms read budget from the
-plan).
-
-Joint convention mirrors :mod:`chuck_dreamer.runtime.teleop` exactly: lerobot
-exposes each motor as ``"<motor>.pos"`` (joints 0..4 in degrees, the gripper as
-a 0..100 percentage), and this backend maps to/from follower-ordered radians
-with the *same* helpers the leader reader uses, so the two never disagree.
-``read_positions`` / ``write_positions`` therefore speak radians like every
-other backend, and the kernel's slew + clamp shape motion identically in sim and
-on hardware.
-
-Importing this module never touches hardware: ``lerobot`` is imported lazily
-inside :meth:`start` (the leader-reader philosophy), so the module is safe to
-import on a machine with no arm and the tests stand in a stub for the bus.
-
-The authoritative joint-space envelope (``joint_limits``) comes from config, not
-from the follower's calibration counts — the kernel already prefers the
-configured envelope, and keeping it in one place (``runtime.safety``) means the
-clamp the kernel enforces and the bounds the backend reports always agree. The
-follower jaw bounds the gripper percentage maps into are the last joint's
-configured bounds, injected at construction the same way the leader gets them.
-"""
-
 from __future__ import annotations
 
 import logging

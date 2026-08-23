@@ -2,16 +2,12 @@
 
 Wraps the existing simulation (``SceneBuilder`` / ``SceneGenerator``,
 ``sim/pushing_env.py``) so the runtime's control kernel sits on top of sim
-physics identically to how it will sit on the real arm. MuJoCo position
-actuators (commanded target, internal PD) are a faithful analog of the
-Feetech smart servos, so ``write_positions`` sets actuator targets and
-``read_positions`` reads ``qpos`` — the open-loop kernel behaves the same in
-sim and on hardware (project plan, keystone decision).
+physics identically to how it will sit on the real arm.
 
 An internal physics thread steps the sim in real time; ``read``/``write``
 are guarded by a lock shared with it. An optional ``launch_passive`` viewer
 (main thread only) draws the commanded setpoint and current EE as marker
-overlays — the task-space safety box overlay is deferred to M5.
+overlays
 """
 
 from __future__ import annotations
