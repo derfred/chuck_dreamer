@@ -1,21 +1,3 @@
-"""The threaded control driver and its following-error watchdog (spec §3.7, §3.14).
-
-:class:`ControlLoop` is the threaded wrapper around the pure
-:class:`~chuck_dreamer.runtime.kernel.ControlKernel`: it owns the
-absolute-deadline timing, reads the backend and the setpoint channel, calls
-``kernel.tick`` with the *measured* elapsed time, writes the command back,
-observes the watchdog, and emits telemetry. It contains no safety logic of
-its own — that all lives in the kernel and the watchdog.
-
-:class:`Watchdog` is the following-error monitor (spec §3.14): on every
-:meth:`Watchdog.observe` call (i.e. every control tick, on the control-loop
-thread) it checks the per-joint tracking error against a velocity-scaled
-threshold and trips if any joint's breach has been continuous for longer
-than ``fe_limits.T``. The check is synchronous — it needs the exact
-(q_cmd, q_meas) pair the kernel just produced — so the watchdog owns no
-thread of its own and observes nothing between ticks.
-"""
-
 from __future__ import annotations
 
 import threading
@@ -28,6 +10,7 @@ import numpy as np
 
 from .backend import RobotBackend
 from .kernel import ControlKernel
+from .control_trajectory import ControlTrajectory
 from .setpoint_channel import SetpointChannel
 from .telemetry import TelemetryQueue, TelemetryRecord
 
@@ -41,127 +24,6 @@ def _timed(acc: list[float]) -> Iterator[None]:
   finally:
     acc.append(time.perf_counter() - t0)
 
-
-@dataclass(frozen=True)
-class FollowingErrorLimits:
-  """Following-error watchdog thresholds (spec §3.14).
-
-  ``theta_0`` and ``T`` are global (they derive from the shared servo model
-  and its stall/transient behavior, not from any one joint's mounting);
-  ``k`` is per-joint (distal joints, with lower gear ratio and higher
-  reflected load inertia, need a larger allowance per unit commanded
-  velocity than proximal joints).
-  """
-
-  theta_0: float
-  k: np.ndarray  # (n,) s
-  T: float
-
-  @classmethod
-  def build(cls, theta_0: float, k: float | np.ndarray, T: float, n_joints: int) -> "FollowingErrorLimits":
-    if theta_0 < 0:
-      raise ValueError("theta_0 must be non-negative")
-    if T <= 0:
-      raise ValueError("T must be positive")
-    k_arr = np.broadcast_to(np.asarray(k, dtype=np.float64), (n_joints,)).copy()
-    if np.any(k_arr < 0):
-      raise ValueError("k must be non-negative")
-    return cls(theta_0=float(theta_0), k=k_arr, T=float(T))
-
-
-class Watchdog:
-  """Following-error monitor: trips ``on_trip`` on sustained tracking failure.
-
-  ``observe(q_cmd, q_meas, v_cmd)`` is the per-tick call from
-  :class:`ControlLoop`; the check runs synchronously on the caller's
-  (control-loop) thread. The trip is latched: once fired, further
-  observations are ignored until :meth:`reset`.
-  """
-
-  def __init__(
-    self,
-    on_trip: Callable[[], None],
-    *,
-    fe_limits: FollowingErrorLimits,
-  ) -> None:
-    self._on_trip                        = on_trip
-    self._fe_limits                      = fe_limits
-    self._lock                           = threading.Lock()
-    self._tripped                        = False
-    self._trip_reason                    = ""
-    self._trip_q_meas: np.ndarray | None = None
-    # Per-joint contiguous-breach start time (NaN = not currently breaching).
-    self._fe_breach_since                = np.full(fe_limits.k.shape, np.nan)
-
-  def observe(self, q_cmd: np.ndarray, q_meas: np.ndarray, v_cmd: np.ndarray) -> None:
-    """Per-tick following-error check.
-
-    ``v_cmd`` is the commanded joint velocity (finite-differenced by the
-    caller from consecutive ``q_cmd`` samples, or read from the
-    interpolator's own state) — this is *not* recomputed here so the
-    watchdog stays a pure consumer of whatever the control loop already
-    tracks.
-    """
-    lim = self._fe_limits
-    now = time.monotonic()
-    e = np.asarray(q_cmd, dtype=np.float64) - np.asarray(q_meas, dtype=np.float64)
-    theta = lim.theta_0 + lim.k * np.abs(v_cmd)
-    over = np.abs(e) > theta
-
-    tripped_joint = None
-    with self._lock:
-      if self._tripped:
-        return  # already latched; nothing more to do
-      for j in range(len(e)):
-        if over[j]:
-          if np.isnan(self._fe_breach_since[j]):
-            self._fe_breach_since[j] = now
-          elif now - self._fe_breach_since[j] > lim.T:
-            tripped_joint = j
-            break
-        else:
-          self._fe_breach_since[j] = np.nan
-      if tripped_joint is not None:
-        self._tripped = True
-        self._trip_reason = (
-          f"following_error: joint={tripped_joint} "
-          f"|e|={abs(float(e[tripped_joint])):.4f} theta={float(theta[tripped_joint]):.4f}"
-        )
-        # Spec §3.14: freeze at the *measured* position, not the drifted
-        # q_cmd — the whole point of this trip is that q_cmd ran away from
-        # reality, so latching there would (on release) slam the arm back
-        # toward the obstruction instead of holding where it actually is.
-        self._trip_q_meas = np.asarray(q_meas, dtype=np.float64).copy()
-
-    if tripped_joint is not None:
-      self._on_trip()
-
-  @property
-  def tripped(self) -> bool:
-    with self._lock:
-      return self._tripped
-
-  @property
-  def trip_q_meas(self) -> np.ndarray | None:
-    """Measured position at the moment of a trip, else ``None``."""
-    with self._lock:
-      return None if self._trip_q_meas is None else self._trip_q_meas.copy()
-
-  @property
-  def trip_reason(self) -> str:
-    """Human-readable cause of the most recent trip (``""`` if untripped)."""
-    with self._lock:
-      return self._trip_reason
-
-  def reset(self) -> None:
-    """Clear the trip latch and all in-flight breach timers."""
-    with self._lock:
-      self._tripped = False
-      self._trip_reason = ""
-      self._trip_q_meas = None
-      self._fe_breach_since[:] = np.nan
-
-
 class ControlLoop:
   """Fixed-rate control thread: channel -> kernel -> backend, with telemetry."""
 
@@ -173,7 +35,6 @@ class ControlLoop:
     telemetry: TelemetryQueue,
     *,
     rate_hz: float,
-    watchdog: Watchdog | None = None,
   ) -> None:
     if rate_hz <= 0:
       raise ValueError("rate_hz must be positive")
@@ -182,7 +43,6 @@ class ControlLoop:
     self._channel                         = channel
     self._telemetry                       = telemetry
     self._period                          = 1.0 / float(rate_hz)
-    self._watchdog                        = watchdog
     self._stop                            = threading.Event()
     self._thread: threading.Thread | None = None
     self._ticks                           = 0
@@ -208,7 +68,6 @@ class ControlLoop:
     self._kernel.reset(self._backend.read_positions())
     next_deadline = time.monotonic()
     last_mono     = time.monotonic()
-    q_cmd_prev    = self._kernel.q_cmd
 
     while not self._stop.is_set():
       now       = time.monotonic()
@@ -225,11 +84,6 @@ class ControlLoop:
 
       with _timed(backend_s):
         self._backend.write_positions(out.q_cmd)
-
-      if self._watchdog is not None:
-        v_cmd = (out.q_cmd - q_cmd_prev) / tick_dt
-        self._watchdog.observe(out.q_cmd, q_meas, v_cmd)
-      q_cmd_prev = out.q_cmd
 
       self._telemetry.emit(TelemetryRecord(
         t_wall=time.time(), t_mono=now, tick=self._ticks, mode=out.mode.value,

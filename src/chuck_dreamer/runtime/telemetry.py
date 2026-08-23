@@ -1,7 +1,7 @@
 """Telemetry: a flat record, a non-blocking queue, and logger sinks.
 
 The record shape (spec §3.11) is intentionally flat — one row per control
-tick, plus sparse "event" rows (overrun, watchdog trip, e-stop, mode change).
+tick, plus sparse "event" rows (overrun, e-stop, mode change).
 The control loop emits :class:`TelemetryRecord`s onto a :class:`TelemetryQueue`;
 a sink thread drains and writes them.
 

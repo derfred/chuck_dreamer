@@ -119,24 +119,6 @@ class ControlKernel:
       self._mode = Mode.ESTOP
     return True
 
-  def request_estop_at(self, q: np.ndarray) -> bool:
-    """Latch into ESTOP with the slew reference snapped to ``q`` (idempotent).
-
-    Used by the following-error watchdog (spec §3.14): unlike
-    :meth:`request_estop`, which freezes at whatever ``q_cmd`` currently is,
-    this snaps to the *measured* position passed in. A following-error trip
-    means ``q_cmd`` has drifted away from reality (that drift is exactly
-    what tripped it), so latching there would, on release, slam the arm
-    back toward the obstruction instead of holding where it actually sits.
-    """
-    q = np.asarray(q, dtype=np.float64)
-    if q.shape != (self._limits.n_joints,):
-      raise ValueError(f"q shape {q.shape} != ({self._limits.n_joints},)")
-    with self._lock:
-      self._q_cmd = np.clip(q, self._limits.lower, self._limits.upper)
-      self._mode = Mode.ESTOP
-    return True
-
   def request_normal(self) -> bool:
     """Enter NORMAL. Allowed only from HOLD; refused while ESTOP latched.
 

@@ -31,7 +31,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from ..policy import Policy
 from .backend import RobotBackend, ViewableBackend
-from .control_loop import ControlLoop, FollowingErrorLimits, Watchdog
+from .control_loop import ControlLoop
 from .kernel import ControlKernel, KernelLimits, Mode
 from .modalities import (
   RuntimeObservation,
@@ -170,27 +170,15 @@ class Runtime:
     home        = _to_array(rt.safety.home_qpos, n)
     self.kernel = ControlKernel(self._limits, np.clip(home, lower, upper), mode=Mode.NORMAL)
 
-    # 3. Channel, telemetry queue, Rerun sink, loops, watchdog.
+    # 3. Channel, telemetry queue, Rerun sink, loops.
     self.channel   = SetpointChannel()
     self.telemetry = TelemetryQueue(maxsize=int(rt.logging.queue_maxsize))
     self.sink      = RerunSink(
       rt.logging.rerun.rrd_dir, self.telemetry, n_joints=n,
       obs_queue_maxsize=int(rt.logging.rerun.get("obs_queue_maxsize", 256)),
     )
-    fe_cfg = rt.safety.get("following_error_watchdog")
-    fe_limits = None
-    if fe_cfg is not None and bool(fe_cfg.get("enabled", True)):
-      fe_limits = FollowingErrorLimits.build(
-        theta_0=float(fe_cfg.theta_0), k=_scalar_or_array(fe_cfg.k), T=float(fe_cfg.T), n_joints=n,
-      )
-    self.watchdog = (
-      Watchdog(on_trip=self._on_watchdog_trip, fe_limits=fe_limits)
-      if fe_limits is not None else None
-    )
-    self.control_loop = ControlLoop(
-      self.kernel, self.backend, self.channel, self.telemetry,
-      rate_hz=float(rt.control_rate_hz), watchdog=self.watchdog,
-    )
+
+    self.control_loop = ControlLoop(self.kernel, self.backend, self.channel, self.telemetry, rate_hz=float(rt.control_rate_hz))
     self.policy      = self._build_policy(rt, home)
     self.leader      = self._build_leader(rt)  # None unless source.kind == "manual"
 
@@ -365,14 +353,6 @@ class Runtime:
     if "backend" in inspect.signature(factory).parameters:
       extra["backend"] = self.backend
     return construct(spec, **extra)
-
-  def _on_watchdog_trip(self) -> None:
-    assert self.watchdog is not None
-    # Following-error trip: freeze at measured position, not drifted q_cmd.
-    self.kernel.request_estop_at(self.watchdog.trip_q_meas)
-    detail = self.watchdog.trip_reason
-    self.telemetry.emit_event("watchdog_trip", detail=detail)
-    logger.error("watchdog tripped: %s, latched ESTOP", detail)
 
   # -- lifecycle ------------------------------------------------------------
 
