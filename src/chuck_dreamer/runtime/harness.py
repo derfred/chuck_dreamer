@@ -14,7 +14,7 @@ config). :class:`PolicyLoop` calls ``policy.act(obs)`` each step with a
 
 Shutdown ordering (project plan): stop the policy loop first (no new
 setpoints), bring the kernel to HOLD, let the control loop flush a few hold
-ticks, then stop the control loop, watchdog, backend, and finally the CSV
+ticks, then stop the control loop, backend, and finally the CSV
 sink (which drains + flushes — the "flushed logs" guarantee).
 """
 
@@ -183,10 +183,9 @@ class Runtime:
       fe_limits = FollowingErrorLimits.build(
         theta_0=float(fe_cfg.theta_0), k=_scalar_or_array(fe_cfg.k), T=float(fe_cfg.T), n_joints=n,
       )
-    self.watchdog = Watchdog(
-      timeout_s=float(rt.watchdog.timeout_s),
-      on_trip=self._on_watchdog_trip,
-      fe_limits=fe_limits,
+    self.watchdog = (
+      Watchdog(on_trip=self._on_watchdog_trip, fe_limits=fe_limits)
+      if fe_limits is not None else None
     )
     self.control_loop = ControlLoop(
       self.kernel, self.backend, self.channel, self.telemetry,
@@ -210,10 +209,10 @@ class Runtime:
       sensors=self.sensors, perception=self.perception, rerun_sink=self.sink,
     )
 
-    self._duration_s = None if rt.duration_s is None else float(rt.duration_s)
+    self._duration_s     = None if rt.duration_s is None else float(rt.duration_s)
     self._viewer_enabled = bool(rt.viewer.enabled)
-    self._shutdown = threading.Event()
-    self._n = n
+    self._shutdown       = threading.Event()
+    self._n              = n
     # One .rrd per episode (spec §3.11). Episode lifecycle is M7; until then a
     # single recording spans the run, named by start time so successive runs
     # don't clobber each other.
@@ -368,14 +367,10 @@ class Runtime:
     return construct(spec, **extra)
 
   def _on_watchdog_trip(self) -> None:
-    trip_q_meas = self.watchdog.trip_q_meas
-    if trip_q_meas is not None:
-      # Following-error trip: freeze at measured position, not drifted q_cmd.
-      self.kernel.request_estop_at(trip_q_meas)
-    else:
-      # Liveness trip: no fresh q_meas sample available; freeze at q_cmd.
-      self.kernel.request_estop()
-    detail = self.watchdog.trip_reason or "control loop stalled -> ESTOP"
+    assert self.watchdog is not None
+    # Following-error trip: freeze at measured position, not drifted q_cmd.
+    self.kernel.request_estop_at(self.watchdog.trip_q_meas)
+    detail = self.watchdog.trip_reason
     self.telemetry.emit_event("watchdog_trip", detail=detail)
     logger.error("watchdog tripped: %s, latched ESTOP", detail)
 
@@ -387,7 +382,6 @@ class Runtime:
       s.start()
     self.sink.start(self._recording_id)
     self.control_loop.start()
-    self.watchdog.start()
     if self.leader is not None:
       self.leader.start()
     self.policy_loop.start()
@@ -441,7 +435,6 @@ class Runtime:
     self.channel.publish(self.kernel.q_cmd)  # settle in place
     time.sleep(3.0 / max(1.0, float(self.cfg.runtime.control_rate_hz)))  # a few hold ticks
     self.control_loop.stop()
-    self.watchdog.stop()
     self.backend.stop()
     self.sink.stop()  # drains both queues + flushes the .rrd (one per episode)
     if self.telemetry.dropped:

@@ -196,10 +196,10 @@ def test_startup_passes_when_required_modality_is_produced(tmp_path):
 
 def test_sim_camera_does_not_stall_control_loop(tmp_path):
   """Regression: SimCameraSensor renders on the policy thread; if it held the
-  physics lock across the full GL render it starved the control loop badly
-  enough to trip the watchdog. Run the real MuJoCo + camera + perception path
-  under the strict default watchdog and assert the loop survives (spec
-  §3.2/§4.1: slow perception must not affect the control loop)."""
+  physics lock across the full GL render it starved the control loop. Run the
+  real MuJoCo + camera + perception path and assert the control loop still
+  achieved most of its configured rate (spec §3.2/§4.1: slow perception must
+  not affect the control loop)."""
   pytest.importorskip("mujoco")
   cfg = load_config()
   base = {
@@ -219,8 +219,11 @@ def test_sim_camera_does_not_stall_control_loop(tmp_path):
   assert {"image", "ee"} <= rt.available
   rt.run()
 
-  assert rt.kernel.mode is not Mode.ESTOP   # watchdog did not trip
-  assert rt.control_loop.ticks > 0
+  assert rt.kernel.mode is not Mode.ESTOP
+  # The starvation this guards against showed up as a collapsed tick rate, so
+  # assert the rate directly rather than merely that some ticks happened.
+  expected = base["duration_s"] * float(cfg.runtime.control_rate_hz)
+  assert rt.control_loop.ticks > 0.5 * expected
   assert rt.channel.seq > 0                  # observations flowed despite rendering
   assert rt.sink.path is not None and rt.sink.path.stat().st_size > 0
   time.sleep(0.05)

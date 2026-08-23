@@ -270,11 +270,6 @@ runtime:
     #   params: { port: "/dev/tty.usbmodemXXX", calibration_id: null,
     #             use_degrees: true, poll_rate_hz: 100 }
 
-  # External heartbeat watchdog (spec §10.5): a control loop that goes
-  # silent past this latches the kernel into ESTOP. Tune to the fat (read) tick.
-  watchdog:
-    timeout_s: 0.1
-
   # Telemetry -> Rerun (spec §3.11)
   logging:
     queue_maxsize: 10000
