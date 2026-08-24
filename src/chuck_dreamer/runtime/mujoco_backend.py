@@ -4,8 +4,8 @@ Wraps the existing simulation (``SceneBuilder`` / ``SceneGenerator``,
 ``sim/pushing_env.py``) so the runtime's control kernel sits on top of sim
 physics identically to how it will sit on the real arm.
 
-An internal physics thread steps the sim in real time; ``read``/``write``
-are guarded by a lock shared with it. An optional ``launch_passive`` viewer
+An internal physics thread steps the sim in real time; state reads and
+``write_positions`` are guarded by a lock shared with it. An optional ``launch_passive`` viewer
 (main thread only) draws the commanded setpoint and current EE as marker
 overlays
 """
@@ -22,11 +22,12 @@ import numpy as np
 
 from ..sim.scene_builder import SceneBuilder
 from ..sim.scene_config import SceneConfig
+from .backend import InstantReadMixin
 
 _EE_SITE = "ee_site"
 
 
-class MujocoBackend:
+class MujocoBackend(InstantReadMixin):
   """SO-101 MuJoCo simulation as a :class:`RobotBackend`."""
 
   def __init__(
@@ -73,7 +74,7 @@ class MujocoBackend:
     self._thread: threading.Thread | None = None
 
   @classmethod
-  def from_config(cls, cfg, *, viewer: bool = False, realtime: bool = True) -> "MujocoBackend":
+  def from_config(cls, cfg, *, viewer: bool = False, realtime: bool = True) -> MujocoBackend:
     """Build from the project config, sampling a scene via ``SceneGenerator``."""
     from ..sim.scene_generator import SceneGenerator
 
@@ -87,12 +88,13 @@ class MujocoBackend:
   def n_joints(self) -> int:
     return self._n
 
-  def read_positions(self) -> np.ndarray:
+  def last_positions(self) -> np.ndarray:
     with self._lock:
       return cast(np.ndarray, self.data.qpos[self._qpos_adr].copy())
 
-  def last_positions(self) -> np.ndarray:
-    return self.read_positions()
+  def read_velocities(self) -> np.ndarray:
+    with self._lock:
+      return cast(np.ndarray, self.data.qvel[self._dof_adr].copy())
 
   def write_positions(self, q: np.ndarray) -> None:
     q = np.asarray(q, dtype=np.float64)

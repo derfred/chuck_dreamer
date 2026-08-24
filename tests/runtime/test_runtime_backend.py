@@ -9,15 +9,17 @@ are exercised with no serial device present.
 
 from __future__ import annotations
 
+import math
 import sys
+import time
 import types
 
 import numpy as np
 import pytest
 
 from chuck_dreamer.runtime.backend import FakeBackend, RobotBackend
+from chuck_dreamer.runtime.control_state import FaultFlags
 from chuck_dreamer.runtime.feetech_backend import FeetechBackend
-
 
 # -- FakeBackend -------------------------------------------------------------
 
@@ -27,9 +29,9 @@ def test_fake_backend_roundtrip_and_clamp():
   b = FakeBackend(2, lower=lower, upper=upper)
   b.start()
   b.write_positions(np.array([0.5, -0.5]))
-  np.testing.assert_array_equal(b.read_positions(), [0.5, -0.5])
+  np.testing.assert_array_equal(b.read_state(math.inf).q, [0.5, -0.5])
   b.write_positions(np.array([9.0, -9.0]))  # out of box -> clamped by the arm
-  np.testing.assert_array_equal(b.read_positions(), [1.0, -1.0])
+  np.testing.assert_array_equal(b.read_state(math.inf).q, [1.0, -1.0])
   b.stop()
 
 
@@ -56,36 +58,138 @@ def test_fake_backend_rejects_wrong_shape():
 _MOTORS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 # A six-joint envelope (radians) covering the real default; the last entry is the
 # jaw range the gripper percentage maps into.
+# The tier-1 block: Present_Position(56,2) .. Present_Temperature(63,1).
+_FAST_ADDR, _FAST_LEN = 56, 8
+_SLOW_ADDR, _SLOW_LEN = 69, 2
+
 _LOWER = np.array([-1.92, -3.32, -0.174, -1.66, -2.79, -0.174])
 _UPPER = np.array([1.92, 0.174, 3.14, 1.66, 2.79, 1.75])
 
 
+class _StubMotor:
+  def __init__(self, id_):
+    self.id = id_
+
+
+class _StubSyncReader:
+  """Holds the last block fetched, answering getData at any sub-offset.
+
+  Mirrors the scservo SDK's GroupSyncRead: ``_sync_read`` fills the buffer for
+  one (addr, length) span and ``getData`` decodes any sub-range of it, which is
+  what lets the backend pull five registers out of one transaction.
+  """
+
+  def __init__(self, bus):
+    self._bus = bus
+
+  def getData(self, id_, addr, length):
+    return self._bus.register_value(id_, addr, length)
+
+
 class _StubBus:
-  """Stand-in for FeetechMotorsBus: answers sync_read with fixed per-register values."""
+  """Stand-in for FeetechMotorsBus: per-register values plus block reads.
+
+  ``register_value`` is the single source of truth: both the register-at-a-time
+  ``sync_read`` path and the block path read from it, so a test can assert the
+  two agree. ``block_reads`` records every (addr, length) span fetched, which is
+  how the transaction-count assertions are written.
+  """
+
+  # Raw counts served per register, uniform across motors unless overridden.
+  DEFAULTS = {
+    56: 2048,   # Present_Position   (overwritten by _StubFollower's pose)
+    58: 100,    # Present_Velocity
+    60: 250,    # Present_Load
+    62: 120,    # Present_Voltage    (12.0 V in decivolts)
+    63: 31,     # Present_Temperature
+    69: 40,     # Present_Current
+  }
 
   def __init__(self):
     self.sync_reads: list[str] = []
+    self.block_reads: list[tuple[int, int]] = []
+    self.motors = {m: _StubMotor(i + 1) for i, m in enumerate(_MOTORS)}
+    self.sync_reader = _StubSyncReader(self)
+    self.overrides: dict[int, dict[int, int]] = {}   # {addr: {motor_id: value}}
+    self.fail_addrs: set[int] = set()                # addrs whose read raises
+
+  # -- values ---------------------------------------------------------------
+
+  def register_value(self, id_, addr, length):
+    del length
+    return self.overrides.get(addr, {}).get(id_, self.DEFAULTS.get(addr, 0))
+
+  def set_register(self, addr, values):
+    """Override one register's raw counts, as ``{motor_name: value}``."""
+    self.overrides[addr] = {self.motors[m].id: v for m, v in values.items()}
+
+  # -- lerobot bus surface the backend uses ---------------------------------
 
   def sync_read(self, data_name):
     self.sync_reads.append(data_name)
     return {m: float(i) for i, m in enumerate(_MOTORS)}
 
+  def _sync_read(self, addr, length, ids, *, raise_on_error=True, **kw):
+    del ids, raise_on_error, kw
+    if addr in self.fail_addrs:
+      raise ConnectionError(f"stub bus failure @{addr}")
+    self.block_reads.append((addr, length))
+
+  def _decode_sign(self, data_name, ids_values):
+    # The stub serves small positive counts, so sign-magnitude decoding is the
+    # identity here; the real bus's implementation is exercised on hardware.
+    del data_name
+    return ids_values
+
+  def _normalize(self, ids_values):
+    # Position counts -> the units lerobot's sync_read would return: degrees for
+    # the angular motors, 0..100 for the gripper. 4096 counts per revolution,
+    # centred at 2048 (matching MotorNormMode.DEGREES about the calibration mid).
+    out = {}
+    for id_, val in ids_values.items():
+      if id_ == len(_MOTORS):                   # gripper: percentage
+        out[id_] = (val / 4095.0) * 100.0
+      else:
+        out[id_] = (val - 2048) * 360.0 / 4095.0
+    return out
+
 
 class _StubFollower:
   """Stand-in for lerobot SO101Follower: an echo arm, no serial.
 
-  ``send_action`` stores the commanded ``"<motor>.pos"`` dict; ``get_observation``
-  echoes it straight back (so a write-then-read round-trips through the backend's
-  radians<->lerobot mapping). Tracks connect/disconnect for lifecycle assertions.
+  ``send_action`` stores the commanded ``"<motor>.pos"`` dict *and* writes the
+  equivalent raw counts into the stub bus's ``Present_Position`` register, so a
+  write round-trips through either read path -- ``get_observation`` (the
+  position-only fallback) or the block read ``read_state`` normally uses. A
+  stub whose two paths disagreed would let a real decode bug pass unnoticed.
+
+  Tracks connect/disconnect for lifecycle assertions.
   """
 
   def __init__(self, config):
     self.config = config
     self.connected = False
-    # Boot pose: all angular motors at 0 deg, gripper at 0% (jaw at its lower bound).
-    self._action = {f"{m}.pos": 0.0 for m in _MOTORS}
     self.reads = 0
     self.bus = _StubBus()
+    # Boot pose: all angular motors at 0 deg, gripper at 0% (jaw at its lower
+    # bound), expressed in both representations.
+    self._action = {f"{m}.pos": 0.0 for m in _MOTORS}
+    self._sync_positions()
+
+  def _sync_positions(self):
+    """Mirror ``self._action`` into the bus's Present_Position counts.
+
+    The inverse of _StubBus._normalize: degrees (or gripper percent) back to
+    raw counts about the 2048 calibration midpoint.
+    """
+    counts = {}
+    for i, m in enumerate(_MOTORS):
+      val = float(self._action[f"{m}.pos"])
+      if i == len(_MOTORS) - 1:                    # gripper: 0..100 percent
+        counts[m] = round(val / 100.0 * 4095.0)
+      else:                                        # angular: degrees
+        counts[m] = round(val * 4095.0 / 360.0 + 2048)
+    self.bus.set_register(56, counts)
 
   def connect(self, calibrate=True):
     self.connected = True
@@ -99,6 +203,7 @@ class _StubFollower:
 
   def send_action(self, action):
     self._action = dict(action)
+    self._sync_positions()
     return action
 
 
@@ -161,7 +266,7 @@ def test_feetech_stop_before_start_is_safe():
 def test_feetech_io_before_start_raises():
   b = _backend()
   with pytest.raises(RuntimeError, match="before start"):
-    b.read_positions()
+    b.read_state(math.inf)
   with pytest.raises(RuntimeError, match="before start"):
     b.write_positions(np.zeros(6))
 
@@ -179,7 +284,7 @@ def test_feetech_read_maps_lerobot_to_radians(stub_follower):
   b = _backend()
   b.start()
   # Stub boots all angular motors at 0 deg and gripper at 0% -> jaw lower.
-  q = b.read_positions()
+  q = b.read_state(math.inf).q
   assert q.shape == (6,)
   np.testing.assert_allclose(q[:5], 0.0, atol=1e-12)
   assert q[5] == pytest.approx(_LOWER[5])           # gripper 0% -> jaw lower
@@ -192,9 +297,10 @@ def test_feetech_write_then_read_roundtrips(stub_follower):
   # Command an in-range pose (radians); the echo stub feeds it back through read.
   target = np.array([0.5, -1.0, 1.0, 0.3, -0.4, _LOWER[5] + 0.5 * (_UPPER[5] - _LOWER[5])])
   b.write_positions(target)
-  back = b.read_positions()
-  np.testing.assert_allclose(back[:5], target[:5], atol=1e-9)
-  assert back[5] == pytest.approx(target[5], abs=1e-9)  # jaw midpoint round-trips
+  back = b.read_state(math.inf).q
+  # Counts are integral, so the round-trip is quantised at ~360/4095 deg.
+  np.testing.assert_allclose(back[:5], target[:5], atol=2e-3)
+  assert back[5] == pytest.approx(target[5], abs=2e-3)  # jaw midpoint round-trips
   b.stop()
 
 
@@ -216,61 +322,9 @@ def test_feetech_write_rejects_wrong_shape(stub_follower):
   b.stop()
 
 
-def test_feetech_read_decimation_caches_between_bus_reads(stub_follower):
-  b = _backend(read_decimation=3)
-  b.start()
-  f = stub_follower[0]
-  assert f.reads == 1                # start() primes the cache with one bus read
-  b.read_positions()                 # call 1: due (count 0) -> bus
-  assert f.reads == 2
-  b.read_positions()                 # call 2: cached
-  b.read_positions()                 # call 3: cached
-  assert f.reads == 2
-  b.read_positions()                 # call 4: due again (count rolled to a multiple)
-  assert f.reads == 3
-  b.stop()
 
 
-def test_feetech_read_every_tick_by_default(stub_follower):
-  b = _backend()                     # read_decimation defaults to 1
-  b.start()
-  f = stub_follower[0]
-  for _ in range(4):
-    b.read_positions()
-  assert f.reads == 5                # 1 priming read at start + 4 ticks
-  b.stop()
 
-
-def test_feetech_read_diagnostics_returns_follower_ordered_arrays(stub_follower):
-  b = _backend()
-  b.start()
-  diag = b.read_diagnostics()
-  assert set(diag) == {
-    "Present_Velocity", "Present_Load", "Present_Current",
-    "Present_Voltage", "Present_Temperature",
-  }
-  for arr in diag.values():
-    np.testing.assert_array_equal(arr, np.arange(6, dtype=np.float64))
-  b.stop()
-
-
-def test_feetech_read_diagnostics_is_a_separate_bus_call_not_decimated(stub_follower):
-  b = _backend(read_decimation=1000)   # positions would stay cached this many calls
-  b.start()
-  f = stub_follower[0]
-  bus = f.bus
-  assert bus.sync_reads == []
-  b.read_diagnostics()
-  assert len(bus.sync_reads) == 5       # one sync_read per diagnostic register
-  b.read_diagnostics()
-  assert len(bus.sync_reads) == 10      # always hits the bus again, no caching
-  b.stop()
-
-
-def test_feetech_read_diagnostics_before_start_raises():
-  b = _backend()
-  with pytest.raises(RuntimeError, match="before start"):
-    b.read_diagnostics()
 
 
 def test_feetech_last_positions_never_touches_the_bus(stub_follower):
@@ -279,16 +333,18 @@ def test_feetech_last_positions_never_touches_the_bus(stub_follower):
   b = _backend()
   b.start()
   f = stub_follower[0]
-  assert f.reads == 1                # the priming read only
+  bus = f.bus
+  bus.block_reads.clear()
   first = b.last_positions()
   for _ in range(10):
     np.testing.assert_array_equal(b.last_positions(), first)
-  assert f.reads == 1
-  # A control-thread bus read refreshes what the observer path sees.
+  assert bus.block_reads == []       # not one transaction
+  assert f.reads == 0
+  # A control-thread read_state refreshes what the observer path sees.
   target = np.array([0.5, -1.0, 1.0, 0.3, -0.4, 0.7])
   b.write_positions(target)
-  b.read_positions()
-  np.testing.assert_allclose(b.last_positions(), target, atol=1e-9)
+  b.read_state(math.inf)
+  np.testing.assert_allclose(b.last_positions(), target, atol=2e-3)
   b.stop()
 
 
@@ -332,11 +388,11 @@ def test_feetech_bus_transactions_never_interleave(stub_follower):
   def control():
     for _ in range(50):
       b.write_positions(q)
-      b.read_positions()
+      b.read_state(math.inf)
 
   def rogue_reader():                # a misbehaving second bus user
     for _ in range(50):
-      b.read_positions()
+      b.read_state(math.inf)
 
   threads = [threading.Thread(target=control), threading.Thread(target=rogue_reader)]
   for t in threads:
@@ -351,12 +407,12 @@ def test_feetech_from_config_pulls_safety_envelope(stub_follower):
   from chuck_dreamer.config import load_config
 
   cfg = load_config()
-  cfg.runtime.backend.params = {"port": "/dev/null", "read_decimation": 2}
+  cfg.runtime.backend.params = {"port": "/dev/null", "slow_decimation": 2}
   b = FeetechBackend.from_config(cfg, **cfg.runtime.backend.params)
   lo, hi = b.joint_limits()
   np.testing.assert_allclose(lo, np.asarray(cfg.runtime.safety.joint_lower, dtype=float))
   np.testing.assert_allclose(hi, np.asarray(cfg.runtime.safety.joint_upper, dtype=float))
-  assert b._read_decimation == 2
+  assert b._slow_decimation == 2
   assert b._port == "/dev/null"
 
 
@@ -384,14 +440,14 @@ def test_mujoco_backend_headless():
   assert np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))
   assert np.all(upper >= lower)
 
-  q0 = backend.read_positions()
+  q0 = backend.last_positions()
   # Command a small in-range move on the base joint and step physics
   # deterministically; the measured position should move toward the target.
   target = q0.copy()
   target[0] = np.clip(q0[0] + 0.3, lower[0], upper[0])
   backend.write_positions(target)
   backend.step(400)
-  moved = backend.read_positions()
+  moved = backend.last_positions()
   assert abs(moved[0] - target[0]) < abs(q0[0] - target[0])
 
   # No viewer object was created in the headless path.
@@ -409,3 +465,242 @@ def test_mujoco_backend_physics_thread_lifecycle():
   assert backend._thread is not None and backend._thread.is_alive()
   backend.stop()
   assert backend._thread is None
+
+
+# -- read_state: block layout + budget scheduling ----------------------------
+
+
+def test_read_state_fetches_position_and_tier1_in_one_transaction(stub_follower):
+  # The load-bearing claim of the design: position, velocity, load, voltage and
+  # temperature all arrive from a single contiguous sync-read.
+  b = _backend()
+  b.start()
+  bus = stub_follower[0].bus
+  bus.block_reads.clear()
+
+  st = b.read_state(math.inf)
+
+  assert bus.block_reads == [(_FAST_ADDR, _FAST_LEN)]   # exactly one transaction
+  assert st.q.shape == (6,)
+  assert st.qd is not None and st.qd.shape == (6,)
+  assert st.load is not None and st.load.shape == (6,)
+  assert st.volt is not None and st.temp is not None
+  assert st.q_age == 0.0
+  assert st.healthy
+  b.stop()
+
+
+def test_read_state_converts_tier1_diagnostics_to_physical_units(stub_follower):
+  b = _backend()
+  b.start()
+  st = b.read_state(math.inf)
+  # 100 counts/s at 4096 counts/rev; 250/1000 of full-scale load; 120 decivolts.
+  np.testing.assert_allclose(st.qd, np.full(6, 100 * 2 * math.pi / 4096.0))
+  np.testing.assert_allclose(st.load, np.full(6, 0.25))
+  np.testing.assert_allclose(st.volt, np.full(6, 12.0))
+  np.testing.assert_allclose(st.temp, np.full(6, 31.0))
+  b.stop()
+
+
+def test_read_state_block_positions_match_the_get_observation_path(stub_follower):
+  # The block decode and lerobot's own sync_read path must not drift: both go
+  # through _normalize + leader_action_to_follower_qpos, so a mid-scale count
+  # maps to the same radians either way.
+  b = _backend()
+  b.start()
+  st = b.read_state(math.inf)
+  # The stub boots at 0 deg on the angular joints (count 2048, the calibration
+  # midpoint) and 0% on the gripper (count 0, the jaw's lower bound) -- the
+  # same pose get_observation reports, decoded through the block path instead.
+  np.testing.assert_allclose(st.q[:5], np.zeros(5), atol=1e-9)
+  assert st.q[5] == pytest.approx(_LOWER[5], abs=1e-9)
+  b.stop()
+
+
+def test_read_state_starved_budget_returns_cache_and_flags_it(stub_follower):
+  b = _backend()
+  b.start()
+  bus = stub_follower[0].bus
+  primed = b.read_state(math.inf).q
+  bus.block_reads.clear()
+
+  st = b.read_state(0.0)               # no budget at all
+
+  assert bus.block_reads == []         # nothing was put on the wire
+  np.testing.assert_array_equal(st.q, primed)   # but q is still answerable
+  assert st.faults & FaultFlags.READ_STARVED
+  assert st.stale                      # and the tick knows not to trust it
+  b.stop()
+
+
+def test_read_state_first_read_ignores_the_budget(stub_follower):
+  # With no cache there is nothing to fall back on, so a zero budget must not
+  # leave the very first tick without a position.
+  b = _backend()
+  b.start()
+  with b._lock:                        # simulate a backend that never primed
+    b._cached = None
+    b._fast_t = None
+  bus = stub_follower[0].bus
+  bus.block_reads.clear()
+
+  st = b.read_state(0.0)
+
+  assert bus.block_reads == [(_FAST_ADDR, _FAST_LEN)]
+  assert st.q.shape == (6,)
+  b.stop()
+
+
+def test_read_state_marks_q_stale_once_it_ages_out(stub_follower):
+  b = _backend(stale_after_s=0.001)
+  b.start()
+  b.read_state(math.inf)
+  time.sleep(0.005)
+  st = b.read_state(0.0)               # starved: q keeps ageing
+  assert st.q_age > 0.001
+  assert st.faults & FaultFlags.STALE_Q
+  b.stop()
+
+
+def test_read_state_defers_the_slow_block_when_the_budget_is_tight(stub_follower):
+  b = _backend(slow_decimation=1)      # due on every tick
+  b.start()
+  bus = stub_follower[0].bus
+  bus.block_reads.clear()
+  # Pin the cost estimates rather than relying on what the stub happens to
+  # measure, so the budget below is unambiguously "enough for one, not two".
+  b._cost["fast"].cost = 0.004
+  b._cost["slow"].cost = 0.003
+
+  st = b.read_state(0.005)             # covers fast (4 ms), not fast + slow (7 ms)
+
+  assert bus.block_reads == [(_FAST_ADDR, _FAST_LEN)]
+  assert st.faults & FaultFlags.SLOW_DEFERRED
+  assert st.curr is None               # never measured, so absent rather than faked
+  b.stop()
+
+
+def test_read_state_reads_the_slow_block_when_it_fits(stub_follower):
+  b = _backend(slow_decimation=1)
+  b.start()
+  bus = stub_follower[0].bus
+  bus.block_reads.clear()
+
+  st = b.read_state(math.inf)
+
+  assert bus.block_reads == [(_FAST_ADDR, _FAST_LEN), (_SLOW_ADDR, _SLOW_LEN)]
+  np.testing.assert_allclose(st.curr, np.full(6, 40 * 0.0065))
+  assert not (st.faults & FaultFlags.SLOW_DEFERRED)
+  b.stop()
+
+
+def test_read_state_decimates_the_slow_block(stub_follower):
+  b = _backend(slow_decimation=4)
+  b.start()
+  bus = stub_follower[0].bus
+  bus.block_reads.clear()
+  for _ in range(8):
+    b.read_state(math.inf)
+  slow = [r for r in bus.block_reads if r[0] == _SLOW_ADDR]
+  assert len(slow) == 2                # 8 ticks / decimation 4
+  b.stop()
+
+
+def test_read_state_forces_a_starved_slow_block_through_eventually(stub_follower):
+  # A persistently tight budget must not starve thermal monitoring forever: one
+  # late tick is a better outcome than never noticing an over-current.
+  b = _backend(slow_decimation=1, slow_max_skips=3)
+  b.start()
+  bus = stub_follower[0].bus
+  bus.block_reads.clear()
+  b._cost["fast"].cost = 0.004
+  b._cost["slow"].cost = 0.003
+  for _ in range(3):                   # three denials
+    b.read_state(0.005)
+  assert [r for r in bus.block_reads if r[0] == _SLOW_ADDR] == []
+  b.read_state(0.005)                  # the fourth is forced through
+  assert [r for r in bus.block_reads if r[0] == _SLOW_ADDR] == [(_SLOW_ADDR, _SLOW_LEN)]
+  b.stop()
+
+
+def test_read_state_survives_a_bus_error_without_raising(stub_follower):
+  b = _backend()
+  b.start()
+  bus = stub_follower[0].bus
+  good = b.read_state(math.inf).q
+  bus.fail_addrs.add(_FAST_ADDR)
+
+  st = b.read_state(math.inf)          # the transaction raises inside
+
+  np.testing.assert_array_equal(st.q, good)     # cache reused
+  assert st.faults & FaultFlags.BUS_ERROR
+  b.stop()
+
+
+def test_read_state_raises_health_flags_from_diagnostics(stub_follower):
+  b = _backend(temp_limit_c=30.0, load_limit=0.1, volt_min=13.0)
+  b.start()
+  st = b.read_state(math.inf)
+  # Stub serves 31 C, 0.25 load, 12.0 V against limits of 30 / 0.1 / 13.0.
+  assert st.faults & FaultFlags.OVER_TEMP
+  assert st.faults & FaultFlags.OVER_LOAD
+  assert st.faults & FaultFlags.UNDER_VOLT
+  assert not st.healthy
+  b.stop()
+
+
+def test_read_state_degrades_to_position_only_without_block_support(stub_follower):
+  # An SDK lacking the private sync-reader surface must not fail every tick:
+  # positions keep flowing, tier-1 diagnostics are simply absent.
+  b = _backend()
+  b.start()
+  f = stub_follower[0]
+  def _missing(*a, **kw):              # the surface the block path relies on
+    raise AttributeError("no _sync_read on this bus")
+  f.bus._sync_read = _missing
+  before = f.reads
+
+  st = b.read_state(math.inf)
+
+  assert st.q.shape == (6,)
+  assert st.qd is None                 # no block, so no free diagnostics
+  assert f.reads == before + 1         # fell back to get_observation
+  assert b._blocks_ok is False         # latched off, not retried every tick
+  b.stop()
+
+
+def test_read_state_before_start_raises():
+  with pytest.raises(RuntimeError, match="before start"):
+    _backend().read_state(math.inf)
+
+
+def test_read_state_block_cost_tracks_the_wire(stub_follower):
+  # The scheduler budgets on a measured cost, so a slow transaction must raise
+  # the estimate immediately (and a fast one must not drop it instantly).
+  import chuck_dreamer.runtime.feetech_backend as fb
+
+  c = fb._BlockCost(0.001, decay=0.02)
+  c.observe(0.010)
+  assert c.cost == 0.010               # rises straight to the new maximum
+  c.observe(0.001)
+  assert c.cost > 0.009                # but decays only slowly
+
+
+def test_read_state_block_and_fallback_paths_agree(stub_follower):
+  # The block decode and the position-only fallback must produce the same
+  # radians for the same pose. They share _normalize +
+  # leader_action_to_follower_qpos, but only a direct comparison catches an
+  # offset or width error in the block layout itself.
+  b = _backend()
+  b.start()
+  f = stub_follower[0]
+  target = np.array([0.5, -1.0, 1.0, 0.3, -0.4, 0.7])
+  b.write_positions(target)
+
+  via_block = b.read_state(math.inf).q
+  b._blocks_ok = False                 # force the get_observation path
+  via_fallback = b.read_state(math.inf).q
+
+  np.testing.assert_allclose(via_block, via_fallback, atol=2e-3)
+  assert f.reads == 1                  # the fallback read, and only it
+  b.stop()

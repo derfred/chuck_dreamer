@@ -25,11 +25,13 @@ import csv
 import queue
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from decorator import contextmanager
 
 
 @dataclass
@@ -55,10 +57,70 @@ class TelemetryRecord:
   detail: str = ""
   backend_s: float = 0.0
 
+  # Measurement health, from the tick's ControlState (see control_state.py).
+  q_age: float = 0.0
+  read_s: float = 0.0
+  faults: int = 0
+  read_budget_s: float = 0.0
+
+  _timed: dict[str, float] = None
+
+  def __post_init__(self):
+    if self._timed is None:
+      self._timed = {}
+
+  @contextmanager
+  def timed(self, name: str) -> Iterator[None]:
+    t0 = time.perf_counter()
+    try:
+      yield
+    finally:
+      self._timed[name] = time.perf_counter() - t0
+
+  def elapsed(self, name: str, default: float = 0.0) -> float:
+    """Duration recorded by a :meth:`timed` block, or ``default`` if it never ran."""
+    return self._timed.get(name, default)
+
+  def update(
+    self,
+    *,
+    state=None,
+    action=None,
+    q_cmd=None,
+    ref=None,
+    dt: float = 0.0,
+    limits=None,
+    read_budget_s: float = 0.0,
+  ) -> None:
+    """Fold one tick's outcome into the record.
+
+    Everything is optional because a tick can legitimately end early (no
+    trajectory, a refused command), and a partial row is more useful than a
+    missing one.
+    """
+    self.dt            = float(dt)
+    self.read_budget_s = float(read_budget_s)
+    if state is not None:
+      self.q_meas    = state.q
+      self.q_age     = float(state.q_age)
+      self.read_s    = float(state.read_s)
+      self.faults    = int(state.faults)
+      self.backend_s = self.elapsed("read_state") + self.elapsed("write_positions")
+    if q_cmd is not None:
+      self.q_cmd = np.asarray(q_cmd, dtype=np.float64)
+    if ref is not None:
+      self.target = np.asarray(ref[0], dtype=np.float64)
+    if action is not None:
+      self.seq = int(getattr(action, "seq", -1))
+    if limits:
+      self.clamped          = bool(limits.get("clamped", False))
+      self.velocity_limited = bool(limits.get("stale", False))
+
 
 _SCALAR_FIELDS = [
   "t_wall", "t_mono", "tick", "mode", "clamped",
   "velocity_limited", "dt", "seq", "event", "detail", "backend_s",
+  "q_age", "read_s", "faults", "read_budget_s",
 ]
 
 
@@ -84,18 +146,21 @@ def record_to_row(rec: TelemetryRecord, n_joints: int) -> dict[str, Any]:
     "event": rec.event,
     "detail": rec.detail,
     "backend_s": rec.backend_s,
+    "q_age": rec.q_age,
+    "read_s": rec.read_s,
+    "faults": int(rec.faults),
+    "read_budget_s": rec.read_budget_s,
   }
   for name, arr in (("q_meas", rec.q_meas), ("q_cmd", rec.q_cmd), ("target", rec.target)):
     for i in range(n_joints):
       row[f"{name}_{i}"] = "" if arr is None else float(arr[i])
   return row
 
-
 class TelemetryQueue:
   """Bounded queue with a non-blocking emit that drops + counts on overflow."""
 
   def __init__(self, maxsize: int = 10000) -> None:
-    self._q: "queue.Queue[TelemetryRecord]" = queue.Queue(maxsize=maxsize)
+    self._q: queue.Queue[TelemetryRecord] = queue.Queue(maxsize=maxsize)
     self._dropped = 0
     self._dropped_lock = threading.Lock()
 

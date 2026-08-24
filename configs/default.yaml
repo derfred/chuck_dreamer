@@ -177,8 +177,7 @@ env:
 
 
 runtime:
-  control_rate_hz: 50
-  policy_rate_hz:  10
+  policy_rate_hz: 10
 
   # Run length used by demos and tests. null -> run until SIGINT (Ctrl-C)
   duration_s: null
@@ -192,36 +191,49 @@ runtime:
   # envelope + jaw bounds come from `safety` below, not from params:
   #   target: "chuck_dreamer.runtime.feetech_backend:FeetechBackend"
   #   params: { port: "/dev/tty.usbmodemXXX", calibration_id: null,
-  #             use_degrees: true, read_decimation: 1 }
+  #             use_degrees: true,
+  #             # read_state scheduling: how many ticks between attempts at the
+  #             # tier-2 (current) block, how many budget-denied attempts may
+  #             # pass before one is forced through, and the age at which a
+  #             # cached position is reported stale.
+  #             slow_decimation: 25, slow_max_skips: 200, stale_after_s: 0.1,
+  #             # Health thresholds raised as flags on the ControlState.
+  #             temp_limit_c: 65.0, load_limit: 0.9, volt_min: 9.0 }
   backend:
     target: "chuck_dreamer.runtime.backend:FakeBackend"
     params: {}
 
   # Authoritative joint-space safety envelope (the kernel's clamp + slew).
-  safety:
-    joint_names: ["Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw"]
+  control_loop:
+    rate_hz: 50.0  # Hz; must match runtime.control_rate_hz
     # Per-joint position bounds (rad). null -> read from backend.joint_limits()
     # (MuJoCo model ranges). FakeBackend has no model, so set these when using it.
-    joint_lower: [-1.92, -3.32, -0.174, -1.66, -2.79, -0.174]
-    joint_upper: [ 1.92,  0.174,  3.14,  1.66,  2.79,  1.75]
-    # Joint-space velocity limit (rad/s). Scalar (broadcast) or per-joint list.
-    max_velocity: 1.5
-    # Boot pose; matches the so100 SceneConfig default home.
-    home_qpos: [0, -3.14, 3.14, 0, 0, 0]
+    joint_limits:
+      lower: [-1.92, -3.32, -0.174, -1.66, -2.79, -0.174]
+      upper: [ 1.92,  0.174,  3.14,  1.66,  2.79,  1.75]
+    
+    # Joint-space dynamic limit (rad/s, rad/s^2). Scalar (broadcast) or per-joint list.
+    safety:
+      max_velocity: 1.5
+      max_acceleration: 3.0
+      coast_to_stop_time: 0.1  # seconds to coast to a stop when the source goes idle
 
-    # Following-error watchdog (spec §3.14): trips the safety latch on
-    # sustained tracking failure (obstruction, self-collision, servo
-    # malfunction) — the only safety layer that closes a loop on measured
-    # state. theta_0/T are global (shared servo model); k is per-joint
-    # (distal joints need a larger allowance per unit commanded velocity).
-    # Defaults are placeholders pending the offline calibration recipe in
-    # spec §3.14 (2-3x resting/typical-velocity p99 |e|); DO NOT ship
-    # without recalibrating against real recordings.
-    following_error_watchdog:
-      enabled: true
-      theta_0: 0.25    # rad
-      k: 0.1           # s; scalar (all joints) or per-joint list
-      T: 0.15          # s
+    # Measurement budget: seconds per tick the backend may spend reading, or
+    # "max" for unlimited. The backend spends it in priority order -- joint
+    # positions first, then whatever diagnostics still fit -- and reports what
+    # it had to skip via the ControlState fault flags.
+    #
+    # "max" reads everything every tick. Whether the bus is actually tight
+    # enough to need rationing is a hardware question: measure it with
+    # scripts/probe_read_timing.py, or watch for `control_overrun` events in
+    # telemetry, then lower this to something under the period (e.g. 0.008 at
+    # 50 Hz) if the reads turn out not to fit.
+    read:
+      budget_s: max
+      # Age past which a command is clamped toward the last measured position
+      # rather than allowed to keep extending a planned motion.
+      stale_hold_s: 0.1
+
 
   # Sensors (M3, spec §3.1/§4.2):
   # MuJoCo scene render (needs MujocoBackend):

@@ -31,8 +31,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from ..policy import Policy
 from .backend import RobotBackend, ViewableBackend
-from .control_loop import ControlLoop
-from .kernel import ControlKernel, KernelLimits, Mode
+from .control_loop import ControlLoop, build_control_config
 from .modalities import (
   RuntimeObservation,
   check_required,
@@ -152,53 +151,43 @@ class PolicyLoop:
 class Runtime:
   """Boots the SO-101 runtime from ``cfg`` and owns its thread lifecycle."""
 
+  backend: RobotBackend
+
   def __init__(self, cfg: DictConfig) -> None:
     self.cfg = cfg
-    rt       = cfg.runtime
+    rt_cfg   = cfg.runtime
 
-    # 1. Backend. FakeBackend needs the safety envelope at construction; a
-    #    physics backend (MuJoCo) carries its own limits. We resolve the
-    #    envelope first so both backend and kernel agree.
-    self._joint_names          = list(rt.safety.joint_names)
-    n                          = len(self._joint_names)
-    self.backend: RobotBackend = self._build_backend(rt, n)
-
-    lower, upper = self._resolve_limits(rt.safety, self.backend)
-    self._limits = KernelLimits.build(lower, upper, _to_array(rt.safety.max_velocity, n))
-
-    # 2. Home pose -> kernel slew reference (clamped into the box).
-    home        = _to_array(rt.safety.home_qpos, n)
-    self.kernel = ControlKernel(self._limits, np.clip(home, lower, upper), mode=Mode.NORMAL)
+    self.backend = self._build_backend(rt_cfg)
 
     # 3. Channel, telemetry queue, Rerun sink, loops.
     self.channel   = SetpointChannel()
-    self.telemetry = TelemetryQueue(maxsize=int(rt.logging.queue_maxsize))
+    self.telemetry = TelemetryQueue(maxsize=int(rt_cfg.logging.queue_maxsize))
     self.sink      = RerunSink(
-      rt.logging.rerun.rrd_dir, self.telemetry, n_joints=n,
-      obs_queue_maxsize=int(rt.logging.rerun.get("obs_queue_maxsize", 256)),
+      rt_cfg.logging.rerun.rrd_dir, self.telemetry, n_joints=n,
+      obs_queue_maxsize=int(rt_cfg.logging.rerun.get("obs_queue_maxsize", 256)),
     )
 
-    self.control_loop = ControlLoop(self.kernel, self.backend, self.channel, self.telemetry, rate_hz=float(rt.control_rate_hz))
-    self.policy      = self._build_policy(rt, home)
-    self.leader      = self._build_leader(rt)  # None unless source.kind == "manual"
+    self.control_loop = ControlLoop(build_control_config(rt_cfg, n_joints=n), self.backend, self.channel, self.telemetry)
+    self.policy       = self._build_policy(rt_cfg)
+    self.leader       = self._build_leader(rt_cfg)  # None unless source.kind == "manual"
 
     # 4. Observation half (M3): sensors + perception pipeline, then compose the
     #    active modality set and fail fast (spec §9.1 step 4-5) before any thread
     #    starts if a required modality is unproduced.
-    self.sensors     = self._build_sensors(rt)
-    self.perception  = self._build_perception(rt)
+    self.sensors     = self._build_sensors(rt_cfg)
+    self.perception  = self._build_perception(rt_cfg)
     self.available   = compose_modalities(
       self.sensors, self.perception.modules, leader_present=self.leader is not None)
-    check_required(required_modalities(rt), self.available)
+    check_required(required_modalities(rt_cfg), self.available)
 
     self.policy_loop = PolicyLoop(
-      self.policy, self.channel, self.backend, home,
-      rate_hz=float(rt.policy_rate_hz), leader=self.leader,
+      self.policy, self.channel, self.backend,
+      rate_hz=float(rt_cfg.policy_rate_hz), leader=self.leader,
       sensors=self.sensors, perception=self.perception, rerun_sink=self.sink,
     )
 
-    self._duration_s     = None if rt.duration_s is None else float(rt.duration_s)
-    self._viewer_enabled = bool(rt.viewer.enabled)
+    self._duration_s     = None if rt_cfg.duration_s is None else float(rt_cfg.duration_s)
+    self._viewer_enabled = bool(rt_cfg.viewer.enabled)
     self._shutdown       = threading.Event()
     self._n              = n
     # One .rrd per episode (spec §3.11). Episode lifecycle is M7; until then a
@@ -278,11 +267,6 @@ class Runtime:
     leader_cfg = rt.get("leader")
     if leader_cfg is None or not bool(leader_cfg.get("enabled")):
       return None
-
-    if len(self._joint_names) != 6:
-      raise ValueError(
-        f"the SO-101 leader maps onto a 6-joint follower; got {len(self._joint_names)} "
-        "joints in runtime.safety.joint_names")
 
     target               = str(leader_cfg.target)
     params               = _params_dict(leader_cfg.get("params"))
