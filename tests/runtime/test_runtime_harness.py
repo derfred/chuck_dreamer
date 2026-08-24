@@ -74,9 +74,10 @@ class _RecordingPolicy:
 def test_policy_loop_resets_and_publishes_act_output():
   policy = _RecordingPolicy([0.1, 0.2])
   channel = SetpointChannel()
-  backend = FakeBackend(2, lower=np.full(2, -1.0), upper=np.full(2, 1.0))
   home = np.array([0.3, -0.4])
-  loop = PolicyLoop(policy, channel, backend, home, rate_hz=200)
+  backend = FakeBackend(2, lower=np.full(2, -1.0), upper=np.full(2, 1.0),
+                        q_init=home)
+  loop = PolicyLoop(policy, channel, backend, rate_hz=200)
 
   loop.start()
   deadline = time.monotonic() + 1.0
@@ -84,7 +85,8 @@ def test_policy_loop_resets_and_publishes_act_output():
     time.sleep(0.005)
   loop.stop()
 
-  np.testing.assert_array_equal(policy.reset_arg, home)   # reset got the start pose
+  # reset is anchored on the backend's home pose, not a threaded-in argument
+  np.testing.assert_array_equal(policy.reset_arg, home)
   np.testing.assert_array_equal(channel.get(), [0.1, 0.2])  # act() output published
   assert policy.seen                                       # act() was called
   obs = policy.seen[-1]

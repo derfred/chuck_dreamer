@@ -58,12 +58,11 @@ _FAKE_BACKEND_TARGET = "chuck_dreamer.runtime.backend:FakeBackend"
 class PolicyLoop:
   """Threaded policy producer: sense → perceive → ``policy.act(obs)`` → channel.
 
-  Resets the policy and the perception pipeline once with ``reset_arg`` (a joint
-  vector or a SceneConfig), then, at the policy rate: samples each sensor's
-  latest value, runs the perception pipeline inline, composes a
-  :class:`RuntimeObservation`, publishes ``policy.act(obs)``, and (if a Rerun
-  sink is wired) logs the observation. This is the exact producer path Dreamer
-  will use at M6.
+  Resets the policy and the perception pipeline once against the backend's home
+  pose, then, at the policy rate: samples each sensor's latest value, runs the
+  perception pipeline inline, composes a :class:`RuntimeObservation`, publishes
+  ``policy.act(obs)``, and (if a Rerun sink is wired) logs the observation. This
+  is the exact producer path Dreamer will use at M6.
 
   Perception runs inline here, on the policy thread: a slow ``process`` only
   delays the next ``channel.publish`` — the control loop keeps slewing the last
@@ -77,7 +76,6 @@ class PolicyLoop:
     policy: Policy,
     channel: SetpointChannel,
     backend: RobotBackend,
-    reset_arg: Any,
     *,
     rate_hz: float,
     leader: "LeaderReader | None" = None,
@@ -90,7 +88,6 @@ class PolicyLoop:
     self._policy     = policy
     self._channel    = channel
     self._backend    = backend
-    self._reset_arg  = reset_arg
     self._leader     = leader
     self._sensors    = sensors or []
     self._perception = perception or PerceptionPipeline([])
@@ -100,7 +97,7 @@ class PolicyLoop:
     self._thread: threading.Thread | None = None
 
   def start(self) -> None:
-    self._policy.reset(self._reset_arg)
+    self._policy.reset(self._backend.home_qpos)
     self._perception.reset()
     self._stop.clear()
     self._thread = threading.Thread(target=self._run, name="runtime-policy", daemon=True)
@@ -117,7 +114,7 @@ class PolicyLoop:
     next_deadline = t0
     step = 0
     while not self._stop.is_set():
-      t = time.monotonic() - t0
+      t      = time.monotonic() - t0
       q_meas = self._backend.last_positions()
       # latest() is non-blocking by contract, so the policy loop never waits on
       # serial / the camera; when no leader is configured leader_qpos is None.
@@ -158,16 +155,17 @@ class Runtime:
     rt_cfg   = cfg.runtime
 
     self.backend = self._build_backend(rt_cfg)
+    n_joints     = self.backend.n_joints
 
     # 3. Channel, telemetry queue, Rerun sink, loops.
     self.channel   = SetpointChannel()
     self.telemetry = TelemetryQueue(maxsize=int(rt_cfg.logging.queue_maxsize))
     self.sink      = RerunSink(
-      rt_cfg.logging.rerun.rrd_dir, self.telemetry, n_joints=n,
+      rt_cfg.logging.rerun.rrd_dir, self.telemetry, n_joints=n_joints,
       obs_queue_maxsize=int(rt_cfg.logging.rerun.get("obs_queue_maxsize", 256)),
     )
 
-    self.control_loop = ControlLoop(build_control_config(rt_cfg, n_joints=n), self.backend, self.channel, self.telemetry)
+    self.control_loop = ControlLoop(build_control_config(rt_cfg, n_joints=n_joints), self.backend, self.channel, self.telemetry)
     self.policy       = self._build_policy(rt_cfg)
     self.leader       = self._build_leader(rt_cfg)  # None unless source.kind == "manual"
 
@@ -189,7 +187,6 @@ class Runtime:
     self._duration_s     = None if rt_cfg.duration_s is None else float(rt_cfg.duration_s)
     self._viewer_enabled = bool(rt_cfg.viewer.enabled)
     self._shutdown       = threading.Event()
-    self._n              = n
     # One .rrd per episode (spec §3.11). Episode lifecycle is M7; until then a
     # single recording spans the run, named by start time so successive runs
     # don't clobber each other.
@@ -197,17 +194,37 @@ class Runtime:
 
   # -- construction helpers -------------------------------------------------
 
-  def _build_backend(self, rt: DictConfig, n: int) -> RobotBackend:
+  def _build_backend(self, rt: DictConfig) -> RobotBackend:
+    """Construct the configured backend; it is the source of truth for the
+    joint count, the joint envelope and the home pose.
+
+    ``FakeBackend`` is the one backend with no model of its own, so the
+    runtime hands it the configured envelope (and home pose, when set) at
+    construction; everything else either reads config itself via
+    ``from_config`` or carries its own geometry.
+    """
     # `runtime.backend` is always a mapping {target: str, params: {...}}.
     target = str(rt.backend.target)
     params = _params_dict(rt.backend.get("params"))
     spec: dict[str, Any] = {"target": target, "params": params}
 
     if target == _FAKE_BACKEND_TARGET:
-      lower, upper = self._resolve_limits(rt.safety, backend=None, n=n)
+      limits = rt.control_loop.joint_limits
+      if limits.get("lower") is None or limits.get("upper") is None:
+        raise ValueError(
+          "runtime.control_loop.joint_limits.lower/upper must be set for "
+          "FakeBackend (it has no model to read joint limits from)")
+      lower = _to_seq(limits.lower)
+      upper = _to_seq(limits.upper)
+      n     = len(lower)
+      if len(upper) != n:
+        raise ValueError(
+          f"joint_limits.lower/upper length mismatch: {n} vs {len(upper)}")
+      home = limits.get("home_qpos")
       return cast(RobotBackend, construct(
-        spec, n_joints=n, lower=lower, upper=upper,
-        q_init=_to_array(rt.safety.home_qpos, n)))
+        spec, n_joints=n, lower=np.asarray(lower, dtype=np.float64),
+        upper=np.asarray(upper, dtype=np.float64),
+        q_init=None if home is None else _to_array(home, n)))
 
     # A config-aware backend (e.g. MujocoBackend, which samples a scene from
     # cfg) exposes a `from_config` classmethod; prefer it and feed it `params`
@@ -218,22 +235,11 @@ class Runtime:
       return cast(RobotBackend, from_config(self.cfg, **params))
     return cast(RobotBackend, construct(spec))
 
-  def _resolve_limits(self, safety: DictConfig, backend, n: int | None = None):
-    """Joint bounds from config if set, else from the backend."""
-    lo_cfg, hi_cfg = safety.joint_lower, safety.joint_upper
-    if lo_cfg is not None and hi_cfg is not None:
-      count = n if n is not None else len(safety.joint_names)
-      return _to_array(lo_cfg, count), _to_array(hi_cfg, count)
-    if backend is None:
-      raise ValueError(
-        "runtime.safety.joint_lower/upper must be set for FakeBackend "
-        "(no backend to read limits from before construction)")
-    return backend.joint_limits()
-
-  def _build_policy(self, rt: DictConfig, home: np.ndarray) -> Policy:
+  def _build_policy(self, rt: DictConfig) -> Policy:
     kind = str(rt.source.kind)
     if kind == "go_to_pose":
       g    = rt.source.go_to_pose
+      home = self.backend.home_qpos
       goal = home if g.q_goal == "home" else _to_array(g.q_goal, len(home))
       return GoToPose(q_goal=goal, duration_s=float(g.duration_s))
     if kind == "sine_sweep":
@@ -260,9 +266,9 @@ class Runtime:
     it but does not require it, and any other policy may read it too.
 
     Reuses the construct/from_config convention from :meth:`_build_backend`. The
-    follower jaw bounds (the last joint) are injected from the resolved kernel
+    follower jaw bounds (the last joint) are injected from the backend's joint
     limits so the gripper percentage->radian mapping always agrees with the
-    authoritative clamp; they are not read from config.
+    bounds the control loop limits against; they are not read from config.
     """
     leader_cfg = rt.get("leader")
     if leader_cfg is None or not bool(leader_cfg.get("enabled")):
@@ -270,8 +276,9 @@ class Runtime:
 
     target               = str(leader_cfg.target)
     params               = _params_dict(leader_cfg.get("params"))
-    jaw_lo               = float(self._limits.lower[-1])
-    jaw_hi               = float(self._limits.upper[-1])
+    lower, upper         = self.backend.joint_limits()
+    jaw_lo               = float(lower[-1])
+    jaw_hi               = float(upper[-1])
     spec: dict[str, Any] = {"target": target, "params": params}
 
     # One construction contract (LeaderReader docstring): the resolved jaw
@@ -417,6 +424,15 @@ def _params_dict(params_cfg) -> dict[str, Any]:
     if OmegaConf.is_config(params_cfg) else (params_cfg or {})
   )
   return {str(k): v for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+
+def _to_seq(value) -> list:
+  """Coerce a config sequence node to a plain list (length is the joint count)."""
+  raw = (OmegaConf.to_container(value, resolve=True)
+         if OmegaConf.is_config(value) else value)
+  if not isinstance(raw, (list, tuple)):
+    raise ValueError(f"expected a sequence, got {type(raw).__name__}")
+  return list(raw)
 
 
 def _to_array(value, n: int) -> np.ndarray:

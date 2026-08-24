@@ -53,6 +53,30 @@ def test_fake_backend_rejects_wrong_shape():
     b.write_positions(np.zeros(3))
 
 
+def test_fake_backend_home_defaults_to_box_centre():
+  b = FakeBackend(3, lower=np.full(3, -1.0), upper=np.array([1.0, 3.0, 1.0]))
+  np.testing.assert_allclose(b.home_qpos, [0.0, 1.0, 0.0])
+  np.testing.assert_allclose(b.last_positions(), b.home_qpos)  # boots at home
+
+
+def test_fake_backend_home_is_zeros_when_unbounded():
+  """An unbounded axis has no centre; it must not average its infinities."""
+  b = FakeBackend(2, lower=np.array([-1.0, -np.inf]), upper=np.array([3.0, np.inf]))
+  np.testing.assert_allclose(b.home_qpos, [1.0, 0.0])
+
+
+def test_fake_backend_home_from_q_init_is_clamped():
+  b = FakeBackend(2, lower=np.full(2, -1.0), upper=np.full(2, 1.0),
+                  q_init=np.array([5.0, 0.2]))
+  np.testing.assert_allclose(b.home_qpos, [1.0, 0.2])
+
+
+def test_fake_backend_home_is_a_copy():
+  b = FakeBackend(2, lower=np.full(2, -1.0), upper=np.full(2, 1.0))
+  b.home_qpos[:] = 99.0
+  np.testing.assert_allclose(b.home_qpos, [0.0, 0.0])
+
+
 # -- FeetechBackend ----------------------------------------------------------
 
 _MOTORS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
@@ -235,7 +259,11 @@ def stub_follower(monkeypatch):
   return created
 
 
+_HOME = 0.5 * (_LOWER + _UPPER)   # arbitrary in-envelope rest pose for tests
+
+
 def _backend(**kw) -> FeetechBackend:
+  kw.setdefault("home_qpos", _HOME)
   return FeetechBackend(port="/dev/null", lower=_LOWER, upper=_UPPER, **kw)
 
 
@@ -256,7 +284,8 @@ def test_feetech_import_is_hardware_free():
 
 def test_feetech_rejects_wrong_limit_shape():
   with pytest.raises(ValueError, match="6 joints"):
-    FeetechBackend(port="/dev/null", lower=np.zeros(3), upper=np.ones(3))
+    FeetechBackend(port="/dev/null", lower=np.zeros(3), upper=np.ones(3),
+                   home_qpos=np.zeros(3))
 
 
 def test_feetech_stop_before_start_is_safe():
@@ -407,13 +436,45 @@ def test_feetech_from_config_pulls_safety_envelope(stub_follower):
   from chuck_dreamer.config import load_config
 
   cfg = load_config()
-  cfg.runtime.backend.params = {"port": "/dev/null", "slow_decimation": 2}
+  cfg.runtime.backend.params = {
+    "port": "/dev/null", "slow_decimation": 2, "home_qpos": [0.0] * 6}
   b = FeetechBackend.from_config(cfg, **cfg.runtime.backend.params)
+  limits = cfg.runtime.control_loop.joint_limits
   lo, hi = b.joint_limits()
-  np.testing.assert_allclose(lo, np.asarray(cfg.runtime.safety.joint_lower, dtype=float))
-  np.testing.assert_allclose(hi, np.asarray(cfg.runtime.safety.joint_upper, dtype=float))
+  np.testing.assert_allclose(lo, np.asarray(limits.lower, dtype=float))
+  np.testing.assert_allclose(hi, np.asarray(limits.upper, dtype=float))
   assert b._slow_decimation == 2
   assert b._port == "/dev/null"
+
+
+def test_feetech_from_config_requires_home_qpos():
+  """A real arm's rest pose is a physical choice -- no default is safe."""
+  from chuck_dreamer.config import load_config
+
+  with pytest.raises(ValueError, match="home_qpos"):
+    FeetechBackend.from_config(load_config(), port="/dev/null")
+
+
+def test_feetech_home_read_from_backend_params(stub_follower):
+  """home_qpos rides in runtime.backend.params, alongside `port`."""
+  from chuck_dreamer.config import load_config
+
+  cfg = load_config()
+  cfg.runtime.backend.params = {"port": "/dev/null", "home_qpos": [0.1] * 6}
+  b = FeetechBackend.from_config(cfg, **cfg.runtime.backend.params)
+  np.testing.assert_allclose(b.home_qpos, np.full(6, 0.1))
+
+
+def test_feetech_home_outside_envelope_is_rejected():
+  lo = np.full(6, -1.0)
+  hi = np.full(6, 1.0)
+  with pytest.raises(ValueError, match="within the joint envelope"):
+    FeetechBackend(port="/dev/null", lower=lo, upper=hi, home_qpos=np.full(6, 99.0))
+
+
+def test_feetech_ctor_requires_home_qpos():
+  with pytest.raises(TypeError, match="home_qpos"):
+    FeetechBackend(port="/dev/null", lower=_LOWER, upper=_UPPER)  # type: ignore[call-arg]
 
 
 def test_feetech_from_config_requires_port():
@@ -434,6 +495,11 @@ def test_mujoco_backend_headless():
 
   backend = MujocoBackend.from_config(load_config(), viewer=False, realtime=False)
   assert backend.n_joints == 6
+
+  # The scene's initial qpos is the home pose, and the sim boots holding it.
+  np.testing.assert_allclose(
+    backend.home_qpos, np.asarray(backend._scene.joint_initial_qpos, dtype=float))
+  np.testing.assert_allclose(backend.last_positions(), backend.home_qpos)
 
   lower, upper = backend.joint_limits()
   assert lower.shape == (6,) and upper.shape == (6,)

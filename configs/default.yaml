@@ -188,9 +188,17 @@ runtime:
   #   target: "chuck_dreamer.runtime.mujoco_backend:MujocoBackend"
   #   params: { realtime: true }
   # Or the real SO-101 follower over USB (M1 hardware swap-in). The joint
-  # envelope + jaw bounds come from `safety` below, not from params:
+  # envelope + jaw bounds come from `control_loop.joint_limits` below, not
+  # from params; the home pose is per-arm and so does live in params:
   #   target: "chuck_dreamer.runtime.feetech_backend:FeetechBackend"
   #   params: { port: "/dev/tty.usbmodemXXX", calibration_id: null,
+  #             # Required: the arm's rest pose (radians, follower order). It
+  #             # anchors the scripted sources and resolves the
+  #             # `source.go_to_pose.q_goal: "home"` sentinel. A real arm's rest
+  #             # pose is a physical choice, so there is no default -- set it to
+  #             # the pose you actually want the arm to sit at, inside the
+  #             # joint_limits box below.
+  #             home_qpos: [0.0, -1.57, 1.57, 0.0, 0.0, 0.0],
   #             use_degrees: true,
   #             # read_state scheduling: how many ticks between attempts at the
   #             # tier-2 (current) block, how many budget-denied attempts may
@@ -203,7 +211,7 @@ runtime:
     target: "chuck_dreamer.runtime.backend:FakeBackend"
     params: {}
 
-  # Authoritative joint-space safety envelope (the kernel's clamp + slew).
+  # Authoritative joint-space safety envelope, enforced by the control loop.
   control_loop:
     rate_hz: 50.0  # Hz; must match runtime.control_rate_hz
     # Per-joint position bounds (rad). null -> read from backend.joint_limits()
@@ -211,7 +219,7 @@ runtime:
     joint_limits:
       lower: [-1.92, -3.32, -0.174, -1.66, -2.79, -0.174]
       upper: [ 1.92,  0.174,  3.14,  1.66,  2.79,  1.75]
-    
+
     # Joint-space dynamic limit (rad/s, rad/s^2). Scalar (broadcast) or per-joint list.
     safety:
       max_velocity: 1.5

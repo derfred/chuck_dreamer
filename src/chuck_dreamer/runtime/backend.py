@@ -84,6 +84,11 @@ class RobotBackend(Protocol):
     ...
 
   @property
+  def home_qpos(self) -> np.ndarray:
+    """The arm's rest / reference pose, shape ``(n_joints,)``."""
+    ...
+
+  @property
   def n_joints(self) -> int:
     """Number of controlled joints."""
     ...
@@ -143,10 +148,10 @@ class FakeBackend(InstantReadMixin):
 
   ``write_positions`` stores the command clamped to the backend's own
   joint limits; ``read_state`` returns it back (an *echo* model). The
-  arm therefore tracks the kernel's commanded setpoint exactly — motion is
-  shaped entirely by the kernel's slew/clamp, which is what M0/M1 tests
-  want to assert against. No threads, no clock: ``start``/``stop`` are
-  no-ops.
+  arm therefore tracks the commanded setpoint exactly — motion is shaped
+  entirely by the control loop's trajectory and safety limiting, which is
+  what M0/M1 tests want to assert against. No threads, no clock:
+  ``start``/``stop`` are no-ops.
   """
 
   def __init__(
@@ -169,8 +174,22 @@ class FakeBackend(InstantReadMixin):
       raise ValueError(
         f"limit shapes must be ({self._n},); got lower={self._lower.shape}, "
         f"upper={self._upper.shape}")
-    q0 = np.zeros(self._n) if q_init is None else np.asarray(q_init, dtype=np.float64)
-    self._q = np.clip(q0, self._lower, self._upper)
+    q0 = self._default_home() if q_init is None else np.asarray(q_init, dtype=np.float64)
+    if q0.shape != (self._n,):
+      raise ValueError(f"q_init must have shape ({self._n},); got {q0.shape}")
+    self._home = np.clip(q0, self._lower, self._upper)
+    self._q    = self._home.copy()
+
+  def _default_home(self) -> np.ndarray:
+    """Centre of the joint box; zeros on any axis that is unbounded.
+
+    Bounded axes only: an unbounded axis has no centre, and averaging its
+    infinities is an invalid operation, so it is masked out before the add.
+    """
+    bounded      = np.isfinite(self._lower) & np.isfinite(self._upper)
+    home         = np.zeros(self._n)
+    home[bounded] = 0.5 * (self._lower[bounded] + self._upper[bounded])
+    return home
 
   def start(self) -> None:
     pass
@@ -189,6 +208,10 @@ class FakeBackend(InstantReadMixin):
 
   def joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
     return self._lower.copy(), self._upper.copy()
+
+  @property
+  def home_qpos(self) -> np.ndarray:
+    return self._home.copy()
 
   @property
   def n_joints(self) -> int:

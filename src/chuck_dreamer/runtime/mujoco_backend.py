@@ -65,6 +65,7 @@ class MujocoBackend(InstantReadMixin):
     # Initialise to the scene's home pose, holding it (ctrl == qpos) so the
     # position actuators don't drive back to zero (mirrors Controller.reset_initial_qpos).
     q0                             = np.asarray(scene.joint_initial_qpos, dtype=np.float64)
+    self._home                     = q0.copy()
     self.data.qpos[self._qpos_adr] = q0
     self.data.qvel[self._dof_adr]  = 0.0
     self.data.ctrl[self._ctrl_idx] = q0
@@ -87,6 +88,11 @@ class MujocoBackend(InstantReadMixin):
   @property
   def n_joints(self) -> int:
     return self._n
+
+  @property
+  def home_qpos(self) -> np.ndarray:
+    """The scene's ``joint_initial_qpos`` — the pose the sim is reset to."""
+    return self._home.copy()
 
   def last_positions(self) -> np.ndarray:
     with self._lock:

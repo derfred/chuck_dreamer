@@ -137,6 +137,12 @@ class FeetechBackend:
   ``lower`` / ``upper`` are the configured per-joint position bounds (radians,
   follower order) reported verbatim by :meth:`joint_limits`; their last entry is
   the jaw range the gripper percentage maps into.
+
+  ``home_qpos`` is the arm's rest pose (radians, follower order) and is
+  **required**: a real follower has no model to derive one from, and the rest
+  pose of a physical arm is a deliberate choice about where it should sit —
+  there is no default that is right by accident. It must lie within the
+  envelope.
   """
 
   def __init__(
@@ -145,6 +151,7 @@ class FeetechBackend:
     port: str,
     lower: np.ndarray,
     upper: np.ndarray,
+    home_qpos: np.ndarray,
     calibration_id: str | None = None,
     use_degrees: bool = True,
     slow_decimation: int = 25,
@@ -165,6 +172,14 @@ class FeetechBackend:
         f"got limit shapes lower={lo.shape}, upper={hi.shape}")
     if np.any(hi < lo):
       raise ValueError("every upper bound must be >= its lower bound")
+    home = np.asarray(home_qpos, dtype=np.float64)
+    if home.shape != (_N_JOINTS,):
+      raise ValueError(
+        f"home_qpos must have shape ({_N_JOINTS},); got {home.shape}")
+    if np.any(home < lo) or np.any(home > hi):
+      raise ValueError(
+        "home_qpos must lie within the joint envelope; got "
+        f"{np.asarray(home).tolist()} outside [{lo.tolist()}, {hi.tolist()}]")
     if int(slow_decimation) < 1:
       raise ValueError("slow_decimation must be >= 1")
     if int(slow_max_skips) < 1:
@@ -175,6 +190,7 @@ class FeetechBackend:
     self._port                            = port
     self._lower                           = lo.copy()
     self._upper                           = hi.copy()
+    self._home                            = home.copy()
     self._jaw_lower                       = float(lo[-1])
     self._jaw_upper                       = float(hi[-1])
     self._calibration_id                  = calibration_id
@@ -218,27 +234,29 @@ class FeetechBackend:
     self._tier2: dict[str, np.ndarray]    = {}
 
   @classmethod
-  def from_config(cls, cfg, *, port: str | None = None, **params) -> FeetechBackend:
-    """Build from ``cfg.runtime.safety`` (the harness backend convention).
+  def from_config(
+    cls, cfg, *, port: str | None = None, home_qpos=None, **params,
+  ) -> FeetechBackend:
+    """Build from ``cfg.runtime`` (the harness backend convention).
 
     The harness calls ``backend.from_config(cfg, **runtime.backend.params)``; the
-    configured ``params`` (``port``, ``calibration_id``, ``slow_decimation``, …)
-    flow through as keyword arguments. The joint-space envelope and jaw bounds
-    are pulled from ``runtime.safety`` so the backend reports exactly the bounds
-    the kernel clamps to. ``port`` may also live in ``params``.
+    configured ``params`` (``port``, ``home_qpos``, ``calibration_id``,
+    ``slow_decimation``, …) flow through as keyword arguments. The joint-space
+    envelope and jaw bounds are pulled from
+    ``runtime.control_loop.joint_limits`` so the backend reports exactly the
+    bounds the control loop limits against.
+
+    ``port`` and ``home_qpos`` are the two settings that describe *this arm*
+    rather than the control policy, so both live in ``runtime.backend.params``
+    and both are required — there is no sane default for either.
     """
     from omegaconf import OmegaConf
 
-    safety = cfg.runtime.safety
-    names = list(safety.joint_names)
-    if len(names) != _N_JOINTS:
+    limits = cfg.runtime.control_loop.joint_limits
+    if limits.get("lower") is None or limits.get("upper") is None:
       raise ValueError(
-        f"FeetechBackend drives {_N_JOINTS} joints; runtime.safety.joint_names "
-        f"has {len(names)}")
-    if safety.joint_lower is None or safety.joint_upper is None:
-      raise ValueError(
-        "FeetechBackend needs explicit runtime.safety.joint_lower/joint_upper "
-        "(radians) — there is no model to read joint limits from")
+        "FeetechBackend needs explicit runtime.control_loop.joint_limits."
+        "lower/upper (radians) — there is no model to read joint limits from")
 
     def _arr(node) -> np.ndarray:
       return np.asarray(
@@ -248,10 +266,17 @@ class FeetechBackend:
     resolved_port = port if port is not None else params.pop("port", None)
     if resolved_port is None:
       raise ValueError("FeetechBackend requires a serial `port` (set runtime.backend.params.port)")
+    resolved_home = home_qpos if home_qpos is not None else params.pop("home_qpos", None)
+    if resolved_home is None:
+      raise ValueError(
+        "FeetechBackend requires an explicit `home_qpos` (radians, follower "
+        "order) — set runtime.backend.params.home_qpos. A real arm's rest pose "
+        "is a physical choice; there is no safe default")
     return cls(
       port=str(resolved_port),
-      lower=_arr(safety.joint_lower),
-      upper=_arr(safety.joint_upper),
+      lower=_arr(limits.lower),
+      upper=_arr(limits.upper),
+      home_qpos=_arr(resolved_home),
       **params,
     )
 
@@ -263,6 +288,10 @@ class FeetechBackend:
 
   def joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
     return self._lower.copy(), self._upper.copy()
+
+  @property
+  def home_qpos(self) -> np.ndarray:
+    return self._home.copy()
 
   def start(self) -> None:
     # Lazy import: keeps module import hardware-free (no serial libs loaded

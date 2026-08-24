@@ -53,16 +53,7 @@ class ControlState:
 
 
 def parse_read_budget(read_cfg) -> float:
-  """Seconds per tick the backend may spend measuring, from ``control_loop.read``.
-
-  ``budget_s`` accepts a number of seconds, or ``"max"`` / ``null`` for
-  unlimited (``math.inf``) — the default, which reads everything every tick.
-
-  A typo is rejected here rather than coerced, because every plausible
-  coercion is worse than a crash: ``float("fast")`` failing silently to 0.0
-  would starve every read for the whole run, and the loop would keep going on
-  ever-staler cached positions.
-  """
+  """Seconds per tick the backend may spend measuring, from ``control_loop.read``."""
   raw = None if read_cfg is None else read_cfg.get("budget_s", "max")
   if raw is None or (isinstance(raw, str) and raw.strip().lower() == "max"):
     return math.inf
