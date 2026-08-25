@@ -25,7 +25,6 @@ from omegaconf import OmegaConf
 from chuck_dreamer.config import load_config
 from chuck_dreamer.runtime.backend import FakeBackend
 from chuck_dreamer.runtime.harness import PolicyLoop, Runtime
-from chuck_dreamer.runtime.kernel import Mode
 from chuck_dreamer.runtime.modalities import ModalityError
 from chuck_dreamer.runtime.setpoint_channel import SetpointChannel
 
@@ -37,7 +36,7 @@ def _cfg(tmp_path: Path, **runtime_overrides):
   cfg = load_config()
   base = {
     "duration_s": 0.3,
-    "control_rate_hz": 200,
+    "control_loop": {"rate_hz": 200},
     "policy_rate_hz": 50,
     "sensors": [],   # explicit: no camera in these FakeBackend tests
     "logging": {"rerun": {"rrd_dir": str(tmp_path / "rrd")}},
@@ -155,7 +154,7 @@ def test_out_of_envelope_sweep_is_clamped_every_tick(tmp_path, fake_rerun):
     safety={"max_velocity": 1000.0},  # let it race to the boundary fast
   )
   rt = Runtime(cfg)
-  lower, upper = rt._limits.lower, rt._limits.upper
+  lower, upper = rt.backend.joint_limits()
   rt.run()
 
   rows = control_tick_rows(fake_rerun.rec)
@@ -166,9 +165,22 @@ def test_out_of_envelope_sweep_is_clamped_every_tick(tmp_path, fake_rerun):
   assert any(r["clamped"] == 1 for r in rows)
 
 
-def test_fake_backend_runtime_starts_in_normal(tmp_path):
-  rt = Runtime(_cfg(tmp_path))
-  assert rt.kernel.mode is Mode.NORMAL
+def test_fake_backend_runtime_brakes_to_a_stop_on_shutdown(tmp_path, fake_rerun):
+  """The trajectory-era replacement for "starts in NORMAL, ends held".
+
+  There is no mode to assert on any more, so assert the observable behaviour
+  the old HOLD existed to produce: the run ends with the arm stationary at the
+  last commanded position, not mid-segment.
+  """
+  rt = Runtime(_cfg(tmp_path, duration_s=0.3))
+  rt.run()
+
+  rows = control_tick_rows(fake_rerun.rec)
+  assert rows
+  # The last few ticks are the coast-down + hold: they must have converged.
+  tail = [np.asarray(r["q_cmd"], dtype=float) for r in rows[-3:]]
+  for q in tail:
+    np.testing.assert_allclose(q, tail[-1], atol=1e-6)
 
 
 # -- M3: modality composition + fail-fast ------------------------------------
@@ -221,10 +233,9 @@ def test_sim_camera_does_not_stall_control_loop(tmp_path):
   assert {"image", "ee"} <= rt.available
   rt.run()
 
-  assert rt.kernel.mode is not Mode.ESTOP
   # The starvation this guards against showed up as a collapsed tick rate, so
   # assert the rate directly rather than merely that some ticks happened.
-  expected = base["duration_s"] * float(cfg.runtime.control_rate_hz)
+  expected = base["duration_s"] * float(cfg.runtime.control_loop.rate_hz)
   assert rt.control_loop.ticks > 0.5 * expected
   assert rt.channel.seq > 0                  # observations flowed despite rendering
   assert rt.sink.path is not None and rt.sink.path.stat().st_size > 0

@@ -90,6 +90,7 @@ class TelemetryRecord:
     ref=None,
     dt: float = 0.0,
     limits=None,
+    mode=None,
     read_budget_s: float = 0.0,
   ) -> None:
     """Fold one tick's outcome into the record.
@@ -112,6 +113,9 @@ class TelemetryRecord:
       self.target = np.asarray(ref[0], dtype=np.float64)
     if action is not None:
       self.seq = int(getattr(action, "seq", -1))
+    if mode is not None:
+      # Accept the enum or its value, so callers need not unwrap it.
+      self.mode = str(getattr(mode, "value", mode))
     if limits:
       self.clamped          = bool(limits.get("clamped", False))
       self.velocity_limited = bool(limits.get("stale", False))

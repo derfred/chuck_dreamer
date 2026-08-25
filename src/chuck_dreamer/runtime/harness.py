@@ -1,8 +1,8 @@
 """The runtime orchestrator: build from config, run both loops, shut down.
 
 :class:`Runtime` is the M0 "process that boots from a YAML session config":
-it constructs the backend, kernel, channel, policy, telemetry sink, and the
-two loops from ``cfg.runtime``, then owns their lifecycle. A SIGINT handler
+it constructs the backend, channel, policy, telemetry sink, and the two loops
+from ``cfg.runtime``, then owns their lifecycle. A SIGINT handler
 (installed on the main thread) sets a shutdown event; the main thread waits
 on it (or drives the viewer when enabled) and runs the ordered shutdown.
 
@@ -13,9 +13,9 @@ config). :class:`PolicyLoop` calls ``policy.act(obs)`` each step with a
 :class:`RuntimeObservation` carrying elapsed time and the measured joints.
 
 Shutdown ordering (project plan): stop the policy loop first (no new
-setpoints), bring the kernel to HOLD, let the control loop flush a few hold
-ticks, then stop the control loop, backend, and finally the CSV
-sink (which drains + flushes — the "flushed logs" guarantee).
+setpoints), ask the control loop to brake and wait for the arm to stop, then
+stop the control loop, backend, and finally the sink (which drains + flushes —
+the "flushed logs" guarantee).
 """
 
 from __future__ import annotations
@@ -388,7 +388,7 @@ class Runtime:
     deadline = None if self._duration_s is None else time.monotonic() + self._duration_s
     with backend.open_viewer() as viewer:
       while viewer.is_running() and not self._shutdown.is_set():
-        backend.draw_overlays(viewer, q_cmd=self.kernel.q_cmd)
+        backend.draw_overlays(viewer)
         with backend.physics_lock():
           viewer.sync()
         if deadline is not None and time.monotonic() >= deadline:
@@ -396,15 +396,14 @@ class Runtime:
         self._shutdown.wait(1.0 / 60.0)
 
   def shutdown(self) -> None:
-    # Ordered (project plan): stop new setpoints, hold, flush, tear down.
+    # stop new setpoints, brake, flush, tear down.
     self.policy_loop.stop()
     for s in self.sensors:   # no more observations after the policy loop stops
       s.stop()
     if self.leader is not None:
       self.leader.stop()
-    self.kernel.request_hold()
-    self.channel.publish(self.kernel.q_cmd)  # settle in place
-    time.sleep(3.0 / max(1.0, float(self.cfg.runtime.control_rate_hz)))  # a few hold ticks
+    if not self.control_loop.request_brake():
+      logger.warning("control loop did not brake in time; tearing down anyway")
     self.control_loop.stop()
     self.backend.stop()
     self.sink.stop()  # drains both queues + flushes the .rrd (one per episode)

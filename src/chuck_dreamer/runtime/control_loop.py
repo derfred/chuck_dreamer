@@ -9,6 +9,7 @@ import numpy as np
 from omegaconf import DictConfig
 
 from .backend import RobotBackend
+from .control_mode import ControlMode, ControlModeMachine
 from .control_state import ControlState, FaultFlags, parse_read_budget
 from .control_trajectory import ControlTrajectory, ControlTrajectoryConfig
 from .setpoint_channel import SetpointChannel
@@ -51,6 +52,7 @@ class ControlLoop:
     self._stop                            = threading.Event()
     self._thread: threading.Thread | None = None
     self._ticks                           = 0
+    self._modes                           = ControlModeMachine()
     self._budget_s                        = parse_read_budget(read_cfg)
     # A stale measurement must not silently become an open-loop command; the
     # limiter refuses to extend motion past this bound (see _safety_limit).
@@ -60,6 +62,50 @@ class ControlLoop:
   @property
   def ticks(self) -> int:
     return self._ticks
+
+  # -- mode ------------------------------------------------------------------
+  #
+  # The machine lives in control_mode.py; the loop owns an instance and wraps
+  # it so callers drive the *loop*, not its internals. Requests are latched:
+  # nothing resumes until release() is called.
+
+  @property
+  def mode(self) -> ControlMode:
+    """What the loop is currently doing."""
+    return self._modes.mode
+
+  def request_estop(self, timeout: float | None = 1.0) -> bool:
+    """Latch an immediate freeze; block until the loop has stopped commanding.
+
+    Returns whether the loop acknowledged within ``timeout``. A ``False`` return
+    means the control thread is not running or is wedged
+    """
+    self._modes.request_estop()
+    return self._await(ControlMode.ESTOP, timeout)
+
+  def request_brake(self, timeout: float | None = 1.0) -> bool:
+    """Ask for a graceful coast-to-stop; block until the arm has stopped.
+
+    Resolves when the loop reaches BRAKED — the coast-down segment has actually
+    played out. Returns whether that happened within ``timeout``.
+    """
+    self._modes.request_brake()
+    return self._await(ControlMode.BRAKED, timeout)
+
+  def release(self, timeout: float | None = 1.0) -> bool:
+    """Clear a latched stop and resume normal operation.
+
+    Raises :class:`~chuck_dreamer.runtime.control_mode.InvalidTransition` if the
+    arm is still coasting to a stop
+    """
+    self._modes.release()
+    return self._await(ControlMode.NORMAL, timeout)
+
+  def _await(self, mode: ControlMode, timeout: float | None) -> bool:
+    """Wait for the loop to reach ``mode``, unless no thread is running."""
+    if self._thread is None or not self._thread.is_alive():
+      return self._modes.mode is mode
+    return self._modes.wait_for(mode, timeout)
 
   @property
   def budget_s(self) -> float:
@@ -117,6 +163,20 @@ class ControlLoop:
 
     return q_cmd, limits
 
+  def _check_stops(self, mode: ControlMode, trajectory: ControlTrajectory, state: ControlState) -> ControlTrajectory:
+    """check whether the loop should stop the arm, and if so return a new trajectory to do it."""
+    if mode is ControlMode.ESTOP:
+      return trajectory.stop(state.q)
+
+    if mode is ControlMode.BRAKED:
+      return trajectory                      # already stopped; just keep holding
+
+    if mode is ControlMode.BRAKING:
+      braking = trajectory.brake()
+      if braking.stationary:
+        self._modes.braked()
+      return braking
+
   def _run(self) -> None:
     state          = self._backend.read_state(math.inf)
     last_time      = state.now
@@ -127,9 +187,8 @@ class ControlLoop:
     while not self._stop.is_set():
       metrics = TelemetryRecord(t_wall=time.time(), t_mono=time.monotonic(), tick=self._ticks)
 
-      budget_s = self._budget_s
       with metrics.timed("read_state"):
-        state = self._backend.read_state(budget_s)
+        state = self._backend.read_state(self._budget_s)
 
       dt        = state.now - last_time
       last_time = state.now
@@ -137,19 +196,22 @@ class ControlLoop:
       if state.faults:
         self._telemetry.emit_event("read_degraded", tick=self._ticks, detail=f"{FaultFlags(state.faults)!s} q_age={state.q_age:.4f}")
 
-      action = self._channel.get()
-      if action is not None and action != current_action:
-        trajectory     = trajectory.update(action, state)
-        current_action = action
+      mode = self._modes.mode
+      if stop_trajectory := self._check_stops(mode, trajectory, state):
+        trajectory = stop_trajectory
+      else:
+        action = self._channel.get()
+        if action is not None and action != current_action:
+          trajectory     = trajectory.update(action, state)
+          current_action = action
 
-      q_cmd  = None
-      ref    = None
-      limits = None
+      metrics.update(state=state, dt=dt, mode=mode)
       if trajectory is not None:
         ref = trajectory.tick(dt)
         if ref is None:
-          # The segment ran out with no new action behind it: coast to a stop
-          # and hold there rather than freezing mid-motion.
+          # The segment ran out with nothing behind it: coast to a stop and hold
+          # there rather than freezing mid-motion. Under BRAKING this is the
+          # coast-down finishing, and _plan promotes to BRAKED next tick.
           trajectory = trajectory.brake()
           ref        = trajectory.tick(dt)
 
@@ -158,8 +220,8 @@ class ControlLoop:
           if q_cmd is not None:
             with metrics.timed("write_positions"):
               self._backend.write_positions(q_cmd)
+          metrics.update(ref=ref, q_cmd=q_cmd, limits=limits)
 
-      metrics.update(state=state, action=current_action, q_cmd=q_cmd, ref=ref, dt=dt, limits=limits, read_budget_s=budget_s)
       self._telemetry.emit(metrics)
       self._ticks += 1
 

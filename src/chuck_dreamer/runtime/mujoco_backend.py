@@ -191,13 +191,23 @@ class MujocoBackend(InstantReadMixin):
   def draw_overlays(self, viewer, *, q_cmd: np.ndarray | None = None) -> None:
     """Draw the current EE (red) and the commanded-pose EE (green) markers.
 
+    ``q_cmd`` defaults to the setpoint the backend was last given: it is already
+    held in ``data.ctrl``, so a caller has nothing to track on its behalf.
+
     TODO(M5): also draw the task-space safety box once the EE workspace
     envelope is defined.
     """
+    if q_cmd is None:
+      q_cmd = self.last_command()
     viewer.user_scn.ngeom = 0
     self._add_sphere(viewer, self.ee_pos(), rgba=(1.0, 0.0, 0.0, 0.9))
     if q_cmd is not None:
       self._add_sphere(viewer, self._fk_ee(q_cmd), rgba=(0.0, 1.0, 0.0, 0.9))
+
+  def last_command(self) -> np.ndarray:
+    """The joint setpoint most recently written, straight off ``data.ctrl``."""
+    with self._lock:
+      return cast(np.ndarray, self.data.ctrl[self._ctrl_idx].copy())
 
   def _add_sphere(self, viewer, pos, *, rgba, radius: float = 0.02) -> None:
     if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:

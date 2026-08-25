@@ -18,6 +18,7 @@ from omegaconf import OmegaConf
 
 from chuck_dreamer.runtime.backend import FakeBackend
 from chuck_dreamer.runtime.control_loop import ControlLoop
+from chuck_dreamer.runtime.control_mode import ControlMode
 from chuck_dreamer.runtime.control_state import ControlState, FaultFlags
 from chuck_dreamer.runtime.setpoint_channel import SetpointChannel
 from chuck_dreamer.runtime.telemetry import TelemetryQueue
@@ -167,3 +168,91 @@ def test_loop_rejects_a_nonpositive_rate():
   b = FakeBackend(_N)
   with pytest.raises(ValueError, match="rate_hz"):
     _loop(b, _cfg(rate_hz=0.0))
+
+
+# -- mode wrappers -----------------------------------------------------------
+#
+# The transition table itself is covered in test_runtime_control_mode.py; these
+# pin what the *loop* adds -- that a request is actually carried out by the
+# running control thread, and resolves only once it has been.
+
+
+def _running(backend=None):
+  loop = _loop(backend or FakeBackend(_N, lower=_LOWER, upper=_UPPER))
+  loop.start()
+  deadline = time.monotonic() + 1.0
+  while loop.ticks == 0 and time.monotonic() < deadline:
+    time.sleep(0.005)
+  return loop
+
+
+def test_loop_starts_in_normal():
+  loop = _running()
+  try:
+    assert loop.mode is ControlMode.NORMAL
+  finally:
+    loop.stop()
+
+
+def test_brake_resolves_once_the_arm_has_stopped():
+  """request_brake returns when the coast-down has actually played out.
+
+  A stationary arm's brake() degrades to an infinite hold whose segment never
+  expires, so completion cannot be "the segment ran out" -- this pins that the
+  no-op case still reports BRAKED rather than hanging until the timeout.
+  """
+  loop = _running()
+  try:
+    assert loop.request_brake(timeout=2.0)
+    assert loop.mode is ControlMode.BRAKED
+  finally:
+    loop.stop()
+
+
+def test_braked_arm_ignores_new_setpoints():
+  """A policy loop still draining must not re-accelerate an arm being stopped."""
+  backend = FakeBackend(_N, lower=_LOWER, upper=_UPPER)
+  channel = SetpointChannel()
+  loop = ControlLoop(_cfg(), backend, channel, TelemetryQueue())
+  loop.start()
+  try:
+    deadline = time.monotonic() + 1.0
+    while loop.ticks == 0 and time.monotonic() < deadline:
+      time.sleep(0.005)
+    assert loop.request_brake(timeout=2.0)
+    held = backend.last_positions()
+
+    channel.publish(np.full(_N, 1.5))    # a late setpoint, far from the hold
+    time.sleep(0.05)
+    np.testing.assert_allclose(backend.last_positions(), held, atol=1e-9)
+  finally:
+    loop.stop()
+
+
+def test_estop_then_release_returns_to_normal():
+  loop = _running()
+  try:
+    assert loop.request_estop(timeout=2.0)
+    assert loop.mode is ControlMode.ESTOP
+    assert loop.release(timeout=2.0)
+    assert loop.mode is ControlMode.NORMAL
+  finally:
+    loop.stop()
+
+
+def test_release_after_brake_resumes_normal():
+  loop = _running()
+  try:
+    assert loop.request_brake(timeout=2.0)
+    assert loop.release(timeout=2.0)
+    assert loop.mode is ControlMode.NORMAL
+  finally:
+    loop.stop()
+
+
+def test_mode_request_on_a_stopped_loop_does_not_block():
+  """No thread to carry the request out -- report the truth, don't hang."""
+  loop = _loop(FakeBackend(_N, lower=_LOWER, upper=_UPPER))
+  t0 = time.monotonic()
+  assert not loop.request_brake(timeout=5.0)   # never started
+  assert time.monotonic() - t0 < 1.0

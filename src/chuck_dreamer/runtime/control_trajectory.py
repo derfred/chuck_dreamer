@@ -17,6 +17,7 @@ class ControlTrajectoryConfig:
   P_alpha: float = 0.1          # EMA weight for the smoothed period estimate
  
   t_brake: float = 0.080        # coast-to-stop duration [s]
+  v_eps_frac: float = 1e-6      # "At rest" threshold, as a fraction of v_max
   dt_max: float = 0.050         # clamp on one control tick, guards GC pauses
   horizon_iters: int = 4        # limit-driven horizon refinement passes
   horizon_samples: int = 17     # sample count for the limit check
@@ -36,6 +37,11 @@ class ControlTrajectoryConfig:
   def __post_init__(self):
     self.v_max = np.asarray(self.v_max, dtype=float)
     self.a_max = np.asarray(self.a_max, dtype=float)
+
+  @property
+  def v_eps(self) -> np.ndarray:
+    """Per-joint velocity below which the reference counts as at rest."""
+    return self.v_eps_frac * self.v_max
 
 
 def _coeffs(q0, v0, a0, q1, v1, T):
@@ -140,6 +146,18 @@ class ControlTrajectory:
   @property
   def expired(self):
     return self.s >= 1.0
+
+  @property
+  def stationary(self):
+    """Whether this trajectory has stopped commanding motion.
+
+    Asks the reference itself, at its current position on the segment: a hold
+    is stationary from the start, a coast-down only once it has played out.
+
+    Distinct from `expired`, which is about the segment running out of time: a
+    hold has T = inf and never expires, yet is stationary throughout.
+    """
+    return bool(np.all(np.abs(self.eval()[1]) <= self.cfg.v_eps))
  
   def tick(self, dt):
     """Advance and return the next joint command, or None if the segment ran out."""
@@ -197,14 +215,21 @@ class ControlTrajectory:
 
     return ControlTrajectory(c=c, T=T, q_end=q_t, qd_end=v1, q_prev_end=self.q_end, t_target=action.obs.t, P_est=P_est, cfg=cfg)
 
+  def stop(self, q=None) -> "ControlTrajectory":
+    """Hold at ``q``, defaulting to the reference *right now*."""
+    if q is None:
+      q, _, _ = self.eval()
+    return ControlTrajectory.hold(q, self.cfg)
+
   def brake(self):
-    """Smooth coast-to-stop from the end of this segment."""
-    if not np.any(self.qd_end):
-      return ControlTrajectory.hold(self.q_end, self.cfg)
- 
+    """Smooth coast-to-stop from where the reference is *now*."""
+    q0, v0, a0 = self.eval()
+    if not np.any(v0):
+      return self.stop(q0)
+
     tb = self.cfg.t_brake
-    q1 = self.q_end + self.qd_end * tb / 2.0     # clamp to joint limits here
+    q1 = q0 + v0 * tb / 2.0                      # clamp to joint limits here
     z  = np.zeros_like(q1)
-    c  = _coeffs(self.q_end, self.qd_end, z, q1, z, tb)
- 
+    c  = _coeffs(q0, v0, a0, q1, z, tb)
+
     return ControlTrajectory(c=c, T=tb, q_end=q1, qd_end=z, q_prev_end=None, t_target=None, P_est=self.P_est, cfg=self.cfg)
