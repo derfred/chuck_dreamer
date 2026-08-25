@@ -27,6 +27,7 @@ from typing import Any, cast
 
 import numpy as np
 
+from ..policy import Action
 from .modalities import RuntimeObservation
 
 
@@ -67,8 +68,8 @@ class GoToPose:
     frac = 1.0 if t >= self._duration else max(0.0, t) / self._duration
     return self._q0 + frac * (self._q_goal - self._q0)
 
-  def act(self, obs: RuntimeObservation) -> np.ndarray:
-    return self.target_at(obs.t)
+  def act(self, obs: RuntimeObservation) -> Action:
+    return Action(obs, q=self.target_at(obs.t))
 
 
 class ManualPolicy:
@@ -91,17 +92,18 @@ class ManualPolicy:
     # Anchor the no-op fallback at the start pose (shared with the scripted sources).
     self._last_cmd = _start_qpos(scene_or_q0).copy()
 
-  def act(self, obs: RuntimeObservation) -> np.ndarray:
+  def act(self, obs: RuntimeObservation) -> Action:
     leader = obs.leader_qpos
     if leader is not None:
       cmd            = np.asarray(leader, dtype=np.float64)
       self._last_cmd = cmd
-      return cmd
+      return Action(obs, q=cmd)
     # No-op: hold the last commanded pose; fall back to the measured joints
-    # before the first leader reading. The kernel slews to it with zero delta.
+    # before the first leader reading. The control loop plans a zero-delta
+    # segment, so the arm simply holds.
     if self._last_cmd is not None:
-      return self._last_cmd
-    return np.asarray(obs.q_meas, dtype=np.float64)
+      return Action(obs, q=self._last_cmd)
+    return Action(obs, q=np.asarray(obs.q_meas, dtype=np.float64))
 
 
 class SineSweep:
@@ -142,5 +144,5 @@ class SineSweep:
     return cast(np.ndarray, self._center + self._amp * np.sin(
       2.0 * np.pi * self._freq * t + self._phase))
 
-  def act(self, obs: RuntimeObservation) -> np.ndarray:
-    return self.target_at(obs.t)
+  def act(self, obs: RuntimeObservation) -> Action:
+    return Action(obs, q=self.target_at(obs.t))

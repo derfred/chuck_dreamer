@@ -10,6 +10,8 @@ import numpy as np
 import pytest
 from omegaconf import OmegaConf
 
+from chuck_dreamer.common.tracks import Frame
+from chuck_dreamer.policy import Action
 from chuck_dreamer.sim import (
     CameraConfig,
     EpisodeCollector,
@@ -722,10 +724,11 @@ class TestScriptedPolicy:
     p = _fresh_policy()
     obs = _policy_obs(np.array([0.0, 0.0, 0.1]))
     action = p.act(obs)
-    assert isinstance(action, np.ndarray)
-    assert action.shape == (7,)
-    # Quat half should match the captured hold_quat (set on first act).
-    np.testing.assert_array_equal(action[3:], _IDENTITY_QUAT)
+    assert isinstance(action, Action)
+    assert action.pose.shape == (7,)          # the sim's act_mode="ee" layout
+    assert action.frame is Frame.ARM
+    # Quat should match the captured hold_quat (set on first act).
+    np.testing.assert_array_equal(action.quat, _IDENTITY_QUAT)
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +795,13 @@ class _FakeEnv:
   def policy_obs(self, full_obs):
     return full_obs  # tests don't care about projection
 
+  def as_array(self, action):
+    """Flatten an Action into act_mode layout, like the real env."""
+    if not isinstance(action, Action):
+      return np.asarray(action, dtype=np.float64)
+    return (np.asarray(action.q, dtype=np.float64) if self.act_mode == "joint"
+            else np.asarray(action.pose, dtype=np.float64))
+
   def reset(self, *, scene=None, seed=None):
     self._step = 0
     return _fake_obs(0, self.n_joints), {}
@@ -807,7 +817,7 @@ class _FakeEnv:
 
 
 class _FakePolicy:
-  """Stub policy: returns zeros of the right shape and never reads obs."""
+  """Stub policy: returns a zero Action of the right shape, never reads obs."""
 
   def __init__(self, action_dim: int = 7):
     self.action_dim = action_dim
@@ -819,7 +829,9 @@ class _FakePolicy:
 
   def act(self, obs):
     self.act_calls += 1
-    return np.zeros(self.action_dim, dtype=np.float32)
+    if self.action_dim == 7:
+      return Action(obs, arm_pos=np.zeros(3), quat=np.zeros(4))
+    return Action(obs, q=np.zeros(self.action_dim))
 
 
 def _make_collector(env, policy):

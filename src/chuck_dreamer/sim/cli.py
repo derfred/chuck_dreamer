@@ -182,7 +182,7 @@ def show_scene_cmd(ctx, seed, step_delay, policy_type, checkpoint_path,
   import mujoco.viewer
   import numpy as np
 
-  from chuck_dreamer.policy import GatedPolicy
+  from chuck_dreamer.policy import Action, GatedPolicy
   from chuck_dreamer.sim import PushingEnv, ScriptedPolicy
 
   cfg = load_config(ctx.obj["config_path"], overrides=overrides, aliases={"seed": seed})
@@ -261,7 +261,14 @@ def show_scene_cmd(ctx, seed, step_delay, policy_type, checkpoint_path,
         np.asarray(o["ee_quat"], dtype=np.float32),
       ])
 
-    policy = GatedPolicy(inner, hold_action=_hold_action, project=env.policy_obs)
+    def _to_action(o, raw):
+      """Name a flat planner vector in the space this env commands."""
+      raw = np.asarray(raw, dtype=np.float64)
+      if env.act_mode == "joint":
+        return Action(o, q=raw)
+      return Action(o, arm_pos=raw[:3], quat=raw[3:])
+
+    policy = GatedPolicy(inner, hold_action=_hold_action, project=env.policy_obs, to_action=_to_action)
     policy.reset(scene)
 
     if policy_type == "cem":

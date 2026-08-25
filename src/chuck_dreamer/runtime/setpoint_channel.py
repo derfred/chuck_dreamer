@@ -2,36 +2,32 @@ from __future__ import annotations
 
 import threading
 
-import numpy as np
+from ..policy import Action
 
 
 class SetpointChannel:
-  """Thread-safe single-slot latest-wins channel of joint setpoints."""
+  """Thread-safe single-slot latest-wins channel of policy actions."""
 
   def __init__(self) -> None:
-    self._lock = threading.Lock()
-    self._value: np.ndarray | None = None
-    self._seq = 0
+    self._lock                  = threading.Lock()
+    self._action: Action | None = None
 
-  def publish(self, q: np.ndarray) -> None:
-    """Overwrite the slot with a copy of ``q`` and bump the sequence."""
-    q = np.asarray(q, dtype=np.float64).copy()
+  def publish(self, action: Action) -> None:
+    """Overwrite the slot with ``action``."""
+    if not isinstance(action, Action):
+      raise TypeError(
+        f"SetpointChannel carries Action objects; got {type(action).__name__}. "
+        "A policy returns Action(obs, q=...) rather than a bare joint vector.")
     with self._lock:
-      self._value = q
-      self._seq += 1
+      self._action = action
 
-  def get(self) -> np.ndarray | None:
-    """Most recent setpoint (a copy), or ``None`` before any publish."""
+  def get(self) -> Action | None:
+    """Most recent action, or ``None`` before any publish."""
     with self._lock:
-      return None if self._value is None else self._value.copy()
-
-  def get_with_seq(self) -> tuple[np.ndarray | None, int]:
-    """:meth:`get` plus the current sequence number, read atomically."""
-    with self._lock:
-      value = None if self._value is None else self._value.copy()
-      return value, self._seq
+      return self._action
 
   @property
   def seq(self) -> int:
+    """``seq`` of the pending action; ``0`` before any publish."""
     with self._lock:
-      return self._seq
+      return 0 if self._action is None else self._action.seq

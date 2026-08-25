@@ -14,7 +14,8 @@ import numpy as np
 import pytest
 
 from chuck_dreamer.runtime.modalities import RuntimeObservation
-from chuck_dreamer.runtime.sources import GoToPose, SineSweep
+from chuck_dreamer.policy import Action
+from chuck_dreamer.runtime.sources import GoToPose, ManualPolicy, SineSweep
 
 
 def _obs(t: float, n: int = 1) -> RuntimeObservation:
@@ -47,7 +48,7 @@ def test_go_to_pose_respects_nonzero_start():
 def test_go_to_pose_act_reads_obs_time():
   p = GoToPose(q_goal=np.array([2.0]), duration_s=2.0)
   p.reset(np.array([0.0]))
-  np.testing.assert_allclose(p.act(_obs(1.0)), [1.0])
+  np.testing.assert_allclose(p.act(_obs(1.0)).q, [1.0])
 
 
 def test_go_to_pose_rejects_bad_duration():
@@ -88,7 +89,7 @@ def test_sine_sweep_explicit_center_overrides_reset():
 def test_sine_sweep_act_reads_obs_time():
   p = SineSweep(amplitude=2.0, freq_hz=0.5, phase=0.0)
   p.reset(np.array([0.0]))
-  np.testing.assert_allclose(p.act(_obs(0.5)), [2.0], atol=1e-12)
+  np.testing.assert_allclose(p.act(_obs(0.5)).q, [2.0], atol=1e-12)
 
 
 def test_sine_sweep_target_before_reset_raises():
@@ -111,3 +112,22 @@ def test_reset_rejects_scene_without_qpos():
   p = SineSweep(amplitude=1.0, freq_hz=0.5)
   with pytest.raises(ValueError, match="joint_initial_qpos"):
     p.reset(scene)
+
+# -- the Action contract -----------------------------------------------------
+
+
+@pytest.mark.parametrize("make", [
+  lambda: GoToPose(q_goal=np.zeros(6), duration_s=1.0),
+  lambda: SineSweep(amplitude=0.1, freq_hz=1.0),
+  lambda: ManualPolicy(),
+])
+def test_scripted_policies_return_an_action(make):
+  """The runtime channel takes Actions only -- there is no array fallback."""
+  policy = make()
+  policy.reset(np.zeros(6))
+  obs = _obs(0.5, n=6)
+
+  action = policy.act(obs)
+  assert isinstance(action, Action)
+  assert action.obs is obs          # tied to the observation it answers
+  assert action.is_joint_space

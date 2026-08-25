@@ -18,6 +18,7 @@ from omegaconf import OmegaConf
 
 from chuck_dreamer.runtime.backend import FakeBackend
 from chuck_dreamer.runtime.control_loop import ControlLoop
+from chuck_dreamer.policy import Action
 from chuck_dreamer.runtime.control_mode import ControlMode
 from chuck_dreamer.runtime.control_state import ControlState, FaultFlags
 from chuck_dreamer.runtime.setpoint_channel import SetpointChannel
@@ -50,6 +51,11 @@ class _RecordingBackend(FakeBackend):
   def read_state(self, budget_s=math.inf):
     self.budgets.append(budget_s)
     return super().read_state(budget_s)
+
+
+class _Obs:
+  def __init__(self, t=0.0):
+    self.t = t
 
 
 def _loop(backend, cfg=None):
@@ -222,7 +228,8 @@ def test_braked_arm_ignores_new_setpoints():
     assert loop.request_brake(timeout=2.0)
     held = backend.last_positions()
 
-    channel.publish(np.full(_N, 1.5))    # a late setpoint, far from the hold
+    # a late setpoint, far from the hold
+    channel.publish(Action(_Obs(t=1.0), q=np.full(_N, 1.5)))
     time.sleep(0.05)
     np.testing.assert_allclose(backend.last_positions(), held, atol=1e-9)
   finally:

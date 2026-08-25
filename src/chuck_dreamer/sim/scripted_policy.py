@@ -8,6 +8,7 @@ from typing import cast
 import mujoco  # type: ignore[import-untyped]
 import numpy as np
 
+from ..policy import Action
 from .scene_config import SceneConfig
 
 logger = logging.getLogger(__name__)
@@ -158,7 +159,7 @@ class ScriptedPolicy:
     self.start_xyz  = None
     self.hold_quat  = None
 
-  def act(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+  def act(self, obs: dict[str, np.ndarray]) -> Action:
     if self.hold_quat is None:
       self.hold_quat = np.asarray(obs["ee_quat"], dtype=np.float32).copy()
 
@@ -171,7 +172,8 @@ class ScriptedPolicy:
       self.start_xyz = None
       self.state     = next_state
 
-    return cast(np.ndarray, getattr(self, f"_act_{self.state}")(obs))
+    pose = np.asarray(getattr(self, f"_act_{self.state}")(obs), dtype=np.float64)
+    return Action(obs, arm_pos=pose[:3], quat=pose[3:])
 
   def insert_hints(self, viewer: mujoco.Viewer, rgba: np.ndarray = np.array([0.0, 1.0, 0.0, 0.8], dtype=np.float32)) -> None:
     """Insert custom geoms into the scene for visualization hints."""

@@ -345,6 +345,35 @@ class PushingEnv(gym.Env):
       dims[IMAGE] = (image_size, image_size, 3)
     return dims
 
+  def as_array(self, action) -> np.ndarray:
+    """Flatten ``action`` into this env's ``act_mode`` layout.
+
+    A raw array passes through. An :class:`~chuck_dreamer.policy.Action` is
+    read in the space it declares, and is rejected if that space cannot be
+    commanded in the current mode -- an EE-mode env cannot execute a
+    joint-space target without IK it does not do here, and vice versa.
+    """
+    from chuck_dreamer.policy import Action
+
+    if not isinstance(action, Action):
+      return np.asarray(action, dtype=np.float64)
+
+    if self.act_mode == "joint":
+      if not action.is_joint_space:
+        raise ValueError(
+          f"act_mode='joint' needs a joint-space Action; got a "
+          f"{action.frame.value}-frame target")
+      return np.asarray(action.q, dtype=np.float64)
+
+    pose = action.pose
+    if pose is None:
+      raise ValueError(
+        "act_mode='ee' needs a Cartesian Action with an orientation "
+        "(Action(obs, arm_pos=..., quat=...)); got "
+        + ("a joint-space target" if action.is_joint_space
+           else "a position with no quat"))
+    return np.asarray(pose, dtype=np.float64)
+
   @property
   def action_space(self) -> spaces.Box:  # type: ignore[override]
     low:  np.ndarray
@@ -433,14 +462,22 @@ class PushingEnv(gym.Env):
     self.step_count = 0
     return self._get_obs(), {}
 
-  def step(self, action: np.ndarray) -> tuple[Observation, float, bool, bool, dict[str, Any]]:
+  def step(self, action) -> tuple[Observation, float, bool, bool, dict[str, Any]]:
+    """Advance one control step.
+
+    ``action`` is either a raw array in ``act_mode`` layout (the Gymnasium
+    contract, which external callers and ``action_space.sample()`` rely on) or
+    an :class:`~chuck_dreamer.policy.Action`, which every policy in this
+    project returns. The latter is flattened here so the env has exactly one
+    place that knows how a target maps onto ``act_mode``.
+    """
     assert (
         self.model is not None
         and self.data is not None
         and self.scene is not None
     ), "Call reset() before step()."
 
-    self.controller.update_arm(self.data, np.asarray(action), self.act_mode)
+    self.controller.update_arm(self.data, self.as_array(action), self.act_mode)
 
     n_substeps = max(1, int(round(self.scene.control_dt / self.model.opt.timestep)))
     for _ in range(n_substeps):

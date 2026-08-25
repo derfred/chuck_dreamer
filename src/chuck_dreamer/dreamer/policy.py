@@ -7,6 +7,8 @@ holds the arm in place) or the current arm qpos in joint mode.
 
 import numpy as np
 
+from ..policy import Action
+
 
 class DreamerPolicy:
   def __init__(self, model, act_mode: str = "ee"):
@@ -16,10 +18,7 @@ class DreamerPolicy:
   def reset(self, scene):
     pass
 
-  def act(self, obs):
+  def act(self, obs) -> Action:
     if self.act_mode == "joint":
-      return np.asarray(obs["arm_qpos"], dtype=np.float32)
-    return np.concatenate([
-      np.asarray(obs["ee_pos"], dtype=np.float32),
-      np.asarray(obs["ee_quat"], dtype=np.float32),
-    ])
+      return Action(obs, q=np.asarray(obs["arm_qpos"], dtype=np.float64))
+    return Action(obs, arm_pos=np.asarray(obs["ee_pos"], dtype=np.float64), quat=np.asarray(obs["ee_quat"], dtype=np.float64))

@@ -162,13 +162,13 @@ class EpisodeCollector:
         # Policies receive the full obs dict. State-mode policies (scripted)
         # read the named keys; modal policies (Dreamer in §6+) project
         # internally via env.policy_obs or by knowing their obs_mode.
-        action = self.policy.act(obs)
+        action                                        = self.policy.act(obs)
         next_obs, reward, terminated, truncated, info = self.env.step(action)
 
         step_info: StepInfo = info["step_info"]
         steps.append({
           "image_obs":  obs["image"],
-          "action":     np.asarray(action, dtype=np.float32),
+          "action":     np.asarray(self.env.as_array(action), dtype=np.float32),
           "reward":     float(reward),
           "timestamp":  float(step_info.time),
           "joint_qpos": np.asarray(next_obs["arm_qpos"], dtype=np.float32),
