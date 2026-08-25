@@ -1,21 +1,22 @@
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
+
 
 @dataclass
 class ControlTrajectoryConfig:
   v_max: np.ndarray             # rad/s,   per joint
   a_max: np.ndarray             # rad/s^2, per joint
   P_nominal: float              # initial policy-period estimate [s]
- 
+
   beta: float = 0.5             # terminal-velocity damping; 0.0 disables entirely
   kappa_inv: float = 2.0        # nominal horizon T = kappa_inv * P
- 
+
   P_min: float = 0.020          # clamp on a single measured policy interval
   P_max: float = 0.300
   P_alpha: float = 0.1          # EMA weight for the smoothed period estimate
- 
+
   t_brake: float = 0.080        # coast-to-stop duration [s]
   v_eps_frac: float = 1e-6      # "At rest" threshold, as a fraction of v_max
   dt_max: float = 0.050         # clamp on one control tick, guards GC pauses
@@ -46,7 +47,7 @@ class ControlTrajectoryConfig:
 
 def _coeffs(q0, v0, a0, q1, v1, T):
   """Coefficients over normalised time s = t/T in [0, 1].
- 
+
   Boundary conditions: (q0, v0, a0) at s=0 and (q1, v1, 0) at s=1.
   Terminal acceleration is always zero -- there is no sensible estimator for
   it, and zero makes the hand-off into a braking segment continuous.
@@ -55,7 +56,7 @@ def _coeffs(q0, v0, a0, q1, v1, T):
   w1 = v1 * T
   z0 = a0 * T * T
   d  = q1 - q0
- 
+
   c = np.empty(q0.shape + (6,), dtype=float)
   c[..., 0] = q0
   c[..., 1] = w0
@@ -79,25 +80,25 @@ def _basis(s):
 
 def _violation_scale(c, T, cfg):
   """How much T must grow to satisfy the velocity / acceleration limits.
- 
+
   Returns <= 1.0 if the segment is already within limits.  Velocity scales as
   1/T and acceleration as 1/T^2, hence the sqrt on the acceleration term.  The
   coefficients themselves depend on T, so this is iterated by the caller.
   """
   ss = np.linspace(0.0, 1.0, cfg.horizon_samples)
   _, sv, sa = _basis(ss)
- 
+
   qd  = (c @ sv) / T
   qdd = (c @ sa) / (T * T)
- 
+
   rv = np.max(np.abs(qd)  / cfg.v_max[:, None])
   ra = np.max(np.abs(qdd) / cfg.a_max[:, None])
   return float(max(rv, math.sqrt(max(ra, 0.0))))
- 
- 
+
+
 def _select_horizon(q0, v0, a0, q1, v1, cfg, P_est):
   """Nominal horizon, extended (never shortened) to respect joint limits.
- 
+
   The floor at kappa_inv * P_est is the important half: without it a small
   commanded motion produces a very short segment that finishes long before the
   next action arrives, and the arm stutters to a halt on every cycle.
@@ -114,7 +115,7 @@ def _select_horizon(q0, v0, a0, q1, v1, cfg, P_est):
 
 class ControlTrajectory:
   """One planned quintic segment.
- 
+
   Immutable except for `s`, which `tick` advances. `update` and `brake` return new instances.
   """
 
@@ -158,7 +159,7 @@ class ControlTrajectory:
     hold has T = inf and never expires, yet is stationary throughout.
     """
     return bool(np.all(np.abs(self.eval()[1]) <= self.cfg.v_eps))
- 
+
   def tick(self, dt):
     """Advance and return the next joint command, or None if the segment ran out."""
     dt      = min(float(dt), self.cfg.dt_max)

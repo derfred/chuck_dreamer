@@ -351,11 +351,6 @@ def test_feetech_write_rejects_wrong_shape(stub_follower):
   b.stop()
 
 
-
-
-
-
-
 def test_feetech_last_positions_never_touches_the_bus(stub_follower):
   # The observer (policy-loop) path: start() primes the cache, and any number
   # of last_positions() calls return it without a single bus transaction.
@@ -721,6 +716,7 @@ def test_read_state_degrades_to_position_only_without_block_support(stub_followe
   b = _backend()
   b.start()
   f = stub_follower[0]
+
   def _missing(*a, **kw):              # the surface the block path relies on
     raise AttributeError("no _sync_read on this bus")
   f.bus._sync_read = _missing

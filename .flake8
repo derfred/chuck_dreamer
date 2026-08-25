@@ -9,6 +9,9 @@ exclude = .git,__pycache__,.venv,src/fessel
 extend-ignore = E203, W503, E111, E114, E116, E117, E121, E124, E127, E128, E131, E221, E251, E261, E272
 per-file-ignores =
     src/chuck_dreamer/sim/scene_builder.py:E501
+    # The quintic coefficient block pads positive terms so the signs line up
+    # into a readable matrix; that alignment is the point.
+    src/chuck_dreamer/runtime/control_trajectory.py:E222
     # Reuses the ``fake_repo`` pytest fixture imported from test_lerobot_import;
     # using it as a test-arg reads as an F811 redefinition (expected pattern).
     tests/lerobot/test_lerobot_parallel.py:F811

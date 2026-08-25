@@ -62,13 +62,18 @@ class Action:
   ``seq`` is assigned at construction and never repeats, so the control loop
   compares actions by identity instead of by value: two actions with the same
   joint vector are still distinct commands. Actions are immutable.
+
+  ``obs`` is whatever the producing loop hands its policy -- a
+  ``RuntimeObservation`` in the runtime, a component dict in sim -- and is kept
+  only so a consumer can relate the action back to what it answers (the
+  trajectory planner reads ``obs.t``). It is deliberately not narrowed here.
   """
 
   __slots__ = ("obs", "seq", "_q", "_pos", "_quat", "_frame")
 
   def __init__(
     self,
-    obs: "RuntimeObservation",
+    obs: Any,
     *,
     q=None,
     arm_pos=None,

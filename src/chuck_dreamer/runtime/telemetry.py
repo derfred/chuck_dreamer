@@ -160,6 +160,7 @@ def record_to_row(rec: TelemetryRecord, n_joints: int) -> dict[str, Any]:
       row[f"{name}_{i}"] = "" if arr is None else float(arr[i])
   return row
 
+
 class TelemetryQueue:
   """Bounded queue with a non-blocking emit that drops + counts on overflow."""
 

@@ -37,7 +37,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fessel_schemas import UploadProgress, UploadStateValue
-from fessel_shared import METADATA_FILENAME, Storage, topics
+from fessel_shared import Storage, topics
 
 from .ingest import IngestClient, PermanentError, RetryableError
 
