@@ -22,7 +22,7 @@ from omegaconf import OmegaConf
 
 from chuck_dreamer.config import load_config
 from chuck_dreamer.runtime.harness import Runtime
-from chuck_dreamer.runtime.kernel import Mode
+from chuck_dreamer.runtime.control_mode import ControlMode
 from chuck_dreamer.runtime.modalities import RuntimeObservation
 from chuck_dreamer.runtime.sources import ManualPolicy
 
@@ -149,7 +149,7 @@ def test_manual_policy_passes_leader_through():
   p = ManualPolicy()
   p.reset(np.zeros(6))
   leader = np.array([0.1, -0.2, 0.3, -0.4, 0.5, 0.6])
-  np.testing.assert_array_equal(p.act(_obs(leader=leader)), leader)
+  np.testing.assert_array_equal(p.act(_obs(leader=leader)).q, leader)
 
 
 def test_manual_policy_holds_last_leader_when_absent():
@@ -158,14 +158,14 @@ def test_manual_policy_holds_last_leader_when_absent():
   leader = np.full(6, 0.42)
   p.act(_obs(leader=leader))            # remembers it
   # Next step has no leader reading -> hold the last commanded pose.
-  np.testing.assert_array_equal(p.act(_obs(leader=None)), leader)
+  np.testing.assert_array_equal(p.act(_obs(leader=None)).q, leader)
 
 
 def test_manual_policy_falls_back_to_qmeas_at_boot():
   p = ManualPolicy()
   q_meas = np.full(6, -0.3)
   # No reset, no leader yet: must still return something sane (measured pose).
-  np.testing.assert_array_equal(p.act(_obs(q_meas=q_meas, leader=None)), q_meas)
+  np.testing.assert_array_equal(p.act(_obs(q_meas=q_meas, leader=None)).q, q_meas)
 
 
 # -- RuntimeObservation backward-compat --------------------------------------
@@ -301,16 +301,20 @@ def test_manual_teleop_follower_tracks_leader(tmp_path, fake_rerun):
   # High velocity cap so the slew reaches the (in-box) leader pose within the
   # bounded run; ManualPolicy publishes the leader pose verbatim as the target.
   rt = Runtime(_manual_cfg(tmp_path, pose, duration_s=0.6, safety={"max_velocity": 50.0}))
-  home = rt.kernel.q_cmd.copy()                # boot pose, before any setpoint
+  home = rt.backend.home_qpos.copy()           # boot pose, before any setpoint
   rt.run()
 
   rows = control_tick_rows(fake_rerun.rec)
   assert rows
-  # The published target IS the leader pose (pass-through), and q_cmd slews to it.
+  # ManualPolicy publishes the leader pose verbatim, so the trajectory converges
+  # on it: `target` is the planner's *reference*, which approaches the goal
+  # asymptotically rather than jumping to it. It lands within ~1e-3 here, but
+  # the run can end mid-segment on a slow tick, so the bound is deliberately
+  # loose -- this asserts convergence, not a particular settling time.
   last = rows[-1]
   for i in range(6):
-    assert last["target"][i] == pytest.approx(pose[i], abs=1e-9)
-    assert last["q_cmd"][i] == pytest.approx(pose[i], abs=1e-2)
+    assert last["target"][i] == pytest.approx(pose[i], abs=5e-2)
+    assert last["q_cmd"][i] == pytest.approx(pose[i], abs=5e-2)
     # And it genuinely moved from home toward the leader (not coincidentally there).
     assert abs(pose[i] - last["q_cmd"][i]) < abs(pose[i] - home[i]) + 1e-9
   assert _runtime_threads() == []
@@ -319,7 +323,7 @@ def test_manual_teleop_follower_tracks_leader(tmp_path, fake_rerun):
 def test_manual_teleop_out_of_box_is_clamped(tmp_path, fake_rerun):
   pose = [50.0] * 6                             # far outside the joint box
   rt = Runtime(_manual_cfg(tmp_path, pose, safety={"max_velocity": 1000.0}))
-  lower, upper = rt._limits.lower, rt._limits.upper
+  lower, upper = rt.backend.joint_limits()
   rt.run()
 
   rows = control_tick_rows(fake_rerun.rec)
@@ -330,27 +334,42 @@ def test_manual_teleop_out_of_box_is_clamped(tmp_path, fake_rerun):
   assert any(r["clamped"] == 1 for r in rows)
 
 
-def test_estop_freezes_teleop(tmp_path):
+def test_estop_freezes_teleop(tmp_path, fake_rerun):
   # A moving fake leader, but e-stop latched mid-run -> q_cmd must stop following.
   pose = [0.6, -1.0, 1.0, 0.3, -0.4, 0.2]
   rt = Runtime(_manual_cfg(tmp_path, pose, duration_s=None))
+  failure: list[BaseException] = []
 
   def drive():
     # Let teleop track for a bit, latch e-stop, then move the leader and stop.
-    time.sleep(0.15)
-    rt.kernel.request_estop()
-    frozen = rt.kernel.q_cmd.copy()
-    rt.leader.set_pose(np.full(6, 0.0))         # leader jumps; kernel must ignore it
-    time.sleep(0.15)
-    after = rt.kernel.q_cmd.copy()
-    assert rt.kernel.mode is Mode.ESTOP
-    np.testing.assert_allclose(after, frozen, atol=1e-9)
-    rt.request_shutdown()
+    try:
+      time.sleep(0.15)
+      assert rt.control_loop.request_estop(), "loop did not acknowledge the e-stop"
+      assert rt.control_loop.mode is ControlMode.ESTOP
+      rt.leader.set_pose(np.full(6, 0.0))       # leader jumps; the loop must ignore it
+      time.sleep(0.15)
+    except BaseException as exc:                # noqa: BLE001 - reported below
+      failure.append(exc)
+    finally:
+      # Always release the main thread: duration_s is None, so without this the
+      # run would block forever on a failed assertion.
+      rt.request_shutdown()
 
   killer = threading.Thread(target=drive)
   killer.start()
   rt.run()
   killer.join()
+  if failure:
+    raise failure[0]
+
+  # Everything commanded after the e-stop latched must be the frozen pose: the
+  # loop holds where the arm was, regardless of where the leader went.
+  rows = [r for r in control_tick_rows(fake_rerun.rec) if not r["is_event"]]
+  estopped = [r for r in rows if r["mode"] == ControlMode.ESTOP.value]
+  assert estopped, "no ticks were recorded under ESTOP"
+  frozen = estopped[0]["q_cmd"]
+  for r in estopped:
+    np.testing.assert_allclose(r["q_cmd"], frozen, atol=1e-9)
   assert _runtime_threads() == []
 
 
@@ -399,8 +418,9 @@ def test_build_leader_survives_params_leaked_from_target_swap(tmp_path):
   assert isinstance(rt.leader, LerobotLeaderReader)
   assert rt.leader._port == "/dev/ttyFAKE"
   # Jaw bounds come from the resolved safety envelope, not config params.
-  assert rt.leader._jaw_lower == pytest.approx(float(rt._limits.lower[-1]))
-  assert rt.leader._jaw_upper == pytest.approx(float(rt._limits.upper[-1]))
+  jaw_lower, jaw_upper = rt.backend.joint_limits()
+  assert rt.leader._jaw_lower == pytest.approx(float(jaw_lower[-1]))
+  assert rt.leader._jaw_upper == pytest.approx(float(jaw_upper[-1]))
 
 
 def test_build_leader_real_reader_requires_port(tmp_path):

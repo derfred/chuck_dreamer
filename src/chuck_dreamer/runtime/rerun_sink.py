@@ -169,7 +169,7 @@ class RerunSink:
       return
     self._rec.log("control/mode", rr.TextLog(rec.mode))
     self._rec.log("control/clamped", rr.Scalars(int(rec.clamped)))
-    self._rec.log("control/velocity_limited", rr.Scalars(int(rec.velocity_limited)))
+    self._rec.log("control/stale", rr.Scalars(int(rec.stale)))
     self._rec.log("control/dt", rr.Scalars(float(rec.dt)))
     self._rec.log("control/seq", rr.Scalars(int(rec.seq)))
     self._rec.log("control/backend_s", rr.Scalars(float(rec.backend_s)))

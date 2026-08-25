@@ -37,7 +37,7 @@ def test_telemetry_tick_row_logs_control_entities(fake_rerun):
   sink.start("ep")
   q.emit(TelemetryRecord(
     t_wall=0.0, t_mono=0.1, tick=3, mode="normal", clamped=True,
-    velocity_limited=False, dt=0.01,
+    stale=False, dt=0.01,
     q_meas=np.array([0.0, 0.1]), q_cmd=np.array([0.0, 0.2]),
     target=np.array([0.0, 0.3]), seq=5,
   ))

@@ -47,7 +47,7 @@ class TelemetryRecord:
   tick: int
   mode: str = ""
   clamped: bool = False
-  velocity_limited: bool = False
+  stale: bool = False
   dt: float = 0.0
   q_meas: np.ndarray | None = None
   q_cmd: np.ndarray | None = None
@@ -114,12 +114,12 @@ class TelemetryRecord:
       self.mode = str(getattr(mode, "value", mode))
     if limits:
       self.clamped          = bool(limits.get("clamped", False))
-      self.velocity_limited = bool(limits.get("stale", False))
+      self.stale = bool(limits.get("stale", False))
 
 
 _SCALAR_FIELDS = [
   "t_wall", "t_mono", "tick", "mode", "clamped",
-  "velocity_limited", "dt", "seq", "event", "detail", "backend_s",
+  "stale", "dt", "seq", "event", "detail", "backend_s",
   "q_age", "read_s", "faults", "read_budget_s",
 ]
 
@@ -140,7 +140,7 @@ def record_to_row(rec: TelemetryRecord, n_joints: int) -> dict[str, Any]:
     "tick": rec.tick,
     "mode": rec.mode,
     "clamped": int(rec.clamped),
-    "velocity_limited": int(rec.velocity_limited),
+    "stale": int(rec.stale),
     "dt": rec.dt,
     "seq": rec.seq,
     "event": rec.event,

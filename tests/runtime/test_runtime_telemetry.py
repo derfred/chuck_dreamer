@@ -18,7 +18,7 @@ from chuck_dreamer.runtime.telemetry import (
 def _tick_record(tick: int, n: int = 3) -> TelemetryRecord:
   return TelemetryRecord(
     t_wall=time.time(), t_mono=time.monotonic(), tick=tick, mode="normal",
-    clamped=False, velocity_limited=False, dt=0.02,
+    clamped=False, stale=False, dt=0.02,
     q_meas=np.full(n, 0.1 * tick), q_cmd=np.full(n, 0.1 * tick),
     target=np.full(n, 0.5), seq=tick,
   )
