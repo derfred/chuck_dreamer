@@ -122,3 +122,48 @@ def test_wait_for_wakes_on_the_transition():
   threading.Thread(target=finish, daemon=True).start()
   assert m.wait_for(ControlMode.BRAKED, timeout=1.0)
   assert m.mode is ControlMode.BRAKED
+
+
+# -- take(): mode plus the "just entered" edge -------------------------------
+
+
+def test_take_reports_the_edge_once_per_transition():
+  """The control loop plans on the edge and executes on every tick after it."""
+  m = ControlModeMachine()
+  # A fresh machine has not transitioned into anything yet.
+  assert m.take() == (ControlMode.NORMAL, False)
+
+  m.request_brake()
+  assert m.take() == (ControlMode.BRAKING, True)    # the edge, reported once
+  assert m.take() == (ControlMode.BRAKING, False)   # ...and consumed by the read
+  assert m.take() == (ControlMode.BRAKING, False)
+
+  m.braked()
+  assert m.take() == (ControlMode.BRAKED, True)
+  assert m.take() == (ControlMode.BRAKED, False)
+
+
+def test_take_does_not_flag_an_idempotent_request():
+  """A request that changes nothing is not an edge -- re-braking must not replan."""
+  m = ControlModeMachine()
+  m.request_brake()
+  assert m.take() == (ControlMode.BRAKING, True)
+  m.request_brake()                                  # already braking: a no-op
+  assert m.take() == (ControlMode.BRAKING, False)
+
+
+def test_take_edge_survives_until_read():
+  """Transitions between reads still surface: the flag latches, it does not decay."""
+  m = ControlModeMachine()
+  m.request_estop()
+  m.release()                                        # two transitions, no read
+  assert m.take() == (ControlMode.NORMAL, True)
+  assert m.take() == (ControlMode.NORMAL, False)
+
+
+def test_mode_property_does_not_consume_the_edge():
+  """Observers reading `.mode` must not steal the control thread's edge."""
+  m = ControlModeMachine()
+  m.request_brake()
+  assert m.mode is ControlMode.BRAKING              # an outside observer peeks
+  assert m.take() == (ControlMode.BRAKING, True)    # the loop still sees the edge

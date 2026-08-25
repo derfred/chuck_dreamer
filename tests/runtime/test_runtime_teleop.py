@@ -275,7 +275,7 @@ def _manual_cfg(tmp_path: Path, pose, **runtime_overrides):
   cfg = load_config()
   base = {
     "duration_s": 0.4,
-    "control_rate_hz": 200,
+    "control_loop": {"rate_hz": 200},
     "policy_rate_hz": 100,
     "sensors": [],   # FakeBackend has no MuJoCo scene for SimCameraSensor
     "logging": {"rerun": {"rrd_dir": str(tmp_path / "rrd")}},

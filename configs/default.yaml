@@ -213,7 +213,7 @@ runtime:
 
   # Authoritative joint-space safety envelope, enforced by the control loop.
   control_loop:
-    rate_hz: 50.0  # Hz; must match runtime.control_rate_hz
+    rate_hz: 50.0  # Hz, the control-thread tick rate
     # Per-joint position bounds (rad). null -> read from backend.joint_limits()
     # (MuJoCo model ranges). FakeBackend has no model, so set these when using it.
     joint_limits:

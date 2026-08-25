@@ -215,6 +215,39 @@ def test_brake_resolves_once_the_arm_has_stopped():
     loop.stop()
 
 
+def test_brake_of_a_moving_arm_completes_within_the_coast_down():
+  """A *moving* arm must reach BRAKED in about `coast_to_stop_time`.
+
+  Regression: BRAKING used to replan `trajectory.brake()` on every tick, so the
+  coast-down segment restarted from s=0 against an ever-smaller velocity. The
+  reference decayed geometrically instead of running to rest, and BRAKED landed
+  an order of magnitude late (~1.2 s for a 0.1 s coast) -- which made the
+  harness's 1 s shutdown brake time out on every real run. The idle-arm test
+  above cannot catch this: a stationary arm is already at rest on entry.
+  """
+  backend = FakeBackend(_N, lower=_LOWER, upper=_UPPER)
+  channel = SetpointChannel()
+  loop = ControlLoop(_cfg(), backend, channel, TelemetryQueue())
+  loop.start()
+  try:
+    deadline = time.monotonic() + 1.0
+    while loop.ticks == 0 and time.monotonic() < deadline:
+      time.sleep(0.005)
+    # Get the arm genuinely moving before asking it to stop.
+    channel.publish(Action(_Obs(t=0.0), q=np.full(_N, 1.5)))
+    time.sleep(0.1)
+
+    t0 = time.monotonic()
+    assert loop.request_brake(timeout=2.0)
+    elapsed = time.monotonic() - t0
+    assert loop.mode is ControlMode.BRAKED
+    # coast_to_stop_time is 0.1 s; allow generous slack for scheduling jitter
+    # while still failing the ~1.2 s geometric-decay behaviour.
+    assert elapsed < 0.6, f"coast-down took {elapsed:.3f}s"
+  finally:
+    loop.stop()
+
+
 def test_braked_arm_ignores_new_setpoints():
   """A policy loop still draining must not re-accelerate an arm being stopped."""
   backend = FakeBackend(_N, lower=_LOWER, upper=_UPPER)

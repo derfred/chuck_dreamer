@@ -22,9 +22,17 @@ has not noticed the request cannot drive the arm out of a stopped state.
     BRAKING  --request_estop--> ESTOP           (escalation always wins)
     BRAKED   --request_estop--> ESTOP
 
-``wait_for`` lets a caller block until the loop reaches a mode — it is how the
-loop's owner observes that a requested stop actually landed, rather than
-sleeping for a guessed duration.
+Two observation paths come out of it, for the two kinds of caller:
+
+* ``wait_for`` blocks until the loop reaches a mode — it is how the loop's
+  owner observes that a requested stop actually landed, rather than sleeping
+  for a guessed duration.
+* ``take`` returns the mode *and* whether it just changed, for the control
+  thread, which plans on the edge (entering BRAKING plans one coast-to-stop)
+  but executes on every tick after it.
+
+``mode`` is the passive peek: unlike ``take`` it leaves the edge unconsumed,
+so an observer can never swallow the transition the control thread plans on.
 """
 
 from __future__ import annotations
@@ -65,6 +73,8 @@ class ControlModeMachine:
 
   def __init__(self, mode: ControlMode = ControlMode.NORMAL) -> None:
     self._mode = mode
+    # Whether _mode changed since the last take(); see that method.
+    self._entered = False
     self._cond = threading.Condition(threading.Lock())
 
   @property
@@ -81,7 +91,8 @@ class ControlModeMachine:
         return self._mode
       if target not in _TRANSITIONS[self._mode]:
         raise InvalidTransition(f"cannot go from {self._mode.value} to {target.value}")
-      self._mode = target
+      self._mode    = target
+      self._entered = True
       self._cond.notify_all()
       return self._mode
 
@@ -127,6 +138,12 @@ class ControlModeMachine:
     return self._to(ControlMode.NORMAL)
 
   # -- observation ----------------------------------------------------------
+
+  def take(self) -> tuple[ControlMode, bool]:
+    """The current mode, plus whether this is the first read since it changed."""
+    with self._cond:
+      entered, self._entered = self._entered, False
+      return self._mode, entered
 
   def wait_for(self, mode: ControlMode, timeout: float | None = None) -> bool:
     """Block until the machine is in ``mode``; return whether it got there.

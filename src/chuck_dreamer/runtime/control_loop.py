@@ -163,8 +163,12 @@ class ControlLoop:
 
     return q_cmd, limits
 
-  def _check_stops(self, mode: ControlMode, trajectory: ControlTrajectory, state: ControlState) -> ControlTrajectory | None:
-    """The trajectory that stops the arm, or ``None`` if it should keep running."""
+  def _check_stops(self, mode: ControlMode, entered: bool, trajectory: ControlTrajectory,
+                   state: ControlState) -> ControlTrajectory | None:
+    """The trajectory that stops the arm, or ``None`` if it should keep running.
+
+    ``entered`` marks the first tick in ``mode`` (see ``ControlModeMachine.take``)
+    """
     if mode is ControlMode.ESTOP:
       return trajectory.stop(state.q)
 
@@ -172,10 +176,11 @@ class ControlLoop:
       return trajectory                      # already stopped; just keep holding
 
     if mode is ControlMode.BRAKING:
-      braking: ControlTrajectory = trajectory.brake()
-      if braking.stationary:
+      if entered:
+        return trajectory.brake()
+      if trajectory.stationary:
         self._modes.braked()
-      return braking
+      return trajectory
 
     return None
 
@@ -198,8 +203,8 @@ class ControlLoop:
       if state.faults:
         self._telemetry.emit_event("read_degraded", tick=self._ticks, detail=f"{FaultFlags(state.faults)!s} q_age={state.q_age:.4f}")
 
-      mode = self._modes.mode
-      if stop_trajectory := self._check_stops(mode, trajectory, state):
+      mode, entered = self._modes.take()
+      if stop_trajectory := self._check_stops(mode, entered, trajectory, state):
         trajectory = stop_trajectory
       else:
         action = self._channel.get()
