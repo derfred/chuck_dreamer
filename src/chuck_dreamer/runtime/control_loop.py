@@ -14,6 +14,7 @@ from .control_state import ControlState, FaultFlags, parse_read_budget
 from .control_trajectory import ControlTrajectory, ControlTrajectoryConfig
 from .setpoint_channel import SetpointChannel
 from .telemetry import TelemetryQueue, TelemetryRecord
+from .workspace import WorkspaceLimit, WorkspaceLimiter, build_workspace_limiter
 
 
 def build_control_config(rt: DictConfig, *, n_joints: int) -> DictConfig:
@@ -37,7 +38,8 @@ class ControlLoop:
     cfg: DictConfig,
     backend: RobotBackend,
     channel: SetpointChannel,
-    telemetry: TelemetryQueue
+    telemetry: TelemetryQueue,
+    workspace: WorkspaceLimiter | None = None,
   ) -> None:
     if float(cfg.control_loop.rate_hz) <= 0:
       raise ValueError("rate_hz must be positive")
@@ -58,6 +60,25 @@ class ControlLoop:
     # limiter refuses to extend motion past this bound (see _safety_limit).
     self._stale_hold_s                    = float(read_cfg.get("stale_hold_s", 0.100))
     self._traj_cfg                        = ControlTrajectoryConfig.build(cfg, n_joints=backend.n_joints)
+    # Cartesian envelope (None unless configured); see workspace.py. Built here
+    # rather than injected so a misconfigured box fails at construction, before
+    # any thread has started commanding an arm.
+    self._workspace: WorkspaceLimiter | None = workspace if workspace is not None else build_workspace_limiter(cfg)
+    if self._workspace is not None:
+      self._check_home_inside_workspace(backend)
+
+  def _check_home_inside_workspace(self, backend: RobotBackend) -> None:
+    """Refuse a box that does not contain the arm's rest pose."""
+    assert self._workspace is not None
+    ee  = self._workspace.ee_pos(backend.home_qpos)
+    box = self._workspace.box
+    if not box.contains(ee):
+      raise ValueError(
+        f"the workspace box does not contain the arm's home pose: home tip is at "
+        f"{np.round(ee, 4).tolist()} m (arm frame), box is "
+        f"{np.round(box.lower, 4).tolist()} .. {np.round(box.upper, 4).tolist()}. "
+        f"The runtime would e-stop on its first tick with no way to release; widen "
+        f"the box or move the arm's home pose inside it.")
 
   @property
   def ticks(self) -> int:
@@ -161,7 +182,35 @@ class ControlLoop:
       q_cmd                 = np.clip(q_cmd, state.q - reach, state.q + reach)
       limits["stale_reach"] = float(np.max(reach)) if reach.size else 0.0
 
+    if self._workspace is not None:
+      # The Cartesian envelope goes last: it reasons about where the *tip* ends
+      # up, so it must see the command that the joint-space limits above have
+      # already settled on, not the raw reference.
+      q_cmd, ws               = self._workspace.limit(state.q, q_cmd)
+      limits["ws_scale"]      = ws.scale
+      limits["ws_breach_m"]   = ws.breach_m
+      if ws.limited:
+        limits["clamped"] = True
+      if ws.breached:
+        # Measured tip outside the box. No command can undo that, so latch the
+        # e-stop (only an explicit release() clears it) and hold where we are.
+        self._breach(ws)
+
     return q_cmd, limits
+
+  def _breach(self, ws: "WorkspaceLimit") -> None:
+    """Latch an e-stop for a workspace breach, announcing it once.
+
+    Called from the control thread each tick the tip is measured outside the
+    box, so the event is emitted only on the transition: a latched e-stop that
+    re-announced itself at the control rate would bury the rest of the log.
+    """
+    already = self._modes.mode is ControlMode.ESTOP
+    self._modes.request_estop()
+    if not already:
+      self._telemetry.emit_event(
+        "workspace_breach", tick=self._ticks,
+        detail=f"ee={np.round(ws.ee_pos, 4).tolist()} outside_by={ws.breach_m:.4f}m; release() required")
 
   def _check_stops(self, mode: ControlMode, entered: bool, trajectory: ControlTrajectory, state: ControlState) -> ControlTrajectory | None:
     """The trajectory that stops the arm, or ``None`` if it should keep running.

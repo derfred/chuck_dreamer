@@ -63,6 +63,10 @@ class TelemetryRecord:
   faults: int = 0
   read_budget_s: float = 0.0
 
+  # workspace limiter
+  ws_scale: float = 1.0
+  ws_breach_m: float = 0.0
+
   _timed: dict[str, float] = field(default_factory=dict)
 
   @contextmanager
@@ -113,14 +117,16 @@ class TelemetryRecord:
       # Accept the enum or its value, so callers need not unwrap it.
       self.mode = str(getattr(mode, "value", mode))
     if limits:
-      self.clamped          = bool(limits.get("clamped", False))
-      self.stale = bool(limits.get("stale", False))
+      self.clamped     = bool(limits.get("clamped", False))
+      self.stale       = bool(limits.get("stale", False))
+      self.ws_scale    = float(limits.get("ws_scale", 1.0))
+      self.ws_breach_m = float(limits.get("ws_breach_m", 0.0))
 
 
 _SCALAR_FIELDS = [
   "t_wall", "t_mono", "tick", "mode", "clamped",
   "stale", "dt", "seq", "event", "detail", "backend_s",
-  "q_age", "read_s", "faults", "read_budget_s",
+  "q_age", "read_s", "faults", "read_budget_s", "ws_scale", "ws_breach_m",
 ]
 
 
@@ -150,6 +156,8 @@ def record_to_row(rec: TelemetryRecord, n_joints: int) -> dict[str, Any]:
     "read_s": rec.read_s,
     "faults": int(rec.faults),
     "read_budget_s": rec.read_budget_s,
+    "ws_scale": rec.ws_scale,
+    "ws_breach_m": rec.ws_breach_m,
   }
   for name, arr in (("q_meas", rec.q_meas), ("q_cmd", rec.q_cmd), ("target", rec.target)):
     for i in range(n_joints):

@@ -179,6 +179,12 @@ env:
 runtime:
   policy_rate_hz: 10
 
+  # Forward kinematics: the URDF the runtime resolves tip poses with, and
+  # optional per-arm encoder-zero corrections.
+  fk:
+    model: null      # null -> assets/urdf/SO101/so101_new_calib.urdf
+    dq_dir: null     # directory holding fk_dq.json; null -> no correction
+
   # Run length used by demos and tests. null -> run until SIGINT (Ctrl-C)
   duration_s: null
 
@@ -225,6 +231,18 @@ runtime:
       max_velocity: 1.5
       max_acceleration: 3.0
       coast_to_stop_time: 0.1  # seconds to coast to a stop when the source goes idle
+
+      # Cartesian workspace envelope: the box the end-effector tip may not
+      # leave, as the two opposite corners spanning it -- [[x, y, z], [x, y, z]]
+      # in metres, arm frame.
+      workspace: null
+      # Example: a 30 x 40 x 28 cm box in front of the arm base.
+      #   workspace: [[0.15, -0.20, 0.02], [0.45, 0.20, 0.30]]
+      #
+      # Slowdown ramp width (m). Within this distance of a wall the outward
+      # part of the commanded step is damped linearly, hitting zero at the
+      # wall. Wider = gentler approach; must be positive.
+      workspace_margin_m: 0.05
 
     # Measurement budget: seconds per tick the backend may spend reading, or
     # "max" for unlimited. The backend spends it in priority order -- joint
@@ -313,7 +331,6 @@ object_localization:
   # Episode indices (shared across calibration datasets).
   episodes:
     empty:        0   # mat + arm, no checkerboard, no object
-    checkerboard: 1   # checkerboard waved through the scene
     object_left:  2
     object_mid:   3
     object_right: 4

@@ -92,6 +92,19 @@ class FK:
     pin.updateFramePlacement(self.model, self.data, self.ee_frame_id)
     return np.asarray(self.data.oMf[self.ee_frame_id].translation.copy())
 
+  def jacobian(self, q, dq=None) -> np.ndarray:
+    """``(3, 5)`` translational Jacobian of the EE frame, world-aligned.
+
+    Row ``i``, column ``j`` is d(tip position along world axis i)/d(q_j) for
+    the canonical joints, in the same order as :attr:`CANONICAL_JOINT_NAMES`.
+    ``LOCAL_WORLD_ALIGNED`` gives the derivative in *base* axes (the frame the
+    workspace box is expressed in) rather than the tip's own rotating axes.
+    """
+    J = pin.computeFrameJacobian(
+      self.model, self.data, self._configuration(q, dq), self.ee_frame_id,
+      pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
+    return np.asarray(J[:3, self.qpos_idx])
+
   def fk_chain(self, q, dq=None) -> np.ndarray:
     """World positions of each joint frame along the arm, plus the EE."""
     pin.forwardKinematics(self.model, self.data, self._configuration(q, dq))
