@@ -142,3 +142,27 @@ Description: Fessel robot-arm monitoring (Pi side)
  by Tailscale identity (Slice 5.5). Configuration lives in /etc/fessel and is
  preserved across upgrades.
 
+Package: fessel-monitor
+Architecture: all
+Version: 0.5.0~pre7
+Priority: optional
+Section: misc
+Maintainer: Fessel <noreply@example.com>
+Depends: python3 (>= 3.11), python3-pydantic, python3-paho-mqtt, python3-yaml, python3-fastapi, python3-uvicorn, python3-uvloop, python3-httptools, python3-websockets, python3-watchfiles, python3-httpx, python3-gi, python3-numpy, python3-opencv, gir1.2-gst-plugins-bad-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-alsa, gstreamer1.0-tools, gstreamer1.0-plugins-rs-fessel, mosquitto, v4l-utils
+Filename: pool/prerelease/f/fessel-monitor/fessel-monitor_0.5.0~pre7_all.deb
+Size: 87760
+MD5sum: b13d38f839cd7ed544c7c981724609ce
+SHA1: 836e469ba6f6a049a85304f4688337e754cb13a5
+SHA256: 896a0b479e6cd9f88e2240747738a31f7eafe0e80203ea120dbc568f55a1fdb1
+SHA512: 2cae42aad930625ccdd8a62bf60b8b88dd04dbdc03975607178a6090a8ff97420022af01cc41c6e54b41546aacad0ce7e4b43e36ab546d1e1f24dc7ffa9bfff2
+Description: Fessel robot-arm monitoring (Pi side)
+ supervisor (safety/control plane + MQTT relay), video (GStreamer pipeline +
+ live state machine + ring buffer + explicit recordings), and uploader (PUTs
+ flagged recordings to webui-backend's recording-ingest endpoint over the
+ tailnet), shipped as system-integrated Python modules under /opt/fessel/lib
+ relying on Debian python3-* packages (no venv), with launcher wrappers in
+ /usr/bin and their systemd units. The uploader is an HTTPS client only
+ (python3-httpx, in Depends) and holds no cluster-store credentials — auth is
+ by Tailscale identity (Slice 5.5). Configuration lives in /etc/fessel and is
+ preserved across upgrades.
+
