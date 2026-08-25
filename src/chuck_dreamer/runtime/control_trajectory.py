@@ -223,7 +223,7 @@ class ControlTrajectory:
       q, _, _ = self.eval()
     return ControlTrajectory.hold(q, self.cfg)
 
-  def brake(self):
+  def brake(self) -> "ControlTrajectory":
     """Smooth coast-to-stop from where the reference is *now*."""
     q0, v0, a0 = self.eval()
     if not np.any(v0):

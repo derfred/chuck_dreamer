@@ -163,8 +163,7 @@ class ControlLoop:
 
     return q_cmd, limits
 
-  def _check_stops(self, mode: ControlMode, entered: bool, trajectory: ControlTrajectory,
-                   state: ControlState) -> ControlTrajectory | None:
+  def _check_stops(self, mode: ControlMode, entered: bool, trajectory: ControlTrajectory, state: ControlState) -> ControlTrajectory | None:
     """The trajectory that stops the arm, or ``None`` if it should keep running.
 
     ``entered`` marks the first tick in ``mode`` (see ``ControlModeMachine.take``)
