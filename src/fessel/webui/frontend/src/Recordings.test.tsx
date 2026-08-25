@@ -112,14 +112,13 @@ function enabledFlagButton(): HTMLButtonElement {
 }
 
 describe("flag-for-upload gating (F4.4)", () => {
-  it("enables Flag for an unflagged 'none' recording and disables it once uploaded", async () => {
+  it("renders Flag only for the recording that can be flagged", async () => {
     await renderReady();
     const buttons = screen
       .getAllByRole("button")
       .filter((b) => b.textContent === "Flag for upload") as HTMLButtonElement[];
-    // One enabled (r-new, none) and one disabled (r-uploaded, uploaded).
-    expect(buttons.some((b) => !b.disabled)).toBe(true);
-    expect(buttons.some((b) => b.disabled)).toBe(true);
+    expect(buttons.length).toBe(1);
+    expect(buttons[0].disabled).toBe(false);
   });
 
   it("optimistically flags then reverts on error", async () => {
@@ -168,37 +167,37 @@ function rec(over: Record<string, unknown>) {
   };
 }
 
-function playButton(): HTMLButtonElement {
-  return screen.getAllByRole("button").filter((b) => b.textContent === "Play")[0] as HTMLButtonElement;
+// queryAllByRole (not getAllByRole) — a row whose actions are all ineligible
+// renders NO buttons, and the getAll* variant throws on an empty match.
+function playButton(): HTMLButtonElement | undefined {
+  return screen.queryAllByRole("button").find((b) => b.textContent === "Play") as
+    | HTMLButtonElement
+    | undefined;
 }
 
 describe("play gating", () => {
   it("keeps Play ENABLED for a queued/uploading recording still on the Pi", async () => {
-    // Playability follows availability: the backend proxies from the Pi while
-    // available_local holds, so an in-flight upload does not block playback.
     for (const state of ["queued", "uploading"]) {
       const { unmount } = render(<Recordings />);
       unmount();
       await renderReady(
         installFetch({ list: [rec({ upload_state: state, flagged_for_upload: true, available_local: true })] }),
       );
-      expect(playButton().disabled).toBe(false);
+      const b = playButton();
+      expect(b).toBeTruthy();
+      expect(b!.disabled).toBe(false);
       screen.getByText(state); // sanity: the row really is in that state
       document.body.innerHTML = "";
     }
   });
 
-  it("DISABLES Play for a partially-uploaded recording gone from the Pi", async () => {
-    // available_local=false + uploading = segments still arriving in the store;
-    // nothing can serve a complete playlist yet.
+  it("HIDES Play for a partially-uploaded recording gone from the Pi", async () => {
     await renderReady(
       installFetch({
         list: [rec({ upload_state: "uploading", flagged_for_upload: true, available_local: false, available_remote: true })],
       }),
     );
-    const b = playButton();
-    expect(b.disabled).toBe(true);
-    expect(b.title).toMatch(/Upload still in progress/);
+    expect(playButton()).toBeUndefined();
   });
 
   it("enables Play for a fully uploaded remote-only recording", async () => {
@@ -207,35 +206,36 @@ describe("play gating", () => {
         list: [rec({ upload_state: "uploaded", flagged_for_upload: true, available_local: false, available_remote: true })],
       }),
     );
-    expect(playButton().disabled).toBe(false);
+    const b = playButton();
+    expect(b).toBeTruthy();
+    expect(b!.disabled).toBe(false);
   });
 });
 
-describe("flag gating tooltips", () => {
-  it("names the actual reason instead of a catch-all", async () => {
-    const cases: Array<[string, RegExp]> = [
-      ["uploaded", /Already uploaded/],
-      ["queued", /waiting for the uploader/],
-      ["uploading", /Upload in progress/],
-    ];
-    for (const [state, re] of cases) {
+describe("flag gating", () => {
+  it("renders no Flag button once a recording is flagged or uploaded", async () => {
+    for (const state of ["uploaded", "queued", "uploading"]) {
       await renderReady(
         installFetch({ list: [rec({ upload_state: state, flagged_for_upload: true })] }),
       );
-      const b = screen
-        .getAllByRole("button")
-        .find((x) => x.textContent === "Flag for upload") as HTMLButtonElement;
-      expect(b.disabled).toBe(true);
-      expect(b.title).toMatch(re);
+      const b = screen.queryAllByRole("button").find((x) => x.textContent === "Flag for upload");
+      expect(b).toBeUndefined();
       document.body.innerHTML = "";
     }
+  });
+
+  it("still renders Re-flag for a failed upload", async () => {
+    await renderReady(
+      installFetch({ list: [rec({ upload_state: "failed", flagged_for_upload: true })] }),
+    );
+    expect(screen.getAllByRole("button").some((b) => b.textContent === "Re-flag")).toBe(true);
   });
 });
 
 // --- delete (cluster copy) ----------------------------------------------------
 
 function deleteButton(): HTMLButtonElement | undefined {
-  return screen.getAllByRole("button").find((b) => b.textContent === "Delete") as
+  return screen.queryAllByRole("button").find((b) => b.textContent === "Delete") as
     | HTMLButtonElement
     | undefined;
 }

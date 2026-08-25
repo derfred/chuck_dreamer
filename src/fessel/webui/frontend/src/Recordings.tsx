@@ -229,22 +229,6 @@ function canFlag(rec: RecordingItem): boolean {
   return rec.upload_state === "none" || rec.upload_state === "failed";
 }
 
-// Why Flag is disabled. `upload_state` already distinguishes the cases, so the
-// tooltip names the actual one rather than the old catch-all "already flagged /
-// uploaded" (which read as wrong for a queued upload that had not happened yet).
-function flagDisabledReason(rec: RecordingItem): string {
-  switch (rec.upload_state) {
-    case "uploaded":
-      return "Already uploaded";
-    case "queued":
-      return "Already flagged — waiting for the uploader";
-    case "uploading":
-      return "Upload in progress";
-    default:
-      return "Already flagged for upload";
-  }
-}
-
 // Playability is an AVAILABILITY question, not an upload-state one. The backend
 // serves playback from the store when the recording is there (available_remote)
 // and otherwise proxies it from the Pi (available_local) — so a recording that
@@ -256,15 +240,6 @@ function flagDisabledReason(rec: RecordingItem): string {
 function canPlay(rec: RecordingItem): boolean {
   if (rec.available_local) return true;
   return rec.available_remote && rec.upload_state === "uploaded";
-}
-
-// Why Play is disabled — shown as the button's tooltip so a greyed control is
-// never unexplained.
-function playDisabledReason(rec: RecordingItem): string {
-  if (rec.available_remote && rec.upload_state === "uploading") {
-    return "Upload still in progress — not all segments have arrived yet";
-  }
-  return "Recording files are not available";
 }
 
 // Delete removes the CLUSTER-STORE copy, so it is offered only when there IS
@@ -293,8 +268,14 @@ function Row({
   deleting: boolean;
   flagError?: string;
 }) {
-  const flaggable = canFlag(rec) && !flagging;
+  // Eligibility (is this action available at all?) is kept separate from
+  // in-flight (a request is running). Ineligible actions are NOT rendered — the
+  // toolbar shows only what the operator can actually do. An in-flight action
+  // stays rendered but disabled, so a button never disappears out from under
+  // the click that started it.
   const playable = canPlay(rec);
+  const flaggable = canFlag(rec);
+  const deletable = canDelete(rec);
   return (
     <tr style={{ borderBottom: "1px solid #f0f0f0" }}>
       <Td>
@@ -306,18 +287,17 @@ function Row({
       <Td>{rec.operator ?? "—"}</Td>
       <Td>{rec.upload_state}</Td>
       <td style={{ padding: "4px 0" }}>
-        <button
-          onClick={onPlay}
-          disabled={!playable}
-          title={playable ? "" : playDisabledReason(rec)}
-          style={{ marginRight: 8 }}
-        >
-          Play
-        </button>
-        <button onClick={onFlag} disabled={!flaggable} title={flaggable ? "" : flagDisabledReason(rec)}>
-          {flagging ? "…" : rec.upload_state === "failed" ? "Re-flag" : "Flag for upload"}
-        </button>
-        {canDelete(rec) && (
+        {playable && (
+          <button onClick={onPlay} style={{ marginRight: 8 }}>
+            Play
+          </button>
+        )}
+        {(flaggable || flagging) && (
+          <button onClick={onFlag} disabled={flagging}>
+            {flagging ? "…" : rec.upload_state === "failed" ? "Re-flag" : "Flag for upload"}
+          </button>
+        )}
+        {(deletable || deleting) && (
           <button
             onClick={onDelete}
             disabled={deleting}
