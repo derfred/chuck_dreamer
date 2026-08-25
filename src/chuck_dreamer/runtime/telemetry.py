@@ -26,7 +26,7 @@ import queue
 import threading
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -63,11 +63,7 @@ class TelemetryRecord:
   faults: int = 0
   read_budget_s: float = 0.0
 
-  _timed: dict[str, float] = None
-
-  def __post_init__(self):
-    if self._timed is None:
-      self._timed = {}
+  _timed: dict[str, float] = field(default_factory=dict)
 
   @contextmanager
   def timed(self, name: str) -> Iterator[None]:

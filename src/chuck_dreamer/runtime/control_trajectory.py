@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -29,7 +30,7 @@ class ControlTrajectoryConfig:
     v_max = np.broadcast_to(np.asarray(cfg.control_loop.safety.max_velocity, dtype=float), (n_joints,))
     a_max = np.broadcast_to(np.asarray(cfg.control_loop.safety.max_acceleration, dtype=float), (n_joints,))
 
-    params = {}
+    params: dict[str, Any] = {}
     if hasattr(cfg.control_loop.safety, "coast_to_stop_time"):
       params["t_brake"] = float(cfg.control_loop.safety.coast_to_stop_time)
 

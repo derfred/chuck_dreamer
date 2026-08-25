@@ -163,8 +163,8 @@ class ControlLoop:
 
     return q_cmd, limits
 
-  def _check_stops(self, mode: ControlMode, trajectory: ControlTrajectory, state: ControlState) -> ControlTrajectory:
-    """check whether the loop should stop the arm, and if so return a new trajectory to do it."""
+  def _check_stops(self, mode: ControlMode, trajectory: ControlTrajectory, state: ControlState) -> ControlTrajectory | None:
+    """The trajectory that stops the arm, or ``None`` if it should keep running."""
     if mode is ControlMode.ESTOP:
       return trajectory.stop(state.q)
 
@@ -172,10 +172,12 @@ class ControlLoop:
       return trajectory                      # already stopped; just keep holding
 
     if mode is ControlMode.BRAKING:
-      braking = trajectory.brake()
+      braking: ControlTrajectory = trajectory.brake()
       if braking.stationary:
         self._modes.braked()
       return braking
+
+    return None
 
   def _run(self) -> None:
     state          = self._backend.read_state(math.inf)

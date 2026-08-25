@@ -24,14 +24,11 @@ subsequent call is forwarded to it.
 
 import itertools
 import threading
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import Any, Callable, Protocol
 
 import numpy as np
 
 from chuck_dreamer.common.tracks import Frame
-
-if TYPE_CHECKING:
-  from chuck_dreamer.sim.scene_config import SceneConfig
 
 
 class ActionSpaceError(ValueError):
@@ -160,9 +157,25 @@ class Action:
     """
     if self._q is None:
       raise ActionSpaceError(
-        f"this Action targets {self._frame.value}-frame {self._pos.tolist()}; "
+        f"this Action targets {self._describe_target()}; "
         "resolve it through IK before reading q")
     return self._q
+
+  def _describe_target(self) -> str:
+    """The target rendered for humans, in whichever space it was given.
+
+    Exactly one of ``_q`` / ``_pos`` is set by construction, but that invariant
+    is not visible to a type checker -- keeping the narrowing in one place
+    means the readers below do not each have to restate it.
+    """
+    if self._q is not None:
+      return f"q={self._q.tolist()}"
+    pos = self._pos
+    assert pos is not None, "an Action always has a joint or Cartesian target"
+    target = f"{self._frame.value}_pos={pos.tolist()}"
+    if self._quat is not None:
+      target += f", quat={self._quat.tolist()}"
+    return target
 
   def resolve(self, q: np.ndarray) -> "Action":
     """The joint-space equivalent of this action, keeping ``obs`` and ``seq``.
@@ -189,13 +202,7 @@ class Action:
     return hash(self.seq)
 
   def __repr__(self) -> str:
-    if self._q is not None:
-      target = f"q={self._q.tolist()}"
-    else:
-      target = f"{self._frame.value}_pos={self._pos.tolist()}"
-      if self._quat is not None:
-        target += f", quat={self._quat.tolist()}"
-    return f"Action(seq={self.seq}, {target})"
+    return f"Action(seq={self.seq}, {self._describe_target()})"
 
 
 class Policy(Protocol):
@@ -205,8 +212,13 @@ class Policy(Protocol):
   loop and the sim env alike. The action names its own target space, so a
   consumer that commands joints and one that commands an EE pose read the same
   object rather than agreeing out-of-band on what a bare array meant.
+
+  ``reset`` takes whatever anchors the policy for the episode ahead, and the
+  type is deliberately open: sim hands over a ``SceneConfig``, the runtime a
+  joint vector (the backend's home pose). Implementations accept the forms
+  they support -- see ``runtime.sources._start_qpos``, which takes either.
   """
-  def reset(self, scene: "SceneConfig") -> None: ...
+  def reset(self, start: Any) -> None: ...
   def act(self, obs: Any) -> "Action": ...
 
 

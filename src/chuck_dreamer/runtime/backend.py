@@ -16,7 +16,7 @@ every tick.
 from __future__ import annotations
 
 import time
-from typing import Any, ContextManager, Protocol, runtime_checkable
+from typing import Any, Callable, ContextManager, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -131,6 +131,10 @@ class InstantReadMixin:
   state's optional fields express exactly that absence, so a consumer written
   against the real arm degrades cleanly instead of reading fabricated numbers.
   """
+
+  # Supplied by the concrete backend this mixin is combined with (the mixin is
+  # only ever mixed into a RobotBackend, which requires it).
+  last_positions: Callable[[], np.ndarray]
 
   def read_state(self, budget_s: float = float("inf")) -> ControlState:
     del budget_s  # in-memory read: nothing to schedule
