@@ -160,3 +160,19 @@ func (f *FakeBackend) Bytes(recordingID, fileName string) ([]byte, bool) {
 	raw, ok := f.files[recordingID][fileName]
 	return raw, ok
 }
+
+// Delete drops the recording from the in-memory store. Mirrors the real
+// backends' idempotence: absent -> (false, nil).
+func (f *FakeBackend) Delete(recordingID string) (bool, error) {
+	if !isPlainComponent(recordingID) {
+		return false, ErrInvalidPath
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.files[recordingID]; !ok {
+		return false, nil
+	}
+	delete(f.files, recordingID)
+	delete(f.types, recordingID)
+	return true, nil
+}

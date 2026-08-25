@@ -252,3 +252,75 @@ def test_publish_heartbeat(tmp_path):
   topic, payload = pubs[0]
   assert topic == "arm/video/upload/heartbeat"
   assert "ts" in payload
+
+
+# --- local-copy reclaim on successful upload ---------------------------------
+
+
+def test_success_deletes_local_media_but_keeps_metadata(tmp_path):
+  """On success the Pi frees the SSD by deleting segments + playlist, but keeps
+  metadata.json so the recording stays in Storage.list_recordings()."""
+  s, rid = _setup(tmp_path)
+  _, publish = _publish_sink()
+  client = FakeIngestClient()
+  up = Uploader(storage=s, client=client, publish=publish)
+
+  d = s.recording_dir(rid)
+  assert len(list(d.glob("*.ts"))) == 2
+
+  outs = up.process_pending()
+  assert outs[0].state is UploadStateValue.uploaded
+
+  # Media gone.
+  assert list(d.glob("*.ts")) == []
+  assert not (d / "index.m3u8").exists()
+  # Metadata kept, and still readable/finalised.
+  meta = s.read_metadata(rid)
+  assert meta is not None
+  assert meta.upload_state is UploadStateValue.uploaded and meta.uploaded_at
+  # The recording therefore still appears in the Pi's own listing.
+  assert [m.id for m in s.list_recordings()] == [rid]
+
+
+def test_reclaim_happens_only_after_a_successful_upload(tmp_path):
+  """A retryable failure must NOT delete the local media — it is the only copy
+  until the upload actually lands."""
+  s, rid = _setup(tmp_path)
+  _, publish = _publish_sink()
+  client = FakeIngestClient(fail_n_then_ok=1)
+  up = Uploader(storage=s, client=client, publish=publish)
+
+  outs = up.process_pending()
+  assert outs[0].state is UploadStateValue.uploading  # retryable
+  d = s.recording_dir(rid)
+  assert len(list(d.glob("*.ts"))) == 2, "media deleted before a successful upload"
+  assert s.upload_marker_path(rid).exists()
+
+  # The retry succeeds -> now the media is reclaimed.
+  outs = up.process_pending()
+  assert outs[0].state is UploadStateValue.uploaded
+  assert list(d.glob("*.ts")) == []
+
+
+def test_reclaim_failure_does_not_fail_the_upload(tmp_path, monkeypatch):
+  """The bytes are safely in the store; a local cleanup error is logged, not
+  raised (raising would re-upload an already-stored recording forever)."""
+  s, rid = _setup(tmp_path)
+  _, publish = _publish_sink()
+  up = Uploader(storage=s, client=FakeIngestClient(), publish=publish)
+
+  from pathlib import Path as _P
+
+  rec_dir = s.recording_dir(rid)
+  real_unlink = _P.unlink
+
+  def boom(self, *a, **kw):
+    # Only the media files inside the recording dir fail; the marker unlink
+    # (a different dir) must still work, or we would not reach the reclaim.
+    if self.parent == rec_dir:
+      raise OSError("read-only filesystem")
+    return real_unlink(self, *a, **kw)
+
+  monkeypatch.setattr(_P, "unlink", boom)
+  outs = up.process_pending()
+  assert outs[0].state is UploadStateValue.uploaded

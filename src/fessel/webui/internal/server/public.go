@@ -255,6 +255,36 @@ func (p *Public) Handler() http.Handler {
 		p.serveRecordingFile(w, r, r.PathValue("id"), r.PathValue("name"))
 	})
 
+	// DELETE removes the CLUSTER-STORE copy only (the operator reclaiming
+	// archive space). The Pi-side copy has its own lifecycle — the Pi deletes
+	// it automatically once the upload succeeds — so there is nothing to
+	// forward to supervisor here.
+	mux.HandleFunc("DELETE /api/recordings/{id}", func(w http.ResponseWriter, r *http.Request) {
+		ident := p.requireIdentity(w, r)
+		if ident == nil {
+			return
+		}
+		t0 := time.Now()
+		id := r.PathValue("id")
+		ok, err := p.Storage.Delete(id)
+		switch {
+		case errors.Is(err, storage.ErrInvalidPath):
+			auditRecording("delete", ident.User, "invalid_path", id, t0)
+			writeDetail(w, http.StatusBadRequest, "invalid recording id")
+		case err != nil:
+			auditRecording("delete", ident.User, "error", id, t0)
+			writeDetail(w, http.StatusInternalServerError, err.Error())
+		case !ok:
+			// Idempotent: nothing to delete is not a failure, but report 404 so
+			// the UI can tell "already gone" from "removed just now".
+			auditRecording("delete", ident.User, "not_found", id, t0)
+			writeDetail(w, http.StatusNotFound, "recording not in the store")
+		default:
+			auditRecording("delete", ident.User, "success", id, t0)
+			writeJSON(w, http.StatusOK, map[string]any{"recording_id": id, "deleted": true})
+		}
+	})
+
 	mux.HandleFunc("GET /api/recordings/{id}/upload", func(w http.ResponseWriter, r *http.Request) {
 		if p.requireIdentity(w, r) == nil {
 			return
@@ -470,12 +500,63 @@ func (p *Public) serveRecordingFile(w http.ResponseWriter, r *http.Request, reco
 	}
 	switch t := target.(type) {
 	case storage.PresignedURL:
+		// The browser fetches straight from the object store, where the
+		// segments ARE siblings of index.m3u8 — the canonical relative URIs
+		// resolve correctly, so this branch must NOT rewrite.
 		http.Redirect(w, r, t.URL, http.StatusFound)
 	case storage.ServeLocally:
+		if fileName == storage.PlaylistFilename {
+			p.servePlaylistFromDiskBackend(w, r, recordingID)
+			return
+		}
 		p.serveFromDiskBackend(w, r, recordingID, fileName)
 	default:
+		// Not in the store yet (still only on the Pi): proxied from supervisor.
+		// The playlist needs the same URI rewrite — it is served from the same
+		// /api/recordings/<id>/playlist URL regardless of where the bytes came
+		// from.
+		if fileName == storage.PlaylistFilename {
+			p.proxyPlaylist(w, r, recordingID)
+			return
+		}
 		p.proxyBinary(w, r, "/recordings/"+recordingID+"/"+fileName)
 	}
+}
+
+// segmentURIPrefix is what a playlist's bare segment URIs must be prefixed
+// with so they resolve against the playlist's own URL
+// (/api/recordings/<id>/playlist) to the segment route
+// (/api/recordings/<id>/segment/<name>).
+const segmentURIPrefix = "segment/"
+
+// servePlaylistFromDiskBackend serves index.m3u8 with its segment URIs
+// rewritten for the API's playback routes (see storage.RewritePlaylistURIs).
+//
+// Unlike a segment, the playlist is read whole and served without Range
+// support: rewriting changes the body length, so a byte range computed against
+// the stored file would be wrong. Playlists are a few hundred bytes and players
+// fetch them unconditionally, so there is nothing to gain from ranging one.
+func (p *Public) servePlaylistFromDiskBackend(w http.ResponseWriter, r *http.Request, recordingID string) {
+	result, err := p.Storage.Read(recordingID, storage.PlaylistFilename, "")
+	if err != nil {
+		writeDetail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if result == nil {
+		writeDetail(w, http.StatusNotFound, "not found")
+		return
+	}
+	defer result.Body.Close()
+	body, err := io.ReadAll(result.Body)
+	if err != nil {
+		writeDetail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	body = storage.RewritePlaylistURIs(body, segmentURIPrefix)
+	w.Header().Set("Content-Type", result.ContentType)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 func (p *Public) serveFromDiskBackend(w http.ResponseWriter, r *http.Request, recordingID, fileName string) {
@@ -505,6 +586,37 @@ func (p *Public) serveFromDiskBackend(w http.ResponseWriter, r *http.Request, re
 	}
 	w.WriteHeader(status)
 	_, _ = io.Copy(w, result.Body)
+}
+
+// proxyPlaylist fetches index.m3u8 from supervisor and serves it with segment
+// URIs rewritten for the API's playback routes. No Range passthrough, for the
+// same reason as servePlaylistFromDiskBackend: the rewrite changes the length.
+func (p *Public) proxyPlaylist(w http.ResponseWriter, r *http.Request, recordingID string) {
+	result := p.Supervisor.GetBytes("/recordings/"+recordingID+"/"+storage.PlaylistFilename, map[string]string{})
+	if result.Err != "" {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error": "supervisor_unreachable", "message": result.Err,
+		})
+		return
+	}
+	if result.StatusCode != http.StatusOK {
+		for k, v := range result.Headers {
+			w.Header().Set(k, v)
+		}
+		w.WriteHeader(result.StatusCode)
+		_, _ = w.Write(result.Body)
+		return
+	}
+	body := storage.RewritePlaylistURIs(result.Body, segmentURIPrefix)
+	for k, v := range result.Headers {
+		if k == "Content-Length" || k == "Content-Range" || k == "Accept-Ranges" {
+			continue // stale after the rewrite
+		}
+		w.Header().Set(k, v)
+	}
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 // proxyBinary passes the Range header through so HLS scrubbing works, and

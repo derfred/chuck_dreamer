@@ -37,7 +37,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fessel_schemas import UploadProgress, UploadStateValue
-from fessel_shared import Storage, topics
+from fessel_shared import METADATA_FILENAME, Storage, topics
 
 from .ingest import IngestClient, PermanentError, RetryableError
 
@@ -145,12 +145,56 @@ class Uploader:
     # Success: delete the marker, finalise metadata, publish.
     marker.unlink(missing_ok=True)
     self._attempts.pop(recording_id, None)
+    # Order matters: _set_metadata_state writes metadata.json INSIDE rec_dir, so
+    # it has to happen before the dir is removed.
     self._set_metadata_state(recording_id, UploadStateValue.uploaded, uploaded=True)
     self._publish_progress(recording_id, UploadStateValue.uploaded, attempt)
     log.info(
       '{"event":"upload_complete","recording_id":"%s","attempts":%d}', recording_id, attempt
     )
+    self._reclaim_local_copy(recording_id, rec_dir)
     return UploadOutcome(recording_id, UploadStateValue.uploaded, attempt)
+
+  def _reclaim_local_copy(self, recording_id: str, rec_dir: Path) -> None:
+    """Reclaim the Pi-side MEDIA now that the cluster store holds the recording.
+
+    The SSD is the scarce resource (the ring buffer needs the headroom), and the
+    media of a recording that reached the store is no longer needed locally —
+    the webui lists and serves it from there.
+
+    What is deleted: the segments and the playlist (megabytes). What is KEPT:
+    metadata.json (bytes). That distinction is load-bearing, not tidiness —
+    Storage.list_recordings() enumerates recording DIRS and skips any without a
+    readable metadata.json, so removing the whole dir would erase the recording
+    from the Pi's own /recordings listing. Keeping the metadata means the Pi
+    still reports the recording (with upload_state "uploaded"), the webui's
+    merged list keeps showing it, and only `available_local` flips to false.
+
+    Deliberately LAST, after the metadata write and the progress publish:
+    everything that reads rec_dir has already run. A failure here is logged,
+    never raised — the bytes are safely in the store, so a stale local copy is a
+    disk-space problem, not a data-loss one, and turning it into an upload
+    failure would re-upload an already-stored recording forever."""
+    freed = 0
+    for f in rec_dir.iterdir():
+      if not f.is_file() or f.name == METADATA_FILENAME:
+        continue
+      try:
+        size = f.stat().st_size
+        f.unlink()
+        freed += size
+      except OSError as e:
+        log.warning(
+          '{"event":"local_copy_reclaim_failed","recording_id":"%s","file":"%s","error":"%s"}',
+          recording_id,
+          f.name,
+          e,
+        )
+    log.info(
+      '{"event":"local_copy_reclaimed","recording_id":"%s","bytes_freed":%d}',
+      recording_id,
+      freed,
+    )
 
   def _upload_dir(self, recording_id: str, rec_dir: Path) -> None:
     """PUT every file of the recording to the backend's ingest endpoint, in the

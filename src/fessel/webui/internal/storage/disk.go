@@ -346,3 +346,34 @@ func loadJSONMap(path string) map[string]any {
 	}
 	return meta
 }
+
+// --- delete ------------------------------------------------------------------
+
+// Delete removes the recording's directory from this store (B5.5.x operator
+// cleanup). Path safety matters as much as it does for playback: the id is
+// browser-supplied and this call REMOVES a tree, so the id must be a single
+// plain component and the resolved dir must sit strictly under the recordings
+// root — the same guard safePath applies, reused here via a per-type dir join.
+func (d *DiskBackend) Delete(recordingID string) (bool, error) {
+	if !isPlainComponent(recordingID) {
+		return false, ErrInvalidPath
+	}
+	found := false
+	for _, recType := range []string{Explicit, Anomaly} {
+		dir := filepath.Join(d.typeDir(recType), recordingID)
+		// Re-check containment explicitly rather than trusting the join.
+		rel, err := filepath.Rel(d.recordingsRoot, dir)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return false, fmt.Errorf("%w: path escapes recordings root", ErrInvalidPath)
+		}
+		st, err := os.Stat(dir)
+		if err != nil || !st.IsDir() {
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return false, fmt.Errorf("delete recording %s: %w", recordingID, err)
+		}
+		found = true
+	}
+	return found, nil
+}

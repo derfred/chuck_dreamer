@@ -33,9 +33,23 @@ const LIST = [
   },
 ];
 
-function installFetch(opts: { list?: unknown; flagResponder?: () => { status: number } } = {}) {
+function installFetch(
+  opts: {
+    list?: unknown;
+    flagResponder?: () => { status: number };
+    deleteResponder?: () => { status: number };
+  } = {},
+) {
   const list = opts.list ?? LIST;
   const fn = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "DELETE") {
+      const r = opts.deleteResponder ? opts.deleteResponder() : { status: 200 };
+      return Promise.resolve({
+        ok: r.status >= 200 && r.status < 300,
+        status: r.status,
+        json: async () => ({}),
+      });
+    }
     if (init?.method === "POST" && url === "/api/recording/flag-upload") {
       const r = opts.flagResponder ? opts.flagResponder() : { status: 200 };
       return Promise.resolve({
@@ -133,5 +147,183 @@ describe("playback (F4.3)", () => {
       fireEvent.keyDown(window, { key: "Escape" });
     });
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+// --- Play gating: availability, not upload_state ------------------------------
+
+function rec(over: Record<string, unknown>) {
+  return {
+    recording_id: "r-x",
+    type: "explicit",
+    started_at: "2026-06-04T02:00:00+00:00",
+    ended_at: "2026-06-04T02:01:00+00:00",
+    duration_seconds: 60,
+    operator: "octocat",
+    flagged_for_upload: false,
+    upload_state: "none",
+    available_local: true,
+    available_remote: false,
+    ...over,
+  };
+}
+
+function playButton(): HTMLButtonElement {
+  return screen.getAllByRole("button").filter((b) => b.textContent === "Play")[0] as HTMLButtonElement;
+}
+
+describe("play gating", () => {
+  it("keeps Play ENABLED for a queued/uploading recording still on the Pi", async () => {
+    // Playability follows availability: the backend proxies from the Pi while
+    // available_local holds, so an in-flight upload does not block playback.
+    for (const state of ["queued", "uploading"]) {
+      const { unmount } = render(<Recordings />);
+      unmount();
+      await renderReady(
+        installFetch({ list: [rec({ upload_state: state, flagged_for_upload: true, available_local: true })] }),
+      );
+      expect(playButton().disabled).toBe(false);
+      screen.getByText(state); // sanity: the row really is in that state
+      document.body.innerHTML = "";
+    }
+  });
+
+  it("DISABLES Play for a partially-uploaded recording gone from the Pi", async () => {
+    // available_local=false + uploading = segments still arriving in the store;
+    // nothing can serve a complete playlist yet.
+    await renderReady(
+      installFetch({
+        list: [rec({ upload_state: "uploading", flagged_for_upload: true, available_local: false, available_remote: true })],
+      }),
+    );
+    const b = playButton();
+    expect(b.disabled).toBe(true);
+    expect(b.title).toMatch(/Upload still in progress/);
+  });
+
+  it("enables Play for a fully uploaded remote-only recording", async () => {
+    await renderReady(
+      installFetch({
+        list: [rec({ upload_state: "uploaded", flagged_for_upload: true, available_local: false, available_remote: true })],
+      }),
+    );
+    expect(playButton().disabled).toBe(false);
+  });
+});
+
+describe("flag gating tooltips", () => {
+  it("names the actual reason instead of a catch-all", async () => {
+    const cases: Array<[string, RegExp]> = [
+      ["uploaded", /Already uploaded/],
+      ["queued", /waiting for the uploader/],
+      ["uploading", /Upload in progress/],
+    ];
+    for (const [state, re] of cases) {
+      await renderReady(
+        installFetch({ list: [rec({ upload_state: state, flagged_for_upload: true })] }),
+      );
+      const b = screen
+        .getAllByRole("button")
+        .find((x) => x.textContent === "Flag for upload") as HTMLButtonElement;
+      expect(b.disabled).toBe(true);
+      expect(b.title).toMatch(re);
+      document.body.innerHTML = "";
+    }
+  });
+});
+
+// --- delete (cluster copy) ----------------------------------------------------
+
+function deleteButton(): HTMLButtonElement | undefined {
+  return screen.getAllByRole("button").find((b) => b.textContent === "Delete") as
+    | HTMLButtonElement
+    | undefined;
+}
+
+describe("delete gating", () => {
+  it("offers Delete only for a fully uploaded recording", async () => {
+    await renderReady(
+      installFetch({ list: [rec({ upload_state: "uploaded", available_remote: true })] }),
+    );
+    expect(deleteButton()).toBeTruthy();
+  });
+
+  it("hides Delete when there is no cluster copy", async () => {
+    for (const state of ["none", "queued", "uploading", "failed"]) {
+      await renderReady(
+        installFetch({
+          list: [rec({ upload_state: state, available_remote: state === "uploading" })],
+        }),
+      );
+      expect(deleteButton()).toBeUndefined();
+      document.body.innerHTML = "";
+    }
+  });
+});
+
+describe("delete flow", () => {
+  it("confirms first, then DELETEs and reloads", async () => {
+    const fn = await renderReady(
+      installFetch({ list: [rec({ upload_state: "uploaded", available_remote: true })] }),
+    );
+    // Nothing is sent on the first click — a confirmation appears.
+    await act(async () => {
+      fireEvent.click(deleteButton()!);
+    });
+    expect(screen.getByRole("dialog", { name: /confirm delete/i })).toBeTruthy();
+    expect(fn.mock.calls.some((c) => (c[1] as RequestInit | undefined)?.method === "DELETE")).toBe(
+      false,
+    );
+
+    // Confirming issues the DELETE against the right URL.
+    const confirm = screen
+      .getAllByRole("button")
+      .filter((b) => b.textContent === "Delete")
+      .pop() as HTMLButtonElement;
+    await act(async () => {
+      fireEvent.click(confirm);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const del = fn.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "DELETE");
+    expect(del).toBeTruthy();
+    expect(del![0]).toBe("/api/recordings/r-x");
+  });
+
+  it("cancelling sends nothing", async () => {
+    const fn = await renderReady(
+      installFetch({ list: [rec({ upload_state: "uploaded", available_remote: true })] }),
+    );
+    await act(async () => {
+      fireEvent.click(deleteButton()!);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("Cancel"));
+    });
+    expect(screen.queryByRole("dialog", { name: /confirm delete/i })).toBeNull();
+    expect(fn.mock.calls.some((c) => (c[1] as RequestInit | undefined)?.method === "DELETE")).toBe(
+      false,
+    );
+  });
+
+  it("surfaces a delete failure and keeps the row", async () => {
+    await renderReady(
+      installFetch({
+        list: [rec({ upload_state: "uploaded", available_remote: true })],
+        deleteResponder: () => ({ status: 500 }),
+      }),
+    );
+    await act(async () => {
+      fireEvent.click(deleteButton()!);
+    });
+    const confirm = screen
+      .getAllByRole("button")
+      .filter((b) => b.textContent === "Delete")
+      .pop() as HTMLButtonElement;
+    await act(async () => {
+      fireEvent.click(confirm);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // Row still listed (not optimistically removed).
+    expect(screen.getByText("uploaded")).toBeTruthy();
   });
 });

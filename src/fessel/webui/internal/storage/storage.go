@@ -124,6 +124,15 @@ type Backend interface {
 	// on a malformed/unsatisfiable range. The MinIO backend returns an error —
 	// its playback is via redirect, never through the webui.
 	Read(recordingID, fileName, httpRange string) (*ReadResult, error)
+	// Delete removes every file of one recording from THIS store. It does not
+	// touch the Pi-side copy (a separate lifecycle: the Pi deletes its own copy
+	// once the upload succeeds), so this is "drop the cluster archive", not
+	// "erase the footage everywhere".
+	//
+	// Idempotent: deleting an absent recording reports ok=false with a nil
+	// error, so a double-click is not an error. Returns ErrInvalidPath for a
+	// bad id.
+	Delete(recordingID string) (ok bool, err error)
 }
 
 // ErrRangeNotSatisfiable marks a malformed or unsatisfiable Range header.
@@ -218,4 +227,43 @@ func ParseByteRange(header string, total int64) (*ByteRange, error) {
 	}
 	end = min(end, total-1)
 	return &ByteRange{Start: start, End: end, Total: total}, nil
+}
+
+// RewritePlaylistURIs prefixes each media-segment URI in an HLS playlist with
+// `prefix`, returning the rewritten playlist.
+//
+// Why this is needed: the Pi writes a canonical playlist whose segment URIs are
+// bare file names (`seg-00000.ts`) — correct on the store, where the segments
+// ARE siblings of index.m3u8, and correct for a MinIO presigned redirect, where
+// the browser fetches them straight from the object store. But the webui serves
+// the playlist at /api/recordings/<id>/playlist while the segments live at
+// /api/recordings/<id>/segment/<name>. A player resolves a relative URI against
+// the playlist's own URL (RFC 8216 §4), so it would ask for
+// /api/recordings/<id>/seg-00000.ts and get a 404 — the playlist loads, every
+// segment fails, and the video silently never starts.
+//
+// Only URI lines are touched: blank lines and every `#` tag line pass through
+// verbatim, so EXTINF durations, byte-range tags and ENDLIST are preserved. A
+// URI that is already absolute (scheme-qualified or root-relative) is left
+// alone — it does not resolve against the playlist base, so prefixing it would
+// corrupt it. The original line ending is preserved.
+func RewritePlaylistURIs(playlist []byte, prefix string) []byte {
+	lines := strings.Split(string(playlist), "\n")
+	for i, line := range lines {
+		// Preserve a \r\n line ending: split off the \r, re-attach it after.
+		cr := ""
+		body := line
+		if strings.HasSuffix(body, "\r") {
+			cr = "\r"
+			body = strings.TrimSuffix(body, "\r")
+		}
+		if body == "" || strings.HasPrefix(body, "#") {
+			continue // tag or blank — never a URI
+		}
+		if strings.Contains(body, "://") || strings.HasPrefix(body, "/") {
+			continue // already absolute; resolves without the base
+		}
+		lines[i] = prefix + body + cr
+	}
+	return []byte(strings.Join(lines, "\n"))
 }

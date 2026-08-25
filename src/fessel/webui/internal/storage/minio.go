@@ -279,3 +279,58 @@ func (m *MinioBackend) getObjectBytes(key string) []byte {
 	}
 	return raw
 }
+
+// Delete removes every object under the recording's prefix, in both type
+// prefixes (the caller does not know the type, and a mis-typed leftover from a
+// partial upload must not survive a delete).
+//
+// RemoveObjects takes a channel of objects and reports failures on another; we
+// drain the listing into it and collect the first error. The list cache is
+// invalidated so the recording disappears from List() immediately rather than
+// lingering for the cache TTL.
+func (m *MinioBackend) Delete(recordingID string) (bool, error) {
+	if !isPlainComponent(recordingID) {
+		return false, ErrInvalidPath
+	}
+	found := false
+	for _, recType := range []string{Explicit, Anomaly} {
+		prefix := fmt.Sprintf("%s/%s/%s/", keyRoot, recType, recordingID)
+		ctx, cancel := context.WithCancel(context.Background())
+		// List fully before deleting: the listing is small (a recording is tens
+		// of segments) and materialising it keeps `found` off the goroutine,
+		// which would otherwise be a data race with the read below.
+		var objs []minio.ObjectInfo
+		for obj := range m.client.ListObjects(ctx, m.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+			if obj.Err != nil {
+				continue
+			}
+			objs = append(objs, obj)
+		}
+		if len(objs) == 0 {
+			cancel()
+			continue
+		}
+		found = true
+		objCh := make(chan minio.ObjectInfo)
+		go func() {
+			defer close(objCh)
+			for _, o := range objs {
+				objCh <- o
+			}
+		}()
+		var firstErr error
+		for e := range m.client.RemoveObjects(ctx, m.bucket, objCh, minio.RemoveObjectsOptions{}) {
+			if e.Err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("delete %s: %w", e.ObjectName, e.Err)
+			}
+		}
+		cancel()
+		if firstErr != nil {
+			return false, firstErr
+		}
+	}
+	m.mu.Lock()
+	m.haveCache = false
+	m.mu.Unlock()
+	return found, nil
+}

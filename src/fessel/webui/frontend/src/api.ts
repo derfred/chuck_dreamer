@@ -312,6 +312,18 @@ export async function flagForUpload(recordingId: string): Promise<void> {
   if (!res.ok) throw new ControlError(await diagnostic(res), res.status);
 }
 
+// Delete a recording's CLUSTER-STORE copy. Destructive and NOT applied
+// optimistically — the caller confirms first, then reloads the authoritative
+// list. The Pi-side copy is not touched here: the Pi reclaims its own media
+// automatically once an upload succeeds.
+export async function deleteRecording(recordingId: string): Promise<void> {
+  const res = await fetch(`/api/recordings/${encodeURIComponent(recordingId)}`, {
+    method: "DELETE",
+  });
+  if (res.status === 401) throw new AuthError();
+  if (!res.ok) throw new ControlError(await diagnostic(res), res.status);
+}
+
 // URL the hls.js player points at for a recording's playlist (B4.3). The
 // backend decides MinIO-redirect vs supervisor-proxy; the frontend just loads
 // this URL.

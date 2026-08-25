@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -279,5 +280,38 @@ func TestDiskPlaybackTargets(t *testing.T) {
 	target, err = d.PlaybackURL("rec1", "missing.ts")
 	if err != nil || target != nil {
 		t.Fatalf("missing file: %v %v", target, err)
+	}
+}
+
+func TestDiskDelete(t *testing.T) {
+	d, _ := NewDiskBackend(t.TempDir())
+	_ = d.Store("r1", "seg-00000.ts", strings.NewReader("bytes"))
+	_ = d.Store("r1", "index.m3u8", strings.NewReader("#EXTM3U"))
+	_ = d.Store("r2", "seg-00000.ts", strings.NewReader("other"))
+
+	ok, err := d.Delete("r1")
+	if err != nil || !ok {
+		t.Fatalf("delete: ok=%v err=%v", ok, err)
+	}
+	if d.Exists("r1") {
+		t.Fatal("r1 still present")
+	}
+	if !d.Exists("r2") {
+		t.Fatal("delete removed an unrelated recording")
+	}
+
+	// Idempotent: a second delete is (false, nil), not an error.
+	ok, err = d.Delete("r1")
+	if err != nil || ok {
+		t.Fatalf("second delete: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestDiskDeleteRejectsTraversal(t *testing.T) {
+	d, _ := NewDiskBackend(t.TempDir())
+	for _, bad := range []string{"..", "../x", "a/b", "", "."} {
+		if _, err := d.Delete(bad); !errors.Is(err, ErrInvalidPath) {
+			t.Fatalf("Delete(%q) err=%v, want ErrInvalidPath", bad, err)
+		}
 	}
 }

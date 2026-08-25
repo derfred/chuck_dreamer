@@ -2,9 +2,11 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -541,5 +543,186 @@ func TestSPAStaticFallback(t *testing.T) {
 	// API routes (they are registered as more specific patterns and win).
 	if w := do(t, h, "GET", "/api/me", "", false); w.Code != 401 {
 		t.Fatalf("api route swallowed by SPA fallback: %d", w.Code)
+	}
+}
+
+// --- playlist URI rewriting (the F5.5.1 playback regression) ------------------
+
+// resolveAgainst mimics how an HLS player resolves a playlist's relative URIs:
+// against the playlist's OWN url (RFC 8216 §4), not against a path the caller
+// reconstructs. Reconstructing the segment URL is exactly what let the original
+// bug through CI — both endpoints worked in isolation while no test ever walked
+// the playlist the way hls.js does.
+func resolveAgainst(playlistURL, uri string) string {
+	base, err := url.Parse(playlistURL)
+	if err != nil {
+		return uri
+	}
+	ref, err := url.Parse(uri)
+	if err != nil {
+		return uri
+	}
+	return base.ResolveReference(ref).Path
+}
+
+// firstSegmentURI returns the first non-tag, non-blank line of a playlist.
+func firstSegmentURI(playlist string) string {
+	for _, line := range strings.Split(playlist, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		return line
+	}
+	return ""
+}
+
+const canonicalPlaylist = "#EXTM3U\n" +
+	"#EXT-X-VERSION:3\n" +
+	"#EXT-X-MEDIA-SEQUENCE:0\n" +
+	"#EXT-X-TARGETDURATION:2\n" +
+	"#EXT-X-PLAYLIST-TYPE:VOD\n" +
+	"#EXTINF:2.0,\n" +
+	"seg-00000.ts\n" +
+	"#EXTINF:2.0,\n" +
+	"seg-00001.ts\n" +
+	"#EXT-X-ENDLIST\n"
+
+// The end-to-end contract: fetch the playlist, resolve its first segment URI
+// the way a player does, and that URL must actually serve the segment bytes.
+func TestPlaylistSegmentURIsResolveToServableSegments(t *testing.T) {
+	store := storage.NewFakeBackend()
+	_ = store.Store("r1", "index.m3u8", strings.NewReader(canonicalPlaylist))
+	_ = store.Store("r1", "seg-00000.ts", strings.NewReader("SEGMENT-ZERO"))
+	h := newPublic(newFakeSupervisor(), store).Handler()
+
+	const playlistURL = "/api/recordings/r1/playlist"
+	w := do(t, h, "GET", playlistURL, "", true)
+	if w.Code != 200 {
+		t.Fatalf("playlist status %d", w.Code)
+	}
+	uri := firstSegmentURI(w.Body.String())
+	if uri == "" {
+		t.Fatalf("no segment URI in playlist: %q", w.Body.String())
+	}
+
+	resolved := resolveAgainst(playlistURL, uri)
+	seg := do(t, h, "GET", resolved, "", true)
+	if seg.Code != 200 {
+		t.Fatalf("segment %q (resolved from %q) -> %d; a player would fail here",
+			resolved, uri, seg.Code)
+	}
+	if seg.Body.String() != "SEGMENT-ZERO" {
+		t.Fatalf("segment body %q", seg.Body.String())
+	}
+	if ct := seg.Header().Get("Content-Type"); ct != "video/mp2t" {
+		t.Fatalf("segment content-type %q", ct)
+	}
+}
+
+// Tags must survive the rewrite untouched, and Content-Length must describe the
+// rewritten body (not the stored one) or the response is truncated.
+func TestPlaylistRewritePreservesTagsAndLength(t *testing.T) {
+	store := storage.NewFakeBackend()
+	_ = store.Store("r1", "index.m3u8", strings.NewReader(canonicalPlaylist))
+	h := newPublic(newFakeSupervisor(), store).Handler()
+
+	w := do(t, h, "GET", "/api/recordings/r1/playlist", "", true)
+	body := w.Body.String()
+	for _, tag := range []string{"#EXTM3U", "#EXT-X-PLAYLIST-TYPE:VOD", "#EXTINF:2.0,", "#EXT-X-ENDLIST"} {
+		if !strings.Contains(body, tag) {
+			t.Fatalf("tag %q lost: %q", tag, body)
+		}
+	}
+	if !strings.Contains(body, "segment/seg-00000.ts") || !strings.Contains(body, "segment/seg-00001.ts") {
+		t.Fatalf("segment URIs not rewritten: %q", body)
+	}
+	if cl := w.Header().Get("Content-Length"); cl != fmt.Sprint(len(body)) {
+		t.Fatalf("Content-Length %q != body length %d", cl, len(body))
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/vnd.apple.mpegurl" {
+		t.Fatalf("content-type %q", ct)
+	}
+}
+
+// A recording still only on the Pi is proxied from supervisor — same URL, so it
+// needs the same rewrite.
+func TestProxiedPlaylistIsAlsoRewritten(t *testing.T) {
+	sup := newFakeSupervisor()
+	sup.proxies["/recordings/pi-only/index.m3u8"] = supervisor.ProxyResult{
+		StatusCode: 200, Body: []byte(canonicalPlaylist),
+		Headers: map[string]string{"Content-Type": "application/vnd.apple.mpegurl"},
+	}
+	h := newPublic(sup, storage.NewFakeBackend()).Handler()
+
+	const playlistURL = "/api/recordings/pi-only/playlist"
+	w := do(t, h, "GET", playlistURL, "", true)
+	if w.Code != 200 {
+		t.Fatalf("status %d", w.Code)
+	}
+	resolved := resolveAgainst(playlistURL, firstSegmentURI(w.Body.String()))
+	if resolved != "/api/recordings/pi-only/segment/seg-00000.ts" {
+		t.Fatalf("resolved to %q", resolved)
+	}
+}
+
+// The presigned (MinIO) branch redirects the browser to the object store, where
+// segments ARE siblings of index.m3u8. Rewriting there would corrupt playback,
+// so that branch must stay a plain 302 with the body untouched.
+func TestPresignedPlaylistIsNotRewritten(t *testing.T) {
+	store := storage.NewFakeBackend()
+	store.PresignBase = "http://minio:9000/rec"
+	_ = store.Store("r1", "index.m3u8", strings.NewReader(canonicalPlaylist))
+	h := newPublic(newFakeSupervisor(), store).Handler()
+
+	w := do(t, h, "GET", "/api/recordings/r1/playlist", "", true)
+	if w.Code != 302 {
+		t.Fatalf("expected redirect, got %d", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "segment/") {
+		t.Fatalf("presigned branch rewrote the playlist: %q", w.Body.String())
+	}
+}
+
+// --- delete (cluster-store copy only) ----------------------------------------
+
+func TestDeleteRemovesFromStoreOnly(t *testing.T) {
+	store := storage.NewFakeBackend()
+	_ = store.Store("r1", "seg-00000.ts", strings.NewReader("bytes"))
+	_ = store.Store("r1", "index.m3u8", strings.NewReader(canonicalPlaylist))
+	sup := newFakeSupervisor()
+	h := newPublic(sup, store).Handler()
+
+	w := do(t, h, "DELETE", "/api/recordings/r1", "", true)
+	if w.Code != 200 {
+		t.Fatalf("delete status %d (%s)", w.Code, w.Body.String())
+	}
+	if store.Exists("r1") {
+		t.Fatal("still in the store after delete")
+	}
+	// The Pi copy is a separate lifecycle — nothing is forwarded to supervisor.
+	if len(sup.posts) != 0 {
+		t.Fatalf("delete forwarded to supervisor: %v", sup.posts)
+	}
+}
+
+func TestDeleteIsIdempotentWith404(t *testing.T) {
+	h := newPublic(newFakeSupervisor(), storage.NewFakeBackend()).Handler()
+	w := do(t, h, "DELETE", "/api/recordings/nope", "", true)
+	if w.Code != 404 {
+		t.Fatalf("status %d", w.Code)
+	}
+}
+
+func TestDeleteRequiresAuth(t *testing.T) {
+	store := storage.NewFakeBackend()
+	_ = store.Store("r1", "index.m3u8", strings.NewReader("#EXTM3U"))
+	h := newPublic(newFakeSupervisor(), store).Handler()
+	w := do(t, h, "DELETE", "/api/recordings/r1", "", false)
+	if w.Code != 401 {
+		t.Fatalf("status %d", w.Code)
+	}
+	if !store.Exists("r1") {
+		t.Fatal("unauthenticated DELETE removed the recording")
 	}
 }
