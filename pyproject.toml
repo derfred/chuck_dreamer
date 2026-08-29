@@ -99,29 +99,40 @@ namespace_packages = true
 exclude = '^src/fessel/'
 
 [tool.uv]
-# Only resolve for the two platforms that exist in this project. Drops the
-# win32 and x86-linux forks entirely - no pywin32, pywinpty, colorama, and
-# a much smaller lock.
+# Only resolve for the platforms that exist in this project: dev machines
+# (macOS arm64), the Jetson (linux aarch64) and CI runners (linux x86_64).
+# Drops the win32 fork entirely - no pywin32, pywinpty, colorama.
 environments = [
   "sys_platform == 'darwin' and platform_machine == 'arm64'",
   "sys_platform == 'linux' and platform_machine == 'aarch64'",
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [tool.uv.sources]
 sam-2 = { git = "https://github.com/facebookresearch/sam2.git" }
 torch = [
   { index = "jetson", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { index = "pytorch-cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 torchvision = [
   { index = "jetson", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { index = "pytorch-cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 torchcodec = [
   { index = "jetson", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { index = "pytorch-cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 
 [[tool.uv.index]]
 name = "jetson"
 url = "https://pypi.jetson-ai-lab.io/sbsa/cu132"
+explicit = true
+
+# CI runners (linux x86_64) have no GPU; the CPU-only wheels avoid pulling
+# several GB of nvidia-* CUDA packages onto the runner.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [[tool.mypy.overrides]]
