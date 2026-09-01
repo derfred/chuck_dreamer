@@ -234,6 +234,7 @@ class ControlLoop:
     next_deadline  = time.monotonic()
     current_action = None
     trajectory     = ControlTrajectory.hold(state.q, self._traj_cfg)
+    q_cmd_last     = None
 
     while not self._stop.is_set():
       metrics = TelemetryRecord(t_wall=time.time(), t_mono=time.monotonic(), tick=self._ticks)
@@ -253,7 +254,7 @@ class ControlLoop:
       elif not mode.stopping:
         action = self._channel.get()
         if action is not None and action != current_action:
-          trajectory     = trajectory.update(action, state)
+          trajectory     = trajectory.update(action, state, q_ref_actual=q_cmd_last)
           current_action = action
 
       metrics.update(state=state, dt=dt, mode=mode)
@@ -269,6 +270,7 @@ class ControlLoop:
         if ref is not None:
           q_cmd, limits = self._safety_limit(state, *ref)
           if q_cmd is not None:
+            q_cmd_last = q_cmd
             with metrics.timed("write_positions"):
               self._backend.write_positions(q_cmd)
           metrics.update(ref=ref, q_cmd=q_cmd, limits=limits)

@@ -179,7 +179,12 @@ class ControlTrajectory:
     return cls(c=c, T=math.inf, q_end=q, qd_end=np.zeros_like(q), q_prev_end=None, t_target=None, P_est=cfg.P_nominal, cfg=cfg)
 
   def update(self, action, state, q_ref_actual=None) -> "ControlTrajectory":
-    """Plan a new segment toward `action.q`."""
+    """Plan a new segment toward `action.q`.
+
+    ``q_ref_actual`` is the command the control loop *actually issued* last
+    tick, which differs from this segment's own reference whenever a safety
+    limiter clipped it.
+    """
     cfg = self.cfg
     q_t = np.asarray(action.q, dtype=float)
 

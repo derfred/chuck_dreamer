@@ -410,6 +410,8 @@ def test_estop_ignores_new_setpoints():
     while loop.ticks == 0 and time.monotonic() < deadline:
       time.sleep(0.005)
     assert loop.request_estop(timeout=2.0)
+    settle = loop.ticks + 3
+    assert _wait_for(lambda: loop.ticks >= settle)
     held = backend.last_positions()
 
     channel.publish(Action(_Obs(t=1.0), q=np.full(_N, 1.5)))
@@ -423,13 +425,6 @@ def test_estop_ignores_new_setpoints():
 
 
 def test_stop_for_shutdown_returns_at_once_when_already_estopped():
-  """A latched e-stop is already at rest; there is nothing left to brake.
-
-  The mode machine refuses a graceful stop under ESTOP, so asking anyway would
-  block out the whole timeout waiting for a BRAKED that can never arrive --
-  which is what a caller tearing the runtime down used to pay on every
-  e-stopped shutdown.
-  """
   loop = _running()
   try:
     assert loop.request_estop(timeout=2.0)
@@ -443,16 +438,9 @@ def test_stop_for_shutdown_returns_at_once_when_already_estopped():
 
 
 def test_stop_for_shutdown_waits_out_a_brake_already_in_flight():
-  """BRAKING is still *moving*, so it is waited out rather than skipped.
-
-  The e-stop shortcut keys on ESTOP alone rather than on "some stop is already
-  underway": returning early here would hand the caller a green light to tear
-  the control thread down mid-coast, abandoning a live arm. The brake request
-  is idempotent, so this joins the coast-down instead of restarting it.
-  """
   backend = FakeBackend(_N, lower=_LOWER, upper=_UPPER)
   channel = SetpointChannel()
-  loop = ControlLoop(_cfg(), backend, channel, TelemetryQueue())
+  loop    = ControlLoop(_cfg(), backend, channel, TelemetryQueue())
   loop.start()
   try:
     assert _wait_for(lambda: loop.ticks > 0)
@@ -479,8 +467,7 @@ def test_stop_for_shutdown_brakes_a_running_loop():
 
 
 def test_mode_request_on_a_stopped_loop_does_not_block():
-  """No thread to carry the request out -- report the truth, don't hang."""
   loop = _loop(FakeBackend(_N, lower=_LOWER, upper=_UPPER))
-  t0 = time.monotonic()
+  t0   = time.monotonic()
   assert not loop.stop_for_shutdown(timeout=5.0)   # never started
   assert time.monotonic() - t0 < 1.0
