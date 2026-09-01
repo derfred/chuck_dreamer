@@ -328,10 +328,10 @@ class Runtime:
     """
     import inspect
 
-    target = str(entry["target"])
-    params = _params_dict(entry.get("params"))
+    target               = str(entry["target"])
+    params               = _params_dict(entry.get("params"))
     spec: dict[str, Any] = {"target": target, "params": params}
-    factory = import_symbol(target)
+    factory              = import_symbol(target)
 
     from_config = getattr(factory, "from_config", None)
     if callable(from_config):
