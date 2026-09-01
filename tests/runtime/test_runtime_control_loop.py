@@ -210,22 +210,16 @@ def test_loop_starts_in_normal():
     loop.stop()
 
 
-def test_brake_resolves_once_the_arm_has_stopped():
-  """request_brake returns when the coast-down has actually played out.
-
-  A stationary arm's brake() degrades to an infinite hold whose segment never
-  expires, so completion cannot be "the segment ran out" -- this pins that the
-  no-op case still reports BRAKED rather than hanging until the timeout.
-  """
+def test_stopping_resolves_once_the_arm_has_stopped():
   loop = _running()
   try:
-    assert loop.request_brake(timeout=2.0)
+    assert loop.stop_for_shutdown(timeout=2.0)
     assert loop.mode is ControlMode.BRAKED
   finally:
     loop.stop()
 
 
-def test_brake_of_a_moving_arm_completes_within_the_coast_down():
+def test_stopping_a_moving_arm_completes_within_the_coast_down():
   """A *moving* arm must reach BRAKED in about `coast_to_stop_time`.
 
   Regression: BRAKING used to replan `trajectory.brake()` on every tick, so the
@@ -248,7 +242,7 @@ def test_brake_of_a_moving_arm_completes_within_the_coast_down():
     time.sleep(0.1)
 
     t0 = time.monotonic()
-    assert loop.request_brake(timeout=2.0)
+    assert loop.stop_for_shutdown(timeout=2.0)
     elapsed = time.monotonic() - t0
     assert loop.mode is ControlMode.BRAKED
     # coast_to_stop_time is 0.1 s; allow generous slack for scheduling jitter
@@ -268,7 +262,7 @@ def test_braked_arm_ignores_new_setpoints():
     deadline = time.monotonic() + 1.0
     while loop.ticks == 0 and time.monotonic() < deadline:
       time.sleep(0.005)
-    assert loop.request_brake(timeout=2.0)
+    assert loop.stop_for_shutdown(timeout=2.0)
     held = backend.last_positions()
 
     # a late setpoint, far from the hold
@@ -290,10 +284,10 @@ def test_estop_then_release_returns_to_normal():
     loop.stop()
 
 
-def test_release_after_brake_resumes_normal():
+def test_release_after_a_coast_down_resumes_normal():
   loop = _running()
   try:
-    assert loop.request_brake(timeout=2.0)
+    assert loop.stop_for_shutdown(timeout=2.0)
     assert loop.release(timeout=2.0)
     assert loop.mode is ControlMode.NORMAL
   finally:
@@ -425,9 +419,68 @@ def test_estop_ignores_new_setpoints():
     loop.stop()
 
 
+# -- stopping for teardown ---------------------------------------------------
+
+
+def test_stop_for_shutdown_returns_at_once_when_already_estopped():
+  """A latched e-stop is already at rest; there is nothing left to brake.
+
+  The mode machine refuses a graceful stop under ESTOP, so asking anyway would
+  block out the whole timeout waiting for a BRAKED that can never arrive --
+  which is what a caller tearing the runtime down used to pay on every
+  e-stopped shutdown.
+  """
+  loop = _running()
+  try:
+    assert loop.request_estop(timeout=2.0)
+
+    t0 = time.monotonic()
+    assert loop.stop_for_shutdown(timeout=1.0)
+    assert time.monotonic() - t0 < 0.1
+    assert loop.mode is ControlMode.ESTOP     # and it stays e-stopped
+  finally:
+    loop.stop()
+
+
+def test_stop_for_shutdown_waits_out_a_brake_already_in_flight():
+  """BRAKING is still *moving*, so it is waited out rather than skipped.
+
+  The e-stop shortcut keys on ESTOP alone rather than on "some stop is already
+  underway": returning early here would hand the caller a green light to tear
+  the control thread down mid-coast, abandoning a live arm. The brake request
+  is idempotent, so this joins the coast-down instead of restarting it.
+  """
+  backend = FakeBackend(_N, lower=_LOWER, upper=_UPPER)
+  channel = SetpointChannel()
+  loop = ControlLoop(_cfg(), backend, channel, TelemetryQueue())
+  loop.start()
+  try:
+    assert _wait_for(lambda: loop.ticks > 0)
+    channel.publish(Action(_Obs(t=0.0), q=np.full(_N, 1.5)))
+    assert _wait_for(lambda: backend.last_positions()[0] > 0.05), "arm never got moving"
+
+    # Enter BRAKING without waiting, so the coast-down is genuinely in flight.
+    loop._modes.request_brake()
+    assert loop.mode is ControlMode.BRAKING
+
+    assert loop.stop_for_shutdown(timeout=2.0)
+    assert loop.mode is ControlMode.BRAKED    # seen through to rest
+  finally:
+    loop.stop()
+
+
+def test_stop_for_shutdown_brakes_a_running_loop():
+  loop = _running()
+  try:
+    assert loop.stop_for_shutdown(timeout=2.0)
+    assert loop.mode is ControlMode.BRAKED
+  finally:
+    loop.stop()
+
+
 def test_mode_request_on_a_stopped_loop_does_not_block():
   """No thread to carry the request out -- report the truth, don't hang."""
   loop = _loop(FakeBackend(_N, lower=_LOWER, upper=_UPPER))
   t0 = time.monotonic()
-  assert not loop.request_brake(timeout=5.0)   # never started
+  assert not loop.stop_for_shutdown(timeout=5.0)   # never started
   assert time.monotonic() - t0 < 1.0

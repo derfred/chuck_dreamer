@@ -402,8 +402,8 @@ class Runtime:
       s.stop()
     if self.leader is not None:
       self.leader.stop()
-    if not self.control_loop.request_brake():
-      logger.warning("control loop did not brake in time; tearing down anyway")
+    if not self.control_loop.stop_for_shutdown():
+      logger.warning("control loop did not come to rest in time; tearing down anyway")
     self.control_loop.stop()
     self.backend.stop()
     self.sink.stop()  # drains both queues + flushes the .rrd (one per episode)

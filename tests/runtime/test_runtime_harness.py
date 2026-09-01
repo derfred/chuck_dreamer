@@ -14,6 +14,7 @@ are backend-specific and enabled explicitly in config).
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -187,6 +188,38 @@ def test_fake_backend_runtime_brakes_to_a_stop_on_shutdown(tmp_path, fake_rerun)
   tail  = [np.asarray(r["q_cmd"], dtype=float) for r in rows[-3:]]
   steps = [float(np.max(np.abs(b - a))) for a, b in zip(tail, tail[1:])]
   assert all(s < 1e-4 for s in steps), f"still moving at shutdown: {steps}"
+
+
+def test_shutdown_of_an_estopped_runtime_is_prompt_and_quiet(tmp_path, fake_rerun, caplog):
+  """An e-stopped runtime tears down at once, without a spurious warning.
+
+  Shutdown used to ask for a graceful brake unconditionally. The mode machine
+  refuses one under ESTOP -- a latched freeze outranks a graceful stop -- so
+  the call blocked out its whole timeout waiting for a BRAKED that could never
+  arrive, and then warned. The cleanest shutdown there is (arm already frozen)
+  was the slowest, and the only one that looked like a fault in the log.
+
+  How the loop decides what "come to rest" means is its own business and is
+  covered in test_runtime_control_loop.py; what the harness owes is a teardown
+  that neither dawdles nor cries wolf.
+  """
+  rt = Runtime(_cfg(tmp_path, duration_s=None))
+  rt.start()
+  try:
+    deadline = time.monotonic() + 2.0
+    while rt.control_loop.ticks == 0 and time.monotonic() < deadline:
+      time.sleep(0.005)
+    assert rt.control_loop.request_estop(timeout=2.0)
+  finally:
+    with caplog.at_level(logging.WARNING, logger="chuck_dreamer.runtime.harness"):
+      t0 = time.monotonic()
+      rt.shutdown()
+      elapsed = time.monotonic() - t0
+
+  # The default stop timeout is 1 s; the bug spent all of it every time.
+  assert elapsed < 0.5, f"shutdown blocked for {elapsed:.3f}s on an e-stopped arm"
+  assert not [r for r in caplog.records if "did not come to rest" in r.message]
+  assert not _runtime_threads(), "threads outlived shutdown"
 
 
 # -- M3: modality composition + fail-fast ------------------------------------

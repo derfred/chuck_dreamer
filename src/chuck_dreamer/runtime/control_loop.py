@@ -104,12 +104,10 @@ class ControlLoop:
     self._modes.request_estop()
     return self._await(ControlMode.ESTOP, timeout)
 
-  def request_brake(self, timeout: float | None = 1.0) -> bool:
-    """Ask for a graceful coast-to-stop; block until the arm has stopped.
-
-    Resolves when the loop reaches BRAKED — the coast-down segment has actually
-    played out. Returns whether that happened within ``timeout``.
-    """
+  def stop_for_shutdown(self, timeout: float | None = 1.0) -> bool:
+    """Bring the arm to rest for teardown; block until it is. Returns whether that happened within ``timeout``."""
+    if self.mode is ControlMode.ESTOP:
+      return True
     self._modes.request_brake()
     return self._await(ControlMode.BRAKED, timeout)
 
