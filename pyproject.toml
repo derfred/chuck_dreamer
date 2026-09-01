@@ -136,7 +136,7 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [[tool.mypy.overrides]]
-module = ["mlx", "mlx.*", "mujoco", "mujoco.*", "pinocchio", "pinocchio.*", "h5py", "rerun", "tqdm", "tqdm.*", "scipy", "scipy.*", "sam2.*"]
+module = ["mlx", "mlx.*", "mujoco", "mujoco.*", "pinocchio", "h5py", "pyarrow", "pyarrow.*", "rerun", "tqdm", "tqdm.*", "scipy", "scipy.*", "sam2.*"]
 ignore_missing_imports = true
 
 [dependency-groups]
