@@ -48,6 +48,11 @@ class ControlMode(Enum):
   BRAKED  = "braked"    # coast-down finished; holding position
   ESTOP   = "estop"     # latched freeze; no motion commanded
 
+  @property
+  def stopping(self) -> bool:
+    """Whether a stop has been requested, and so no setpoint may be consumed."""
+    return self is not ControlMode.NORMAL
+
 
 # Requests are latched, so the machine only ever moves along these edges.
 _TRANSITIONS: dict[ControlMode, frozenset[ControlMode]] = {
@@ -109,7 +114,7 @@ class ControlModeMachine:
     stop, and silently downgrading it would command motion on an e-stopped arm.
     """
     with self._cond:
-      if self._mode in (ControlMode.BRAKING, ControlMode.BRAKED, ControlMode.ESTOP):
+      if self._mode.stopping:
         return self._mode
     return self._to(ControlMode.BRAKING)
 

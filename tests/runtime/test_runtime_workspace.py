@@ -26,6 +26,7 @@ from chuck_dreamer.policy import Action
 from chuck_dreamer.runtime.backend import FakeBackend
 from chuck_dreamer.runtime.control_loop import ControlLoop
 from chuck_dreamer.runtime.control_mode import ControlMode
+from chuck_dreamer.runtime.control_state import ControlState, FaultFlags
 from chuck_dreamer.runtime.setpoint_channel import SetpointChannel
 from chuck_dreamer.runtime.telemetry import TelemetryQueue
 from chuck_dreamer.runtime.workspace import (
@@ -315,6 +316,34 @@ def test_the_loop_estops_when_the_measured_tip_is_outside_the_box():
     assert _wait_for(lambda: loop.mode is ControlMode.ESTOP)
   finally:
     loop.stop()
+    backend.stop()
+
+
+def test_a_breach_aborts_the_write_on_the_tick_it_is_detected():
+  """A breached tick writes nothing at all, and says why.
+
+  The breach is found in ``_safety_limit``, which runs *after* the mode was
+  taken for this tick -- so the ESTOP it latches only governs the *next* one.
+  Returning ``None`` is what stops the loop spending one further tick of
+  planned motion on an arm already outside the box.
+
+  Asserted here rather than through a running loop because the limiter hands
+  back the measured pose on a breach, so against an echo backend that stray
+  write is indistinguishable from no write at all. It only displaces the arm
+  when an earlier stage has already altered the command -- a stale-measurement
+  clamp, say -- which is exactly when it is least affordable.
+  """
+  backend, loop = _running_loop(_q(0.5, 0.5, 0.5), _limiter())
+  loop.stop()
+  try:
+    st = ControlState(now=time.monotonic(), q=_q(0.5, 0.5, 1.4), q_age=0.0,
+                      faults=FaultFlags.NONE)
+    q_cmd, limits = loop._safety_limit(st, _q(0.5, 0.5, 1.5), np.zeros(_N), np.zeros(_N))
+
+    assert q_cmd is None                      # nothing is written this tick
+    assert limits["ws_breach_m"] == pytest.approx(0.4)
+    assert loop.mode is ControlMode.ESTOP     # and the freeze is latched
+  finally:
     backend.stop()
 
 

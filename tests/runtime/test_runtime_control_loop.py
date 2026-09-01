@@ -183,6 +183,16 @@ def test_loop_rejects_a_nonpositive_rate():
 # running control thread, and resolves only once it has been.
 
 
+def _wait_for(predicate, timeout=2.0):
+  """Poll ``predicate`` until it holds; return whether it did before ``timeout``."""
+  deadline = time.monotonic() + timeout
+  while time.monotonic() < deadline:
+    if predicate():
+      return True
+    time.sleep(0.005)
+  return False
+
+
 def _running(backend=None):
   loop = _loop(backend or FakeBackend(_N, lower=_LOWER, upper=_UPPER))
   loop.start()
@@ -286,6 +296,131 @@ def test_release_after_brake_resumes_normal():
     assert loop.request_brake(timeout=2.0)
     assert loop.release(timeout=2.0)
     assert loop.mode is ControlMode.NORMAL
+  finally:
+    loop.stop()
+
+
+# -- the stop actually stops -------------------------------------------------
+
+
+class _CoastingBackend(FakeBackend):
+  """A backend whose arm keeps drifting after the command stops changing.
+
+  ``FakeBackend`` is a perfect echo: it lands exactly on each command, so the
+  measured position and the commanded one never disagree, and "hold where the
+  arm is" is trivially a fixed point. A real servo does disagree -- momentum,
+  integral windup and gravity carry it past the setpoint -- and that residual
+  motion is what an ESTOP hold re-planned from ``state.q`` feeds back on.
+
+  Modelled as a decaying velocity: each write moves the arm ``alpha`` of the
+  way to the command *and* leaves ``carry`` of that step to be re-applied on
+  the next write, whether or not the command moved. The carry is what a plain
+  first-order lag lacks, and is exactly the term that makes a measurement-
+  chasing hold diverge instead of settle.
+  """
+
+  def __init__(self, *a, alpha=0.5, carry=0.9, **kw):
+    super().__init__(*a, **kw)
+    self._alpha = float(alpha)
+    self._carry = float(carry)
+    self._vel   = np.zeros(self._n)
+
+  def write_positions(self, q):
+    q         = np.asarray(q, dtype=np.float64)
+    here      = self.last_positions()
+    self._vel = self._carry * self._vel + self._alpha * (q - here)
+    super().write_positions(here + self._vel)
+
+
+def test_estop_does_not_creep_a_coasting_arm_forward():
+  """The ESTOP hold is planned once and does not chase the measurement.
+
+  Regression: the hold was re-planned every tick from ``state.q``, so its
+  target was "wherever the arm is now" -- which, against an arm still carrying
+  velocity, is never where it was. Each tick commanded it a little further
+  along and the next tick adopted that as the new hold, so an e-stopped arm
+  ratcheted forward indefinitely instead of stopping. The measured tip walked
+  visibly across the workspace while the loop reported ESTOP throughout.
+
+  The property is *convergence*, not an instant halt: a coasting arm cannot
+  stop dead, so this pins that the residual motion decays toward the latched
+  position rather than accumulating away from it.
+  """
+  backend = _CoastingBackend(_N, lower=_LOWER, upper=_UPPER)
+  channel = SetpointChannel()
+  loop = ControlLoop(_cfg(), backend, channel, TelemetryQueue())
+  loop.start()
+  try:
+    assert _wait_for(lambda: loop.ticks > 0)
+    # Get the arm genuinely moving first: with no velocity to carry there is no
+    # following error, and the ratchet has nothing to feed on.
+    channel.publish(Action(_Obs(t=0.0), q=np.full(_N, 1.5)))
+    assert _wait_for(lambda: backend.last_positions()[0] > 0.1), "arm never got moving"
+    moving = backend.last_positions()
+
+    assert loop.request_estop(timeout=2.0)
+    time.sleep(0.05)                     # let the coast-out settle onto the hold
+    settled = backend.last_positions()
+
+    ticks_before = loop.ticks
+    time.sleep(0.30)
+    assert loop.ticks > ticks_before + 20, "loop did not keep ticking"
+    drift = backend.last_positions() - settled
+
+    # Converging, not ratcheting: under the bug the arm was still travelling in
+    # the direction of motion long after the stop (~1e-2 rad and climbing).
+    assert np.all(drift <= 1e-3), f"arm still creeping forward after the e-stop: {drift}"
+    # And the whole post-stop excursion stays small, rather than the unbounded
+    # walk the re-planned hold produced.
+    assert np.all(np.abs(backend.last_positions() - moving) < 0.01)
+  finally:
+    loop.stop()
+
+
+def test_estop_holds_even_if_the_arm_is_pushed_while_stopped():
+  """A latched hold does not follow an arm that is moved underneath it.
+
+  The counterpart to the creep test: the hold is seeded from the measurement
+  *once*, so a later disturbance is something the servo pulls back against
+  rather than a new setpoint the loop adopts.
+  """
+  backend = _CoastingBackend(_N, lower=_LOWER, upper=_UPPER)
+  loop = ControlLoop(_cfg(), backend, SetpointChannel(), TelemetryQueue())
+  loop.start()
+  try:
+    deadline = time.monotonic() + 1.0
+    while loop.ticks == 0 and time.monotonic() < deadline:
+      time.sleep(0.005)
+    assert loop.request_estop(timeout=2.0)
+    time.sleep(0.02)
+    held = backend.last_positions()
+
+    # Shove the arm away from the hold, then let the loop run on.
+    FakeBackend.write_positions(backend, held + 0.3)
+    time.sleep(0.15)
+
+    # It converges back toward the latched position, and never past it.
+    assert np.all(np.abs(backend.last_positions() - held) < 0.3)
+  finally:
+    loop.stop()
+
+
+def test_estop_ignores_new_setpoints():
+  """The e-stop counterpart of the BRAKED case: a late action is not consumed."""
+  backend = FakeBackend(_N, lower=_LOWER, upper=_UPPER)
+  channel = SetpointChannel()
+  loop = ControlLoop(_cfg(), backend, channel, TelemetryQueue())
+  loop.start()
+  try:
+    deadline = time.monotonic() + 1.0
+    while loop.ticks == 0 and time.monotonic() < deadline:
+      time.sleep(0.005)
+    assert loop.request_estop(timeout=2.0)
+    held = backend.last_positions()
+
+    channel.publish(Action(_Obs(t=1.0), q=np.full(_N, 1.5)))
+    time.sleep(0.05)
+    np.testing.assert_allclose(backend.last_positions(), held, atol=1e-9)
   finally:
     loop.stop()
 

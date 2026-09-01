@@ -186,15 +186,16 @@ class ControlLoop:
       # The Cartesian envelope goes last: it reasons about where the *tip* ends
       # up, so it must see the command that the joint-space limits above have
       # already settled on, not the raw reference.
-      q_cmd, ws               = self._workspace.limit(state.q, q_cmd)
-      limits["ws_scale"]      = ws.scale
-      limits["ws_breach_m"]   = ws.breach_m
+      q_cmd, ws             = self._workspace.limit(state.q, q_cmd)
+      limits["ws_scale"]    = ws.scale
+      limits["ws_breach_m"] = ws.breach_m
       if ws.limited:
         limits["clamped"] = True
       if ws.breached:
         # Measured tip outside the box. No command can undo that, so latch the
         # e-stop (only an explicit release() clears it) and hold where we are.
         self._breach(ws)
+        return None, limits
 
     return q_cmd, limits
 
@@ -213,22 +214,19 @@ class ControlLoop:
         detail=f"ee={np.round(ws.ee_pos, 4).tolist()} outside_by={ws.breach_m:.4f}m; release() required")
 
   def _check_stops(self, mode: ControlMode, entered: bool, trajectory: ControlTrajectory, state: ControlState) -> ControlTrajectory | None:
-    """The trajectory that stops the arm, or ``None`` if it should keep running.
+    """The trajectory that *replaces* the running one, or ``None`` to keep it.
 
     ``entered`` marks the first tick in ``mode`` (see ``ControlModeMachine.take``)
     """
     if mode is ControlMode.ESTOP:
-      return trajectory.stop(state.q)
-
-    if mode is ControlMode.BRAKED:
-      return trajectory                      # already stopped; just keep holding
+      if entered:
+        return trajectory.stop(state.q)
 
     if mode is ControlMode.BRAKING:
       if entered:
         return trajectory.brake()
       if trajectory.stationary:
         self._modes.braked()
-      return trajectory
 
     return None
 
@@ -254,7 +252,7 @@ class ControlLoop:
       mode, entered = self._modes.take()
       if stop_trajectory := self._check_stops(mode, entered, trajectory, state):
         trajectory = stop_trajectory
-      else:
+      elif not mode.stopping:
         action = self._channel.get()
         if action is not None and action != current_action:
           trajectory     = trajectory.update(action, state)

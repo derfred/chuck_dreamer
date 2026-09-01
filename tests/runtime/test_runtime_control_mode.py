@@ -19,6 +19,19 @@ from chuck_dreamer.runtime.control_mode import (
 )
 
 
+def test_only_normal_consumes_setpoints():
+  """``stopping`` is about the stop having been *requested*, not motion ending.
+
+  BRAKING is the case that matters: the arm is still coasting, so it is not
+  "stopped" in any physical sense, but a producer that has not yet noticed the
+  request must not be able to feed it a new setpoint and drive it on.
+  """
+  assert not ControlMode.NORMAL.stopping
+  assert ControlMode.BRAKING.stopping           # still moving, still stopping
+  assert ControlMode.BRAKED.stopping
+  assert ControlMode.ESTOP.stopping
+
+
 def test_starts_normal():
   assert ControlModeMachine().mode is ControlMode.NORMAL
 
