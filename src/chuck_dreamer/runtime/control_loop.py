@@ -249,6 +249,8 @@ class ControlLoop:
         self._telemetry.emit_event("read_degraded", tick=self._ticks, detail=f"{FaultFlags(state.faults)!s} q_age={state.q_age:.4f}")
 
       mode, entered = self._modes.take()
+      if entered:
+        self._telemetry.emit_event("mode_change", tick=self._ticks, detail=f"{mode.name} q_age={state.q_age:.4f}")
       if stop_trajectory := self._check_stops(mode, entered, trajectory, state):
         trajectory = stop_trajectory
       elif not mode.stopping:
