@@ -298,8 +298,8 @@ describe("recording controls (F4.5)", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(screen.getByText("Stop recording")).toBeTruthy();
-    // Backlog indicator surfaces count + oldest age.
-    expect(screen.getByText(/Upload backlog: 1 pending/)).toBeTruthy();
+    // Backlog chip surfaces count + oldest age (only when there IS a backlog).
+    expect(screen.getByText(/1 pending, oldest 2m/)).toBeTruthy();
   });
 
   it("disables the control while starting", async () => {

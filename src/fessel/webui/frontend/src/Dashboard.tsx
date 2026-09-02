@@ -8,26 +8,28 @@
 // Destructive actions (Stop, Power off arm/Jetson) require a confirmation
 // modal whose default focus is Cancel and which is Escape-dismissable — the
 // failure mode guarded against is "clicked Stop by accident, hit Enter".
+//
+// Recording is NOT here: it is an action on the live scene, so it lives in the
+// Monitor video panel's header bar (RecordingControls). Embedded in Monitor,
+// this panel is fed the shared state poll via `injectedState`; rendered
+// standalone it keeps its own poll and still shows the recording controls, so
+// the page works on its own.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AnomalyLogEntry, Capabilities, StateResponse } from "../../shared/schemas";
+import type { AnomalyLogEntry, StateResponse } from "../../shared/schemas";
 import {
   AuthError,
   ControlError,
   fetchAnomalies,
-  fetchCapabilities,
-  fetchState,
   postControl,
   reauthenticate,
-  startRecording,
-  stopRecording,
   type ControlAction,
 } from "./api";
 import { config } from "./config";
 import { navigate } from "./nav";
-import { RecordModal } from "./RecordModal";
+import { RecordingControls } from "./RecordingControls";
 import { Sparkline } from "./Sparkline";
-import { useAnomalies } from "./useAnomalies";
+import { useMonitorState, type MonitorState } from "./useMonitorState";
 
 type ButtonStatus =
   | { kind: "idle" }
@@ -108,52 +110,23 @@ const ACTION_GROUPS: ActionGroup[] = [
 // heading and outer padding — used inside the Monitor side rail. Standalone
 // (default) keeps the original page chrome so the direct-render tests are
 // unaffected.
-export function Dashboard({ embedded = false }: { embedded?: boolean } = {}) {
-  const [state, setState] = useState<StateResponse | null>(null);
-  const [stateError, setStateError] = useState<boolean>(false);
+export function Dashboard({
+  embedded = false,
+  injectedState,
+}: { embedded?: boolean; injectedState?: MonitorState } = {}) {
   const [statuses, setStatuses] = useState<Record<string, ButtonStatus>>({});
   const [pending, setPending] = useState<ActionDef | null>(null);
-  // A short client-side history of the activity score (F5.1 sparkline). Capped
-  // at ~60 samples (= ~60s at the 1Hz-ish state poll); a ring, oldest dropped.
-  const [activityHistory, setActivityHistory] = useState<number[]>([]);
 
   const setStatus = useCallback((action: string, s: ButtonStatus) => {
     setStatuses((prev) => ({ ...prev, [action]: s }));
   }, []);
 
   // --- state polling (F3.4) --------------------------------------------------
-  useEffect(() => {
-    let cancelled = false;
-    const poll = () => {
-      fetchState()
-        .then((s) => {
-          if (cancelled) return;
-          setState(s);
-          setStateError(false);
-          // Append the latest activity score to the sparkline history (F5.1/F5.4).
-          const score = s.vision?.activity_score_ema;
-          if (typeof score === "number") {
-            setActivityHistory((h) => [...h, score].slice(-60));
-          }
-        })
-        .catch((e) => {
-          if (cancelled) return;
-          // 401 -> session lapsed; hand off to the proxy login (do NOT loop).
-          if (e instanceof AuthError) {
-            reauthenticate();
-            return;
-          }
-          // 5xx/network -> transient banner; keep the last-known state on screen.
-          setStateError(true);
-        });
-    };
-    poll();
-    const id = window.setInterval(poll, config.statePollMs);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, []);
+  // Embedded in Monitor the page already polls once and passes the result in;
+  // standalone we poll ourselves. The hook is called unconditionally (rules of
+  // hooks) and its result simply ignored when a state was injected.
+  const ownState = useMonitorState();
+  const { state, error: stateError, activityHistory } = injectedState ?? ownState;
 
   // --- issuing an action (F3.2) ---------------------------------------------
   const run = useCallback(
@@ -248,149 +221,19 @@ export function Dashboard({ embedded = false }: { embedded?: boolean } = {}) {
         ))}
       </div>
 
-      <h2 style={{ fontSize: 16, marginTop: 24 }}>Recording</h2>
-      <RecordingControls recording={state?.recording} />
-      <BacklogIndicator backlog={state?.upload_backlog} />
+      {/* Embedded, recording lives in the Monitor video header instead. */}
+      {!embedded && (
+        <>
+          <h2 style={{ fontSize: 16, marginTop: 24 }}>Recording</h2>
+          <RecordingControls recording={state?.recording} backlog={state?.upload_backlog} />
+        </>
+      )}
 
       {pending && (
         <ConfirmModal def={pending} onCancel={() => setPending(null)} onConfirm={confirm} />
       )}
     </div>
   );
-}
-
-// --- recording controls (F4.5 + ring-buffer look-back reframe) ---------------
-// Start/Stop derived from /api/state's `recording` field. Idle -> "Record…"
-// opens the look-back dialog (RecordModal: pick how far to reach back into the
-// on-Pi ring + upload-when-done; NO resolution picker — that's a deploy
-// setting). recording -> "Stop recording" (red). starting/stopping -> disabled.
-
-function RecordingControls({ recording }: { recording: StateResponse["recording"] | undefined }) {
-  const [maxLookback, setMaxLookback] = useState<number>(0);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const anomalies = useAnomalies();
-
-  useEffect(() => {
-    fetchCapabilities()
-      .then((c: Capabilities) => setMaxLookback(c.max_lookback_seconds))
-      .catch((e) => {
-        if (e instanceof AuthError) reauthenticate();
-      });
-  }, []);
-
-  const state = recording?.state ?? "idle";
-
-  const onConfirm = useCallback(
-    (opts: { lookbackSeconds: number; uploadWhenDone: boolean }) => {
-      setBusy(true);
-      setError(null);
-      startRecording(opts)
-        .then(() => {
-          setBusy(false);
-          setModalOpen(false);
-        })
-        .catch((e) => {
-          if (e instanceof AuthError) {
-            reauthenticate();
-            return;
-          }
-          setBusy(false);
-          setError(e instanceof ControlError ? e.message : String(e));
-        });
-    },
-    [],
-  );
-
-  const onStop = useCallback(() => {
-    setBusy(true);
-    setError(null);
-    stopRecording()
-      .then(() => setBusy(false))
-      .catch((e) => {
-        if (e instanceof AuthError) {
-          reauthenticate();
-          return;
-        }
-        setBusy(false);
-        setError(e instanceof ControlError ? e.message : String(e));
-      });
-  }, []);
-
-  const transitioning = state === "starting" || state === "stopping" || busy;
-
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-      {state === "idle" ? (
-        <button onClick={() => setModalOpen(true)} disabled={maxLookback <= 0}>
-          Record…
-        </button>
-      ) : state === "recording" ? (
-        <button
-          onClick={onStop}
-          disabled={transitioning}
-          style={{ background: "#b22222", color: "#fff", padding: "6px 12px" }}
-        >
-          {busy ? "…" : "Stop recording"}
-        </button>
-      ) : (
-        <button disabled style={{ padding: "6px 12px" }}>
-          {state === "starting" ? "Starting…" : "Stopping…"}
-        </button>
-      )}
-      <span style={{ color: "#666", fontFamily: "monospace", fontSize: 13 }}>
-        state: {state}
-        {recording?.active_recording_id ? ` (${recording.active_recording_id})` : ""}
-      </span>
-      {error && <span style={{ color: "crimson", fontSize: 12 }}>{error}</span>}
-
-      {modalOpen && (
-        <RecordModal
-          maxLookbackSeconds={maxLookback}
-          anomalies={anomalies}
-          busy={busy}
-          onCancel={() => setModalOpen(false)}
-          onConfirm={onConfirm}
-        />
-      )}
-    </div>
-  );
-}
-
-// --- upload backlog indicator (F4.5) ----------------------------------------
-// Plain text count + oldest-pending age. Becomes alert-styled once it crosses
-// the Slice-7 thresholds (the architecture's "oldest pending > 3h" P2); for now
-// it is informational.
-
-const BACKLOG_ALERT_SECONDS = 3 * 3600;
-
-function BacklogIndicator({ backlog }: { backlog: StateResponse["upload_backlog"] | undefined }) {
-  const count = backlog?.count ?? 0;
-  const oldest = backlog?.oldest_pending_seconds ?? null;
-  const alert = oldest != null && oldest > BACKLOG_ALERT_SECONDS;
-  return (
-    <p
-      style={{
-        marginTop: 8,
-        fontSize: 13,
-        color: alert ? "#fff" : "#666",
-        background: alert ? "#b22222" : "transparent",
-        display: "inline-block",
-        padding: alert ? "2px 8px" : 0,
-      }}
-      role={alert ? "alert" : undefined}
-    >
-      Upload backlog: {count} pending
-      {oldest != null ? `, oldest ${fmtAge(oldest)}` : ""}
-    </p>
-  );
-}
-
-function fmtAge(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  return `${Math.floor(seconds / 3600)}h`;
 }
 
 // --- sensing strip (F5.1) ----------------------------------------------------

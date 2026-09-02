@@ -1,8 +1,11 @@
 // MonitorVideo tests: the Stream On/Off toggle and its bandwidth framing.
 //   - defaults to OFF (0 bandwidth) — opening Monitor must not open a stream;
-//   - turning the stream on flips to the live cost tag and opens a WebRTC
-//     session (the PC is created);
+//   - turning the stream on opens a WebRTC session (the PC is created);
 //   - turning it back off tears the live session down (the PC is closed).
+//
+// The bar carries no stream cost badge any more (the toggle's own pressed
+// state says whether the stream is on); its right-hand side is the recording
+// control, so the on/off assertions key off aria-pressed + the PC lifecycle.
 //
 // jsdom has no WebRTC, so we install the fake RTC peer + a WHEP-shaped fetch;
 // the assertions stay on the toggle/cost DOM + PC lifecycle.
@@ -52,13 +55,15 @@ describe("stream on/off toggle", () => {
     expect(screen.getByRole("button", { name: "Stream On" }).getAttribute("aria-pressed")).toBe(
       "false",
     );
-    expect(screen.getByText(/0 bandwidth/)).toBeTruthy();
+    // The recording control shares the header bar and is independent of the
+    // stream: it is available with the stream off.
+    expect(screen.getByText("Record…")).toBeTruthy();
     // The resting stage offers to turn the stream on; no stream is running.
     expect(screen.getByText("Turn stream on")).toBeTruthy();
     expect(createdPcs.length).toBe(0);
   });
 
-  it("turning the stream on shows the live cost tag and opens a WebRTC session", async () => {
+  it("turning the stream on opens a WebRTC session", async () => {
     render(<MonitorVideo />);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Stream On" }));
@@ -67,7 +72,6 @@ describe("stream on/off toggle", () => {
     expect(screen.getByRole("button", { name: "Stream On" }).getAttribute("aria-pressed")).toBe(
       "true",
     );
-    expect(screen.getByText(/WebRTC · live/)).toBeTruthy();
     expect(createdPcs.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -91,8 +95,10 @@ describe("stream on/off toggle", () => {
       fireEvent.click(screen.getByRole("button", { name: "Stream Off" }));
     });
     await tick(0);
-    // Back off: 0-bandwidth tag restored, and the WebRTC PC was closed on unmount.
-    expect(screen.getByText(/0 bandwidth/)).toBeTruthy();
+    // Back off: the toggle reads Off again and the WebRTC PC was closed on unmount.
+    expect(screen.getByRole("button", { name: "Stream Off" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
     expect(pc.closed).toBe(true);
   });
 });

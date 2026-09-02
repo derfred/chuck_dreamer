@@ -1,4 +1,12 @@
-// Monitor video panel: the live WebRTC view with a Stream On/Off toggle above it.
+// Monitor video panel: the live WebRTC view with a Stream On/Off toggle above
+// it and, on the right of the same bar, the recording controls.
+//
+// The header bar reads left-to-right as "what am I watching" -> "what am I
+// capturing": the stream toggle governs bandwidth, the recording chip governs
+// the ring-buffer capture. They are independent — recording runs on the Pi
+// whether or not anyone is watching — so the bar deliberately shows no stream
+// cost badge; the toggle's own pressed state already says whether the stream
+// is on.
 //
 // The ring buffer lives on the Pi behind the cellular link, so it is NEVER
 // streamed back for viewing — its only role is retroactive capture (the record
@@ -9,8 +17,10 @@
 // navigate-away (unmount).
 
 import { useEffect, useRef, useState } from "react";
+import type { StateResponse } from "../../shared/schemas";
 import { AuthError, fetchSnapshotMeta, reauthenticate } from "./api";
 import { config } from "./config";
+import { RecordingControls } from "./RecordingControls";
 import { useLiveSession } from "./useLiveSession";
 
 const SPINNER: Partial<Record<string, string>> = {
@@ -19,7 +29,13 @@ const SPINNER: Partial<Record<string, string>> = {
   WaitingForVideo: "Waiting for video…",
 };
 
-export function MonitorVideo() {
+export function MonitorVideo({
+  recording,
+  backlog,
+}: {
+  recording?: StateResponse["recording"];
+  backlog?: StateResponse["upload_backlog"];
+} = {}) {
   // Default OFF: opening Monitor must not open a stream. The operator turns the
   // live view on when they want it (and pays the bandwidth then, not before).
   const [streamOn, setStreamOn] = useState(false);
@@ -35,7 +51,7 @@ export function MonitorVideo() {
         }}
       >
         <StreamToggle on={streamOn} onChange={setStreamOn} />
-        <CostTag on={streamOn} />
+        <RecordingControls recording={recording} backlog={backlog} />
       </div>
       {streamOn ? <LiveStage /> : <StreamOffStage onTurnOn={() => setStreamOn(true)} />}
     </div>
@@ -98,24 +114,6 @@ function SegButton({
     >
       {label}
     </button>
-  );
-}
-
-function CostTag({ on }: { on: boolean }) {
-  return (
-    <span
-      style={{
-        marginLeft: "auto",
-        fontSize: 12,
-        fontWeight: 600,
-        padding: "3px 9px",
-        borderRadius: 999,
-        color: on ? "#c2410c" : "#8a9895",
-        background: on ? "#fdf1ec" : "#eef1f3",
-      }}
-    >
-      {on ? "⚡ WebRTC · live" : "◇ stream off · 0 bandwidth"}
-    </span>
   );
 }
 
