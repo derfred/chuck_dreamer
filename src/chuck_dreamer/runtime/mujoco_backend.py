@@ -37,6 +37,7 @@ class MujocoBackend(InstantReadMixin):
     viewer: bool = False,
     realtime: bool = True,
     render_size: tuple[int, int] | None = None,
+    home_qpos: np.ndarray | list[float] | None = None,
   ) -> None:
     self._scene          = scene
     self._viewer_enabled = viewer
@@ -64,7 +65,11 @@ class MujocoBackend(InstantReadMixin):
 
     # Initialise to the scene's home pose, holding it (ctrl == qpos) so the
     # position actuators don't drive back to zero (mirrors Controller.reset_initial_qpos).
-    q0                             = np.asarray(scene.joint_initial_qpos, dtype=np.float64)
+    # An explicit `home_qpos` overrides the scene's, so a run can share one rest
+    # pose with another backend (e.g. matching FakeBackend during envelope tests).
+    q0 = np.asarray(scene.joint_initial_qpos if home_qpos is None else home_qpos, dtype=np.float64)
+    if q0.shape != (self._n,):
+      raise ValueError(f"home_qpos must have shape ({self._n},); got {q0.shape}")
     self._home                     = q0.copy()
     self.data.qpos[self._qpos_adr] = q0
     self.data.qvel[self._dof_adr]  = 0.0
@@ -75,13 +80,17 @@ class MujocoBackend(InstantReadMixin):
     self._thread: threading.Thread | None = None
 
   @classmethod
-  def from_config(cls, cfg, *, viewer: bool = False, realtime: bool = True) -> MujocoBackend:
+  def from_config(
+    cls, cfg, *, viewer: bool = False, realtime: bool = True, home_qpos=None,
+  ) -> MujocoBackend:
     """Build from the project config, sampling a scene via ``SceneGenerator``."""
     from ..sim.scene_generator import SceneGenerator
 
     scene = SceneGenerator(cfg).sample()
     h, w  = (int(x) for x in str(cfg.env.render_size).lower().split("x"))
-    return cls(scene, viewer=viewer, realtime=realtime, render_size=(h, w))
+    return cls(
+      scene, viewer=viewer, realtime=realtime, render_size=(h, w),
+      home_qpos=None if home_qpos is None else list(home_qpos))
 
   # -- backend protocol -----------------------------------------------------
 
