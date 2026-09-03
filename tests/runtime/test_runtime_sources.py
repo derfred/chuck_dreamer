@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from omegaconf import OmegaConf
 
 from chuck_dreamer.runtime.modalities import RuntimeObservation
 from chuck_dreamer.policy import Action
@@ -49,6 +50,21 @@ def test_go_to_pose_act_reads_obs_time():
   p = GoToPose(q_goal=np.array([2.0]), duration_s=2.0)
   p.reset(np.array([0.0]))
   np.testing.assert_allclose(p.act(_obs(1.0)).q, [1.0])
+
+
+def test_go_to_pose_none_goal_holds_the_reset_pose():
+  # `q_goal: null` in config means "go to wherever reset anchors us" -- the
+  # runtime resets against the backend's home pose, so this replaces the old
+  # "home" sentinel without the harness resolving anything.
+  p = GoToPose(q_goal=None, duration_s=2.0)
+  p.reset(np.array([0.7, -0.2]))
+  np.testing.assert_allclose(p.target_at(0.0), [0.7, -0.2])
+  np.testing.assert_allclose(p.target_at(5.0), [0.7, -0.2])
+
+
+def test_go_to_pose_none_goal_before_reset_raises():
+  with pytest.raises(RuntimeError, match="reset"):
+    GoToPose(q_goal=None, duration_s=1.0).target_at(0.0)
 
 
 def test_go_to_pose_rejects_bad_duration():
@@ -112,6 +128,36 @@ def test_reset_rejects_scene_without_qpos():
   p = SineSweep(amplitude=1.0, freq_hz=0.5)
   with pytest.raises(ValueError, match="joint_initial_qpos"):
     p.reset(scene)
+
+# -- constructed straight from config ----------------------------------------
+
+
+def test_params_accept_omegaconf_lists():
+  """Constructors are fed ``runtime.policy.params`` verbatim, so a per-joint
+  YAML list arrives as a ListConfig, not a sequence numpy understands."""
+  params = OmegaConf.create({"amplitude": [1.0, 2.0], "freq_hz": 0.5,
+                             "phase": [0.0, np.pi / 2]})
+  p = SineSweep(amplitude=params.amplitude, freq_hz=params.freq_hz,
+                phase=params.phase)
+  p.reset(np.zeros(2))
+  # joint 0 at t=0 sits at center; joint 1 is a quarter period ahead -> at peak.
+  np.testing.assert_allclose(p.target_at(0.0), [0.0, 2.0], atol=1e-12)
+
+
+def test_go_to_pose_accepts_omegaconf_goal():
+  cfg = OmegaConf.create({"q_goal": [1.0, 2.0]})
+  p = GoToPose(q_goal=cfg.q_goal, duration_s=1.0)
+  p.reset(np.zeros(2))
+  np.testing.assert_allclose(p.target_at(1.0), [1.0, 2.0])
+
+
+@pytest.mark.parametrize("factory", [GoToPose, SineSweep, ManualPolicy])
+def test_constructs_with_no_params(factory):
+  """`target:` with no `params:` must construct -- every parameter has a default."""
+  policy = factory()
+  policy.reset(np.zeros(3))
+  assert policy.act(_obs(0.1, n=3)).q.shape == (3,)
+
 
 # -- the Action contract -----------------------------------------------------
 

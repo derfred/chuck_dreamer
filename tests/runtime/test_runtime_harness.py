@@ -49,6 +49,16 @@ def _cfg(tmp_path: Path, **runtime_overrides):
   return cfg
 
 
+class _ZeroPolicy:
+  """A custom out-of-tree policy, to prove `policy.target` takes any path."""
+
+  def reset(self, start):
+    self._n = len(np.asarray(start))
+
+  def act(self, obs):
+    return Action(obs, q=np.zeros(self._n))
+
+
 def _runtime_threads():
   return [t for t in threading.enumerate() if t.name.startswith("runtime-")]
 
@@ -215,12 +225,52 @@ def test_simulated_sigint_shuts_down_and_flushes(tmp_path, fake_rerun):
   assert _runtime_threads() == []
 
 
+# -- policy construction is one registry path --------------------------------
+
+
+def test_policy_built_from_registry_spec(tmp_path):
+  # The scripted policies get no special case: they are constructed by the same
+  # {target, params} path a learned policy will use at M6.
+  from chuck_dreamer.runtime.sources import GoToPose
+
+  rt = Runtime(_cfg(tmp_path, policy={
+    "target": "chuck_dreamer.runtime.sources:GoToPose",
+    "params": {"q_goal": None, "duration_s": 1.0}}))
+  assert isinstance(rt.policy, GoToPose)
+
+
+def test_policy_target_can_be_any_import_path(tmp_path):
+  rt = Runtime(_cfg(tmp_path, policy={"target": f"{__name__}:_ZeroPolicy",
+                                      "params": {}}))
+  assert isinstance(rt.policy, _ZeroPolicy)
+
+
+def test_policy_params_the_target_cannot_take_are_dropped(tmp_path, caplog):
+  # OmegaConf merges key-wise, so switching target leaves the previous policy's
+  # params behind. Building must warn and ignore them, not crash.
+  from chuck_dreamer.runtime.sources import ManualPolicy
+
+  with caplog.at_level(logging.WARNING):
+    rt = Runtime(_cfg(tmp_path, policy={
+      "target": "chuck_dreamer.runtime.sources:ManualPolicy"}))
+  assert isinstance(rt.policy, ManualPolicy)
+  assert "amplitude" in caplog.text
+
+
+def test_policy_without_target_fails_loudly(tmp_path):
+  cfg = _cfg(tmp_path)
+  cfg.runtime.policy = OmegaConf.create({"params": {}})
+  with pytest.raises(ValueError, match="target"):
+    Runtime(cfg)
+
+
 def test_out_of_envelope_sweep_is_clamped_every_tick(tmp_path, fake_rerun):
   # Sine amplitude far exceeds the joint box -> every commanded position must
   # stay in-box and clamp events must appear.
   cfg = _cfg(
     tmp_path,
-    source={"kind": "sine_sweep", "sine_sweep": {"amplitude": 50.0, "freq_hz": 2.0, "phase": 0.0}},
+    policy={"target": "chuck_dreamer.runtime.sources:SineSweep",
+            "params": {"amplitude": 50.0, "freq_hz": 2.0, "phase": 0.0}},
     safety={"max_velocity": 1000.0},  # let it race to the boundary fast
   )
   rt = Runtime(cfg)

@@ -199,8 +199,8 @@ runtime:
   #   target: "chuck_dreamer.runtime.feetech_backend:FeetechBackend"
   #   params: { port: "/dev/tty.usbmodemXXX", calibration_id: null,
   #             # Required: the arm's rest pose (radians, follower order). It
-  #             # anchors the scripted sources and resolves the
-  #             # `source.go_to_pose.q_goal: "home"` sentinel. A real arm's rest
+  #             # anchors every policy's reset (GoToPose's `q_goal: null`
+  #             # resolves to it). A real arm's rest
   #             # pose is a physical choice, so there is no default -- set it to
   #             # the pose you actually want the arm to sit at, inside the
   #             # joint_limits box below.
@@ -278,20 +278,26 @@ runtime:
 
   # Modalities the session declares it needs (spec §9.1 step 5). Startup raises
   # if any are unproduced by the sensors + perception above. Empty for the
-  # scripted M3 sources (they need only t / q_meas); a real policy unions in its
-  # declared obs-space at M6.
+  # scripted M3 policies (they need only t / q_meas); a learned policy unions in
+  # its declared obs-space at M6.
   required_modalities: []
 
-  # Scripted setpoint source (M1; replaced by the policy at M6).
-  source:
-    kind: "sine_sweep"        # "go_to_pose" | "sine_sweep" | "manual" | custom import path
-    go_to_pose:
-      q_goal: "home"          # "home" or an explicit per-joint list
-      duration_s: 3.0
-    sine_sweep:
+  # The setpoint producer. One registry spec ({target, params}) for every
+  # policy -- the scripted M1 ones below and a learned Dreamer actor at M6 are
+  # constructed identically; there is no scripted-vs-learned distinction.
+  # Params a policy does not accept are dropped with a warning, so switching
+  # `target` without rewriting `params` works.
+  policy:
+    target: "chuck_dreamer.runtime.sources:SineSweep"
+    params:
       amplitude: 0.3          # rad; scalar (all joints) or per-joint list
       freq_hz:   0.25         # Hz; scalar or per-joint
       phase:     0.0          # rad; scalar or per-joint
+    # Ramp to a pose and hold:
+    #   target: "chuck_dreamer.runtime.sources:GoToPose"
+    #   params: { q_goal: null, duration_s: 3.0 }   # null -> the reset (home) pose
+    # Pass-through teleop (reads the leader_qpos modality; holds without one):
+    #   target: "chuck_dreamer.runtime.sources:ManualPolicy"
 
   leader:
     enabled: false   # start the reader whenever a leader is configured

@@ -322,7 +322,19 @@ def test_lerobot_reader_returns_none_if_it_never_succeeded(stub_lerobot):
     r.stop()
 
 
-# -- End-to-end Runtime with manual source + FakeLeaderReader ----------------
+# -- End-to-end Runtime with ManualPolicy + FakeLeaderReader -----------------
+
+
+def _manual_policy() -> dict:
+  """Runtime overrides selecting ManualPolicy.
+
+  ``params: {}`` is not redundant: OmegaConf merges the runtime block key-wise,
+  so the default config's SineSweep params would otherwise survive the target
+  swap. The harness drops them with a warning either way; clearing them here
+  keeps these tests off that path.
+  """
+  return {"policy": {"target": "chuck_dreamer.runtime.sources:ManualPolicy",
+                     "params": {}}}
 
 
 def _manual_cfg(tmp_path: Path, pose, **runtime_overrides):
@@ -334,7 +346,7 @@ def _manual_cfg(tmp_path: Path, pose, **runtime_overrides):
     "sensors": [],   # FakeBackend has no MuJoCo scene for SimCameraSensor
     "logging": {"rerun": {"rrd_dir": str(tmp_path / "rrd")}},
     "viewer": {"enabled": False},
-    "source": {"kind": "manual"},
+    **_manual_policy(),
     "leader": {
       "enabled": True,
       "target": "chuck_dreamer.runtime.teleop:FakeLeaderReader",
@@ -478,16 +490,16 @@ def _build_only_cfg(tmp_path, **runtime_overrides):
 
 def test_build_leader_none_when_disabled(tmp_path):
   # Default config has the leader block present but disabled -> no reader.
-  rt = Runtime(_build_only_cfg(tmp_path, source={"kind": "manual"}))
+  rt = Runtime(_build_only_cfg(tmp_path, **_manual_policy()))
   assert rt.leader is None
 
 
 def test_build_leader_decoupled_from_policy(tmp_path):
-  # An enabled leader builds the reader even with a *scripted* source: the
+  # An enabled leader builds the reader even with a *scripted* policy: the
   # leader is a sensor, not tied to ManualPolicy.
   rt = Runtime(_build_only_cfg(
     tmp_path,
-    source={"kind": "sine_sweep"},
+    policy={"target": "chuck_dreamer.runtime.sources:SineSweep"},
     leader={"enabled": True, "target": "chuck_dreamer.runtime.teleop:FakeLeaderReader",
             "params": {"pose": None}},
   ))
@@ -501,7 +513,7 @@ def test_build_leader_survives_params_leaked_from_target_swap(tmp_path):
   # jaw bounds must be injected on the from_config path too.
   rt = Runtime(_build_only_cfg(
     tmp_path,
-    source={"kind": "manual"},
+    **_manual_policy(),
     leader={"enabled": True,
             "target": "chuck_dreamer.runtime.teleop:LerobotLeaderReader",
             "params": {"pose": None, "port": "/dev/ttyFAKE"}},
@@ -520,16 +532,16 @@ def test_build_leader_real_reader_requires_port(tmp_path):
   with pytest.raises(ValueError, match="port"):
     Runtime(_build_only_cfg(
       tmp_path,
-      source={"kind": "manual"},
+      **_manual_policy(),
       leader={"enabled": True,
               "target": "chuck_dreamer.runtime.teleop:LerobotLeaderReader",
               "params": {}},
     ))
 
 
-def test_manual_source_without_leader_holds(tmp_path):
-  # source.kind=manual no longer requires a leader; ManualPolicy just holds.
-  rt = Runtime(_build_only_cfg(tmp_path, source={"kind": "manual"}))
+def test_manual_policy_without_leader_holds(tmp_path):
+  # ManualPolicy no longer requires a leader; it just holds.
+  rt = Runtime(_build_only_cfg(tmp_path, **_manual_policy()))
   assert rt.leader is None
   assert isinstance(rt.policy, ManualPolicy)
 

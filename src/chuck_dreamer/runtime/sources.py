@@ -8,6 +8,13 @@ loop calls ``reset`` once then ``act(obs)`` each step, exactly as it will for
 Dreamer at M6. Swapping in a different policy is a config change, no new loop
 code.
 
+That extends to construction: the harness builds these through the same
+``{target, params}`` registry path as any other policy (``runtime.policy``),
+so there is no scripted-vs-learned branch anywhere. Their constructors take
+config values directly — a scalar or a per-joint list, ``OmegaConf`` wrappers
+included — and every parameter has a default, so a bare ``target:`` with no
+``params`` constructs.
+
 Each scripted policy is a pure function of its own elapsed clock: ``act``
 reads ``obs.t`` (seconds since :meth:`reset`) and ignores everything else, so
 the trajectory is asserted in tests without threads. The underlying time →
@@ -26,6 +33,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 import numpy as np
+from omegaconf import OmegaConf
 
 from ..policy import Action
 from .modalities import RuntimeObservation
@@ -41,32 +49,54 @@ def _start_qpos(scene_or_q0: Any) -> np.ndarray:
   return np.asarray(scene_or_q0, dtype=np.float64)
 
 
+def _param(value: Any) -> Any:
+  """Normalize one registry ``params`` value: unwrap OmegaConf, keep scalars.
+
+  These policies are constructed straight from ``runtime.policy.params``, so a
+  per-joint YAML list arrives as a ``ListConfig`` rather than a sequence numpy
+  understands. Scalars pass through untouched so the broadcast-to-joint-count
+  path in :class:`SineSweep` still works.
+  """
+  if OmegaConf.is_config(value):
+    return np.asarray(OmegaConf.to_container(value, resolve=True), dtype=np.float64)
+  return value
+
+
 class GoToPose:
   """Linearly interpolate from the reset pose to ``q_goal`` over ``duration_s``.
 
   Holds ``q_goal`` once ``t >= duration_s``. ``q_goal`` may be a per-joint
-  list/array; pass it resolved (the harness turns the config ``"home"``
-  sentinel into the home qpos before constructing the policy).
+  list/array, or ``None`` to mean "wherever :meth:`reset` anchors us" — the
+  runtime resets against the backend's home pose, so ``q_goal: null`` is how
+  config says "go to home" without the harness having to resolve a sentinel on
+  the policy's behalf.
   """
 
-  def __init__(self, q_goal: np.ndarray, duration_s: float) -> None:
-    self._q_goal = np.asarray(q_goal, dtype=np.float64)
+  def __init__(self, q_goal: Any = None, duration_s: float = 3.0) -> None:
+    q_goal = _param(q_goal)
+    self._q_goal: np.ndarray | None = (
+      None if q_goal is None else np.asarray(q_goal, dtype=np.float64))
     if duration_s <= 0:
       raise ValueError("duration_s must be positive")
     self._duration = float(duration_s)
-    self._q0 = np.zeros_like(self._q_goal)
+    self._q0 = np.zeros(0) if self._q_goal is None else np.zeros_like(self._q_goal)
 
   def reset(self, scene_or_q0: Any) -> None:
     q0 = _start_qpos(scene_or_q0)
-    if q0.shape != self._q_goal.shape:
+    if self._q_goal is None:
+      # "Go to where we started": a hold, so the shape check below is moot.
+      self._q_goal = q0.copy()
+    elif q0.shape != self._q_goal.shape:
       raise ValueError(
         f"start pose shape {q0.shape} != q_goal shape {self._q_goal.shape}")
     self._q0 = q0.copy()
 
   def target_at(self, t: float) -> np.ndarray:
     """Joint target at ``t`` seconds since :meth:`reset` (pure)."""
+    if self._q_goal is None:
+      raise RuntimeError("GoToPose.target_at called before reset")
     frac = 1.0 if t >= self._duration else max(0.0, t) / self._duration
-    return self._q0 + frac * (self._q_goal - self._q0)
+    return cast(np.ndarray, self._q0 + frac * (self._q_goal - self._q0))
 
   def act(self, obs: RuntimeObservation) -> Action:
     return Action(obs, q=self.target_at(obs.t))
@@ -116,14 +146,15 @@ class SineSweep:
 
   def __init__(
     self,
-    amplitude: float | np.ndarray,
-    freq_hz: float | np.ndarray,
+    amplitude: float | np.ndarray = 0.3,
+    freq_hz: float | np.ndarray = 0.25,
     phase: float | np.ndarray = 0.0,
     center: np.ndarray | None = None,
   ) -> None:
-    self._amp = np.asarray(amplitude, dtype=np.float64)
-    self._freq = np.asarray(freq_hz, dtype=np.float64)
-    self._phase = np.asarray(phase, dtype=np.float64)
+    self._amp = np.asarray(_param(amplitude), dtype=np.float64)
+    self._freq = np.asarray(_param(freq_hz), dtype=np.float64)
+    self._phase = np.asarray(_param(phase), dtype=np.float64)
+    center = _param(center)
     self._center_cfg = None if center is None else np.asarray(center, dtype=np.float64)
     self._center: np.ndarray | None = self._center_cfg
 

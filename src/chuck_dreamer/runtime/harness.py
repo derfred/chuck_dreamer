@@ -6,11 +6,13 @@ from ``cfg.runtime``, then owns their lifecycle. A SIGINT handler
 (installed on the main thread) sets a shutdown event; the main thread waits
 on it (or drives the viewer when enabled) and runs the ordered shutdown.
 
-The producer is a :class:`~chuck_dreamer.policy.Policy` (M0/M1 ships the
-scripted :class:`~chuck_dreamer.runtime.sources.GoToPose` /
-:class:`~chuck_dreamer.runtime.sources.SineSweep`; M6 swaps in Dreamer via
-config). :class:`PolicyLoop` calls ``policy.act(obs)`` each step with a
-:class:`RuntimeObservation` carrying elapsed time and the control loop's own
+The producer is a :class:`~chuck_dreamer.policy.Policy`, built from
+``runtime.policy`` by the same ``{target, params}`` registry path as the
+backend (M0/M1 ships the scripted
+:class:`~chuck_dreamer.runtime.sources.GoToPose` /
+:class:`~chuck_dreamer.runtime.sources.SineSweep`; M6 swaps in Dreamer by
+pointing that target elsewhere). :class:`PolicyLoop` calls ``policy.act(obs)``
+each step with a :class:`RuntimeObservation` carrying elapsed time and the control loop's own
 measurement of the arm.
 
 Shutdown ordering (project plan): stop the policy loop first (no new
@@ -21,6 +23,7 @@ the "flushed logs" guarantee).
 
 from __future__ import annotations
 
+import inspect
 import logging
 import signal
 import threading
@@ -43,7 +46,6 @@ from .modalities import (
 from .perception import PerceptionPipeline
 from .registry import construct, import_symbol
 from .rerun_sink import RerunSink
-from .sources import GoToPose, ManualPolicy, SineSweep
 from .telemetry import TelemetryQueue
 
 if TYPE_CHECKING:
@@ -151,7 +153,7 @@ class Runtime:
 
     self.control_loop = ControlLoop(build_control_config(rt_cfg, n_joints=n_joints), self.backend, self.channel, self.telemetry)
     self.policy       = self._build_policy(rt_cfg)
-    self.leader       = self._build_leader(rt_cfg)  # None unless source.kind == "manual"
+    self.leader       = self._build_leader(rt_cfg)
 
     # 4. Observation half (M3): sensors + perception pipeline, then compose the
     #    active modality set and fail fast (spec §9.1 step 4-5) before any thread
@@ -219,32 +221,17 @@ class Runtime:
     return cast(RobotBackend, construct(spec))
 
   def _build_policy(self, rt: DictConfig) -> Policy:
-    kind = str(rt.source.kind)
-    if kind == "go_to_pose":
-      g    = rt.source.go_to_pose
-      home = self.backend.home_qpos
-      goal = home if g.q_goal == "home" else _to_array(g.q_goal, len(home))
-      return GoToPose(q_goal=goal, duration_s=float(g.duration_s))
-    if kind == "sine_sweep":
-      s = rt.source.sine_sweep
-      return SineSweep(
-        amplitude=_scalar_or_array(s.amplitude),
-        freq_hz=_scalar_or_array(s.freq_hz),
-        phase=_scalar_or_array(s.phase),
-      )
-    if kind == "manual":
-      # Pass-through teleop. Reads the leader modality off the obs when a leader
-      # is enabled (built independently in _build_leader); holds otherwise.
-      return ManualPolicy()
-    # Anything else is a registry import path to a custom Policy.
-    return cast(Policy, construct(kind))
+    spec    = _registry_spec(rt.get("policy"))
+    factory = import_symbol(spec["target"])
+    params  = _accepted_params(factory, spec["params"], spec["target"])
+    return cast(Policy, construct({"target": spec["target"], "params": params}))
 
   def _build_leader(self, rt: DictConfig) -> "LeaderReader | None":
     """Construct the leader-reader when a leader is enabled, else None.
 
     The leader is a *sensor*, decoupled from the policy: it is read and exposed
     as the ``leader_qpos`` modality whenever ``runtime.leader.enabled`` is true,
-    independent of ``source.kind`` (spec §3.8 — "the leader modality is also
+    independent of the configured policy (spec §3.8 — "the leader modality is also
     available to any other policy that declares it"). ``ManualPolicy`` consumes
     it but does not require it, and any other policy may read it too.
 
@@ -309,8 +296,6 @@ class Runtime:
     direct ``construct`` of the spec, again injecting ``backend`` only if the
     constructor takes it. This mirrors :meth:`_build_backend` / :meth:`_build_leader`.
     """
-    import inspect
-
     target               = str(entry["target"])
     params               = _params_dict(entry.get("params"))
     spec: dict[str, Any] = {"target": target, "params": params}
@@ -399,6 +384,42 @@ class Runtime:
 # -- small config coercions ----------------------------------------------------
 
 
+def _registry_spec(node) -> dict[str, Any]:
+  """Coerce a ``{target, params}`` config node to a plain registry spec.
+
+  Accepts the shorthand where the node is just the import-path string, so
+  ``policy: "pkg.mod:Thing"`` and the mapping form both construct.
+  """
+  if isinstance(node, str):
+    return {"target": node, "params": {}}
+  if node is None or node.get("target") is None:
+    raise ValueError(
+      "runtime.policy needs a 'target' import path, e.g. "
+      "'chuck_dreamer.runtime.sources:SineSweep'")
+  return {"target": str(node.target), "params": _params_dict(node.get("params"))}
+
+
+def _accepted_params(factory, params: dict[str, Any], target: str) -> dict[str, Any]:
+  """``params`` filtered to the keyword arguments ``factory`` actually accepts.
+
+  A factory taking ``**kwargs`` accepts everything, so nothing is dropped there.
+  """
+  try:
+    sig = inspect.signature(factory)
+  except (TypeError, ValueError):
+    return params  # not introspectable; let the constructor speak for itself
+  if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+    return params
+  accepted = {
+    name for name, p in sig.parameters.items()
+    if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+  }
+  ignored = sorted(set(params) - accepted)
+  if ignored:
+    logger.warning("%s ignoring policy params it does not use: %s", target, ignored)
+  return {k: v for k, v in params.items() if k in accepted}
+
+
 def _params_dict(params_cfg) -> dict[str, Any]:
   """Coerce a registry-spec ``params`` config node to a plain str-keyed dict."""
   raw = (
@@ -426,13 +447,6 @@ def _to_array(value, n: int) -> np.ndarray:
   if arr.shape != (n,):
     raise ValueError(f"expected length-{n} value, got shape {arr.shape}")
   return arr
-
-
-def _scalar_or_array(value):
-  """Pass a scalar through; turn a config list into an array (source params)."""
-  if OmegaConf.is_config(value):
-    return np.asarray(OmegaConf.to_container(value, resolve=True), dtype=np.float64)
-  return value
 
 
 def _install_sigint(handler):
