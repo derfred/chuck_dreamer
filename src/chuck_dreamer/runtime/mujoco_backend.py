@@ -129,7 +129,6 @@ class MujocoBackend(InstantReadMixin, ManagedThread):
     upper[unlimited] = self._ctrl_range[unlimited, 1]
     return lower, upper
 
-
   # -- physics + viewer -----------------------------------------------------
 
   def step(self, n: int = 1) -> None:
