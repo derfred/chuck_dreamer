@@ -1,48 +1,48 @@
 Architectures: all arm64
 Codename: stable
 Components: main prerelease
-Date: Tue, 25 Aug 2026 14:15:11 +0000
+Date: Thu, 03 Sep 2026 10:56:25 +0000
 Description: Fessel Pi monitoring packages
 Label: Fessel
 Origin: Fessel
 Suite: stable
 MD5Sum:
- 62d0d8c396d57735de3ae7ddb61ab3ac              194 Release
+ 161d7f0defe385784f5528507ac39c97              194 Release
  a9cb38a98d46515b4465b2dd8aaf2393            16828 main/binary-all/Packages
- 6913f55ad81897bc8b441f2dee747156             3521 main/binary-all/Packages.gz
+ 00722e9dd652c38e02410fe8e65bf21a             3521 main/binary-all/Packages.gz
  a9cb38a98d46515b4465b2dd8aaf2393            16828 main/binary-arm64/Packages
- 6913f55ad81897bc8b441f2dee747156             3521 main/binary-arm64/Packages.gz
- 53e91bdf501d84405f07db556b11e5bc            11613 prerelease/binary-all/Packages
- 2d1da70428921a49494881d729621d8a             2198 prerelease/binary-all/Packages.gz
- 53e91bdf501d84405f07db556b11e5bc            11613 prerelease/binary-arm64/Packages
- 2d1da70428921a49494881d729621d8a             2198 prerelease/binary-arm64/Packages.gz
+ 00722e9dd652c38e02410fe8e65bf21a             3521 main/binary-arm64/Packages.gz
+ e96c2b78067b9fa11f45f4ca29e73342            13272 prerelease/binary-all/Packages
+ fe5840a6d0ff3e873c63539a154eae65             2389 prerelease/binary-all/Packages.gz
+ e96c2b78067b9fa11f45f4ca29e73342            13272 prerelease/binary-arm64/Packages
+ fe5840a6d0ff3e873c63539a154eae65             2389 prerelease/binary-arm64/Packages.gz
 SHA1:
- 2c6643a8388ff59146e950b1fed788e29610ecd6              194 Release
+ 25ca7c23430d09a590de853ee047041bec850d18              194 Release
  309e71acc3a19f1061cd0e2903f37a6b8da9b36a            16828 main/binary-all/Packages
- fb87a294faf37e987e4258ee53f4f854c96879e2             3521 main/binary-all/Packages.gz
+ 0b1bb7723f4ee4c83f5c24c02454b22fe3b0bd1e             3521 main/binary-all/Packages.gz
  309e71acc3a19f1061cd0e2903f37a6b8da9b36a            16828 main/binary-arm64/Packages
- fb87a294faf37e987e4258ee53f4f854c96879e2             3521 main/binary-arm64/Packages.gz
- a2e16cd33a17cf875a76e49c67551316fe454877            11613 prerelease/binary-all/Packages
- cec324a1828bde414013459be37c3396d2dfcaf7             2198 prerelease/binary-all/Packages.gz
- a2e16cd33a17cf875a76e49c67551316fe454877            11613 prerelease/binary-arm64/Packages
- cec324a1828bde414013459be37c3396d2dfcaf7             2198 prerelease/binary-arm64/Packages.gz
+ 0b1bb7723f4ee4c83f5c24c02454b22fe3b0bd1e             3521 main/binary-arm64/Packages.gz
+ 0f6ab2b0628a7e17e2b7da5ea23c1d0617cf72c0            13272 prerelease/binary-all/Packages
+ 1ed439be9b9ff0c5bbd15cff198d79ac67da33f2             2389 prerelease/binary-all/Packages.gz
+ 0f6ab2b0628a7e17e2b7da5ea23c1d0617cf72c0            13272 prerelease/binary-arm64/Packages
+ 1ed439be9b9ff0c5bbd15cff198d79ac67da33f2             2389 prerelease/binary-arm64/Packages.gz
 SHA256:
- ad60b86c6e3f80e881e726a36ee0025ecc6318e4d28c30c561d9203f3f95908e              194 Release
+ 6050a9d8e8c3794e6210809e75488aaf79476f835677e4864919b909604926a4              194 Release
  306238734248ade135260dbad2f22c8d77ac326847392683fe141e89aa30a013            16828 main/binary-all/Packages
- c52cfe6595bdbdd3d0a405156ea170c92d4ae281ca6348a6342194fd7fc794da             3521 main/binary-all/Packages.gz
+ 092f47c701af06abc4daf1f3537bf1ce8e95db7b7d7741581871820d60225d44             3521 main/binary-all/Packages.gz
  306238734248ade135260dbad2f22c8d77ac326847392683fe141e89aa30a013            16828 main/binary-arm64/Packages
- c52cfe6595bdbdd3d0a405156ea170c92d4ae281ca6348a6342194fd7fc794da             3521 main/binary-arm64/Packages.gz
- c4eda0196312d4ce2bdf2910827ceee59b8d8146c2c677f6f17793d97e35c59c            11613 prerelease/binary-all/Packages
- e8362b26e93307fae3fa7d2db51553906939f85fa8555dacc20d5ee1681bbcda             2198 prerelease/binary-all/Packages.gz
- c4eda0196312d4ce2bdf2910827ceee59b8d8146c2c677f6f17793d97e35c59c            11613 prerelease/binary-arm64/Packages
- e8362b26e93307fae3fa7d2db51553906939f85fa8555dacc20d5ee1681bbcda             2198 prerelease/binary-arm64/Packages.gz
+ 092f47c701af06abc4daf1f3537bf1ce8e95db7b7d7741581871820d60225d44             3521 main/binary-arm64/Packages.gz
+ 93bea04e57d0a7b902d371baf7a0cd35da2c05aab79dccb9abc54103b96caa95            13272 prerelease/binary-all/Packages
+ b44244c6e6d066761199e2fb86e40e24156668fb35e818e95b32141e8e1f10aa             2389 prerelease/binary-all/Packages.gz
+ 93bea04e57d0a7b902d371baf7a0cd35da2c05aab79dccb9abc54103b96caa95            13272 prerelease/binary-arm64/Packages
+ b44244c6e6d066761199e2fb86e40e24156668fb35e818e95b32141e8e1f10aa             2389 prerelease/binary-arm64/Packages.gz
 SHA512:
- 013eb2f2270c283995431b3a026cd24e95528d923d5f90fbad757d399f8d4cc424efd51d948a7f963a7873af38288cbbe3fd636df805e6b0ce3f8d474fd5dd4b              194 Release
+ 13ce3f28432a3de83ce36f84bea31e5dd7a692089d328811247b1a05a1c51da430abe099672cfeaf61977a7bc98c537308a2a29c58d8a3d05d73575964cf92b1              194 Release
  d7a0eebc9b8561d26e2f6e523e56a05805e2da4e1bcddd1a894aa639880f2f95b341bd4186e7fecbaa3c980590bdbb730d4b070ab5243a674a22bcfe4d8f1008            16828 main/binary-all/Packages
- c534ced9a6b3d6fdd6bf4c29e5bd801e5846c6ed94d4fc5db69ec573b0e43d5c03fe9e5152f28574e0c0518ea245bf5017a878969974e7defc698c40964deda2             3521 main/binary-all/Packages.gz
+ ea1ab3fe799efc2e17eb56e15d273731ad7dc16ac933f8e5b090e811aaa52c34c527f15abb7da1f766b2d430bd102c28eb6467e842f9efeed929c920a961c9cc             3521 main/binary-all/Packages.gz
  d7a0eebc9b8561d26e2f6e523e56a05805e2da4e1bcddd1a894aa639880f2f95b341bd4186e7fecbaa3c980590bdbb730d4b070ab5243a674a22bcfe4d8f1008            16828 main/binary-arm64/Packages
- c534ced9a6b3d6fdd6bf4c29e5bd801e5846c6ed94d4fc5db69ec573b0e43d5c03fe9e5152f28574e0c0518ea245bf5017a878969974e7defc698c40964deda2             3521 main/binary-arm64/Packages.gz
- d4113f195e76d54eab202aec5f368be2f8f2379021e3a70d0716c29cef4b1aac24a5849e4546cc13b8da7e78c45c82e4578bc9f51fbb2246660ce39da844a0fc            11613 prerelease/binary-all/Packages
- a1e3a41acff7709dba5ad45f203bf32a336f8efc61406edefa59b6ef4ca0b8d2d308345f2327d56a22a0bc693114652995d92123efe1fa7485f81a5abaef4e8c             2198 prerelease/binary-all/Packages.gz
- d4113f195e76d54eab202aec5f368be2f8f2379021e3a70d0716c29cef4b1aac24a5849e4546cc13b8da7e78c45c82e4578bc9f51fbb2246660ce39da844a0fc            11613 prerelease/binary-arm64/Packages
- a1e3a41acff7709dba5ad45f203bf32a336f8efc61406edefa59b6ef4ca0b8d2d308345f2327d56a22a0bc693114652995d92123efe1fa7485f81a5abaef4e8c             2198 prerelease/binary-arm64/Packages.gz
+ ea1ab3fe799efc2e17eb56e15d273731ad7dc16ac933f8e5b090e811aaa52c34c527f15abb7da1f766b2d430bd102c28eb6467e842f9efeed929c920a961c9cc             3521 main/binary-arm64/Packages.gz
+ 7a86874239fe7eb03df9cfd0e588b93044727dbf6f2d32b10eed4595f7e97c5ac5401806b1ff85e8a21904f53bd5adf30b81f44c1ab139914f4379edf9b51ae4            13272 prerelease/binary-all/Packages
+ bb29e835d9587caa1214cd57be66adc9076f60f686d4910b511368586a7c7d80e10b3adfc5a01c36060c16564ec4c67958c4f62ed1f329c458bd19177745ea94             2389 prerelease/binary-all/Packages.gz
+ 7a86874239fe7eb03df9cfd0e588b93044727dbf6f2d32b10eed4595f7e97c5ac5401806b1ff85e8a21904f53bd5adf30b81f44c1ab139914f4379edf9b51ae4            13272 prerelease/binary-arm64/Packages
+ bb29e835d9587caa1214cd57be66adc9076f60f686d4910b511368586a7c7d80e10b3adfc5a01c36060c16564ec4c67958c4f62ed1f329c458bd19177745ea94             2389 prerelease/binary-arm64/Packages.gz
