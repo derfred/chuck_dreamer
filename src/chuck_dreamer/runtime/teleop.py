@@ -113,6 +113,7 @@ def follower_qpos_to_action(
       action[f"{motor}.pos"] = frac * 100.0
   return action
 
+
 @dataclass(frozen=True, slots=True)
 class LeaderState:
   q:   np.ndarray   # (n,) rad, follower order
