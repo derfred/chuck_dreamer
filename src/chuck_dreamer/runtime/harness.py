@@ -107,23 +107,23 @@ class PolicyLoop(PacedLoop):
         continue
       metrics = TelemetryRecord(t_wall=time.time(), t_mono=time.monotonic(), tick=step)
 
-      with metrics.timed("step"):
+      with metrics.timed("policy_s"):
         leader = self._leader.latest() if self._leader is not None else None
 
         data: dict[str, Any] = {"t": t, "q_meas": control.q}
         if leader is not None:
           data["leader_qpos"] = leader.q
-        with metrics.timed("sensors"):
+        with metrics.timed("sensor_s"):
           for s in self._sensors:
             snap = s.latest()
             if snap:
               data.update(snap)
-        with metrics.timed("perception"):
+        with metrics.timed("perception_s"):
           data = self._perception.run(data, t=t)
 
         obs = RuntimeObservation.build(t=t, control=control, leader=leader, modalities=data)
 
-        with metrics.timed("act"):
+        with metrics.timed("act_s"):
           action = self._policy.act(obs)
         self._channel.publish(action)
 

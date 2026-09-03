@@ -141,7 +141,7 @@ def test_policy_row_logs_policy_entities(fake_rerun):
   sink = RerunSink("unused", q, n_joints=2)
   sink.start("ep")
   rec = TelemetryRecord(t_wall=0.0, t_mono=0.5, tick=2)
-  with rec.timed("step"):
+  with rec.timed("policy_s"):
     pass
   rec.update_policy(dt=0.1)
   rec.seq = 9

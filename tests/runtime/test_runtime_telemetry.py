@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import time
 
+import pytest
+
 import numpy as np
 
 from chuck_dreamer.runtime.telemetry import (
@@ -84,12 +86,12 @@ def test_stop_drains_remaining_records(tmp_path):
 def test_policy_row_totals_its_stage_timings():
   """``update_policy`` folds the timed blocks into the flat policy fields."""
   rec = TelemetryRecord(t_wall=time.time(), t_mono=time.monotonic(), tick=7)
-  with rec.timed("step"):
-    with rec.timed("sensors"):
+  with rec.timed("policy_s"):
+    with rec.timed("sensor_s"):
       time.sleep(0.002)
-    with rec.timed("perception"):
+    with rec.timed("perception_s"):
       time.sleep(0.002)
-    with rec.timed("act"):
+    with rec.timed("act_s"):
       time.sleep(0.002)
   rec.update_policy(dt=0.1)
 
@@ -132,3 +134,40 @@ def test_policy_fields_are_in_the_csv_header():
 def test_action_age_defaults_to_absent_on_a_control_row():
   """Ticks that consumed no new setpoint report -1, not a stale age."""
   assert _tick_record(0).action_age_s == -1.0
+
+
+def test_timed_refuses_a_field_the_record_does_not_have():
+  """A typo'd block name is an error, not a silently invented attribute."""
+  import pytest
+
+  rec = TelemetryRecord(t_wall=0.0, t_mono=0.0, tick=0)
+  with pytest.raises(AttributeError, match="no duration field"):
+    with rec.timed("sensors"):        # the old label; the field is `sensor_s`
+      pass
+
+
+def test_csv_columns_track_the_dataclass_automatically():
+  """The header is derived, so a new field needs no second edit to appear."""
+  from dataclasses import fields as dc_fields
+
+  cols = set(record_fieldnames(2))
+  for f in dc_fields(TelemetryRecord):
+    if f.name in ("q_meas", "q_cmd", "target"):
+      assert f"{f.name}_0" in cols and f"{f.name}_1" in cols
+    else:
+      assert f.name in cols, f"{f.name} declared but not a CSV column"
+
+
+def test_backend_s_includes_the_write_not_just_the_read():
+  """Regression: ``backend_s`` used to be summed inside ``update()``, which the
+  control loop calls *before* it writes to the backend — so the write half was
+  always zero and the metric silently reported read cost only."""
+  rec = TelemetryRecord(t_wall=0.0, t_mono=0.0, tick=0)
+  with rec.timed("read_state_s"):
+    time.sleep(0.002)
+  rec.update(dt=0.01)                       # the loop's mid-tick update
+  with rec.timed("write_positions_s"):      # the write happens after it
+    time.sleep(0.002)
+
+  assert rec.read_state_s > 0 and rec.write_positions_s > 0
+  assert rec.backend_s == pytest.approx(rec.read_state_s + rec.write_positions_s)

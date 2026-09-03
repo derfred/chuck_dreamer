@@ -14,7 +14,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -25,11 +25,7 @@ from .threads import ManagedThread
 
 @dataclass
 class TelemetryRecord:
-  """One telemetry row. Either a per-tick row or a sparse event row.
-
-  Per-joint quantities are stored as arrays and expanded into
-  ``<name>_<i>`` columns by :func:`record_fieldnames` / :func:`record_to_row`.
-  """
+  """One telemetry row. Either a per-tick row or a sparse event row."""
 
   t_wall: float
   t_mono: float
@@ -45,14 +41,14 @@ class TelemetryRecord:
   seq: int = -1
   event: str = ""
   detail: str = ""
-  backend_s: float = 0.0
+  read_state_s: float = 0.0
+  write_positions_s: float = 0.0
   action_age_s: float = -1.0 # End-to-end setpoint latency
 
   # Measurement health, from the tick's ControlState (see control_state.py).
   q_age: float = 0.0
   read_s: float = 0.0
   faults: int = 0
-  read_budget_s: float = 0.0
 
   # workspace limiter
   ws_scale: float = 1.0
@@ -68,19 +64,20 @@ class TelemetryRecord:
   act_s: float = 0.0
   policy_s: float = 0.0
 
-  _timed: dict[str, float] = field(default_factory=dict)
+  @property
+  def backend_s(self) -> float:
+    return self.read_state_s + self.write_positions_s
 
   @contextmanager
-  def timed(self, name: str) -> Iterator[None]:
+  def timed(self, field_name: str) -> Iterator[None]:
+    """Time a block straight into the named duration field."""
+    if not hasattr(self, field_name):
+      raise AttributeError(f"TelemetryRecord has no duration field {field_name!r}")
     t0 = time.perf_counter()
     try:
       yield
     finally:
-      self._timed[name] = time.perf_counter() - t0
-
-  def elapsed(self, name: str, default: float = 0.0) -> float:
-    """Duration recorded by a :meth:`timed` block, or ``default`` if it never ran."""
-    return self._timed.get(name, default)
+      setattr(self, field_name, time.perf_counter() - t0)
 
   def update(
     self,
@@ -92,23 +89,15 @@ class TelemetryRecord:
     dt: float = 0.0,
     limits=None,
     mode=None,
-    read_budget_s: float = 0.0,
     action_age_s: float | None = None,
   ) -> None:
-    """Fold one tick's outcome into the record.
-
-    Everything is optional because a tick can legitimately end early (no
-    trajectory, a refused command), and a partial row is more useful than a
-    missing one.
-    """
-    self.dt            = float(dt)
-    self.read_budget_s = float(read_budget_s)
+    """Fold one tick's outcome into the record."""
+    self.dt = float(dt)
     if state is not None:
       self.q_meas    = state.q
       self.q_age     = float(state.q_age)
       self.read_s    = float(state.read_s)
       self.faults    = int(state.faults)
-      self.backend_s = self.elapsed("read_state") + self.elapsed("write_positions")
     if q_cmd is not None:
       self.q_cmd = np.asarray(q_cmd, dtype=np.float64)
     if ref is not None:
@@ -129,64 +118,43 @@ class TelemetryRecord:
   def update_policy(self, *, action=None, dt: float = 0.0) -> None:
     """Fold one policy step's outcome into the record (policy thread).
 
-    The stage timings come from :meth:`timed` blocks the caller already ran,
-    so this only has to total them — the same shape as ``backend_s`` on the
-    control side.
+    The stage timings (`sensor_s` / `perception_s` / `act_s` / `policy_s`) are
+    already on the record: :meth:`timed` wrote them as the caller's blocks
+    ran.
     """
     self.kind         = "policy"
     self.dt           = float(dt)
-    self.sensor_s     = self.elapsed("sensors")
-    self.perception_s = self.elapsed("perception")
-    self.act_s        = self.elapsed("act")
-    self.policy_s     = self.elapsed("step")
     if action is not None:
       self.seq = int(getattr(action, "seq", -1))
 
 
-_SCALAR_FIELDS = [
-  "t_wall", "t_mono", "tick", "kind", "mode", "clamped",
-  "stale", "dt", "seq", "event", "detail", "backend_s",
-  "q_age", "read_s", "faults", "read_budget_s", "ws_scale", "ws_breach_m",
-  "action_age_s", "sensor_s", "perception_s", "act_s", "policy_s",
-]
+# Per-joint quantities: stored as arrays, expanded to `<name>_<i>` columns.
+_ARRAY_FIELDS = ("q_meas", "q_cmd", "target")
+
+
+def _scalar_fields() -> list[str]:
+  """Every scalar field, in declaration order, derived from the dataclass."""
+  return [f.name for f in fields(TelemetryRecord) if f.name not in _ARRAY_FIELDS] + ["backend_s"]
 
 
 def record_fieldnames(n_joints: int) -> list[str]:
   """CSV column order for a runtime with ``n_joints`` joints."""
-  cols = list(_SCALAR_FIELDS)
-  for name in ("q_meas", "q_cmd", "target"):
+  cols = _scalar_fields()
+  for name in _ARRAY_FIELDS:
     cols.extend(f"{name}_{i}" for i in range(n_joints))
   return cols
 
 
 def record_to_row(rec: TelemetryRecord, n_joints: int) -> dict[str, Any]:
   """Flatten a record into a ``{column: value}`` dict for ``csv.DictWriter``."""
-  row: dict[str, Any] = {
-    "t_wall": rec.t_wall,
-    "t_mono": rec.t_mono,
-    "tick": rec.tick,
-    "kind": rec.kind,
-    "mode": rec.mode,
-    "clamped": int(rec.clamped),
-    "stale": int(rec.stale),
-    "dt": rec.dt,
-    "seq": rec.seq,
-    "event": rec.event,
-    "detail": rec.detail,
-    "backend_s": rec.backend_s,
-    "q_age": rec.q_age,
-    "read_s": rec.read_s,
-    "faults": int(rec.faults),
-    "read_budget_s": rec.read_budget_s,
-    "ws_scale": rec.ws_scale,
-    "ws_breach_m": rec.ws_breach_m,
-    "sensor_s": rec.sensor_s,
-    "perception_s": rec.perception_s,
-    "act_s": rec.act_s,
-    "policy_s": rec.policy_s,
-    "action_age_s": rec.action_age_s,
-  }
-  for name, arr in (("q_meas", rec.q_meas), ("q_cmd", rec.q_cmd), ("target", rec.target)):
+  row: dict[str, Any] = {}
+  for name in _scalar_fields():
+    value = getattr(rec, name)
+    # bool is a subclass of int, so this must precede any numeric handling;
+    # CSV wants 0/1 rather than True/False.
+    row[name] = int(value) if isinstance(value, bool) else value
+  for name in _ARRAY_FIELDS:
+    arr = getattr(rec, name)
     for i in range(n_joints):
       row[f"{name}_{i}"] = "" if arr is None else float(arr[i])
   return row

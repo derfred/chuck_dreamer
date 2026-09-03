@@ -224,7 +224,7 @@ class ControlLoop(PacedLoop):
     for _ in self.paced():
       metrics = TelemetryRecord(t_wall=time.time(), t_mono=time.monotonic(), tick=self._ticks)
 
-      with metrics.timed("read_state"):
+      with metrics.timed("read_state_s"):
         state = self._backend.read_state(self._budget_s).at_tick(self._ticks)
       self._channel.publish_state(state)
 
@@ -258,7 +258,7 @@ class ControlLoop(PacedLoop):
           q_cmd, limits = self._safety_limit(state, *ref)
           if q_cmd is not None:
             q_cmd_last = q_cmd
-            with metrics.timed("write_positions"):
+            with metrics.timed("write_positions_s"):
               self._backend.write_positions(q_cmd)
           metrics.update(ref=ref, q_cmd=q_cmd, limits=limits)
 
