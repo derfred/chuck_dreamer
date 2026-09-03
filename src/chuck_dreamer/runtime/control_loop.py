@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import threading
 import time
 from typing import Any
 
@@ -14,6 +13,7 @@ from .control_mode import ControlMode, ControlModeMachine
 from .control_state import ControlState, FaultFlags, parse_read_budget
 from .control_trajectory import ControlTrajectory, ControlTrajectoryConfig
 from .telemetry import TelemetryQueue, TelemetryRecord
+from .threads import PacedLoop
 from .workspace import WorkspaceLimit, WorkspaceLimiter, build_workspace_limiter
 
 
@@ -30,7 +30,7 @@ def build_control_config(rt: DictConfig, *, n_joints: int) -> DictConfig:
   return rt
 
 
-class ControlLoop:
+class ControlLoop(PacedLoop):
   """Fixed-rate control thread: channel -> trajectory -> backend, with telemetry."""
 
   def __init__(
@@ -41,8 +41,8 @@ class ControlLoop:
     telemetry: TelemetryQueue,
     workspace: WorkspaceLimiter | None = None,
   ) -> None:
-    if float(cfg.control_loop.rate_hz) <= 0:
-      raise ValueError("rate_hz must be positive")
+    # PacedLoop validates the rate (and owns the thread + schedule).
+    super().__init__("runtime-control", float(cfg.control_loop.rate_hz))
 
     read_cfg = cfg.control_loop.get("read", {}) or {}
 
@@ -50,9 +50,6 @@ class ControlLoop:
     self._backend                         = backend
     self._channel                         = channel
     self._telemetry                       = telemetry
-    self._period                          = 1.0 / float(cfg.control_loop.rate_hz)
-    self._stop                            = threading.Event()
-    self._thread: threading.Thread | None = None
     self._ticks                           = 0
     self._modes                           = ControlModeMachine()
     self._budget_s                        = parse_read_budget(read_cfg)
@@ -122,7 +119,7 @@ class ControlLoop:
 
   def _await(self, mode: ControlMode, timeout: float | None) -> bool:
     """Wait for the loop to reach ``mode``, unless no thread is running."""
-    if self._thread is None or not self._thread.is_alive():
+    if not self.running:
       return self._modes.mode is mode
     return self._modes.wait_for(mode, timeout)
 
@@ -130,17 +127,6 @@ class ControlLoop:
   def budget_s(self) -> float:
     """Seconds per tick the backend may spend measuring (``inf`` = unlimited)."""
     return self._budget_s
-
-  def start(self) -> None:
-    self._stop.clear()
-    self._thread = threading.Thread(target=self._run, name="runtime-control", daemon=True)
-    self._thread.start()
-
-  def stop(self, join_timeout: float = 5.0) -> None:
-    self._stop.set()
-    if self._thread is not None:
-      self._thread.join(timeout=join_timeout)
-      self._thread = None
 
   def _safety_limit(
     self,
@@ -231,12 +217,11 @@ class ControlLoop:
   def _run(self) -> None:
     state          = self._backend.read_state(math.inf)
     last_time      = state.now
-    next_deadline  = time.monotonic()
     current_action = None
     trajectory     = ControlTrajectory.hold(state.q, self._traj_cfg)
     q_cmd_last     = None
 
-    while not self._stop.is_set():
+    for _ in self.paced():
       metrics = TelemetryRecord(t_wall=time.time(), t_mono=time.monotonic(), tick=self._ticks)
 
       with metrics.timed("read_state"):
@@ -257,6 +242,7 @@ class ControlLoop:
       elif not mode.stopping:
         action = self._channel.get()
         if action is not None and action != current_action:
+          metrics.update(action_age_s=action.age_at(state.now))
           trajectory     = trajectory.update(action, state, q_ref_actual=q_cmd_last)
           current_action = action
 
@@ -264,9 +250,7 @@ class ControlLoop:
       if trajectory is not None:
         ref = trajectory.tick(dt)
         if ref is None:
-          # The segment ran out with nothing behind it: coast to a stop and hold
-          # there rather than freezing mid-motion. Under BRAKING this is the
-          # coast-down finishing, and _plan promotes to BRAKED next tick.
+          # The segment ran out: coast to a stop and hold there
           trajectory = trajectory.brake()
           ref        = trajectory.tick(dt)
 
@@ -281,12 +265,5 @@ class ControlLoop:
       self._telemetry.emit(metrics)
       self._ticks += 1
 
-      next_deadline += self._period
-      sleep_for      = next_deadline - time.monotonic()
-      if sleep_for > 0:
-        self._stop.wait(sleep_for)  # interruptible: shutdown is immediate
-      else:
-        # Overrun: we missed the deadline. Log it and re-anchor so we don't
-        # spiral trying to catch up an unbounded backlog.
-        self._telemetry.emit_event("control_overrun", tick=self._ticks, detail=f"late_by={-sleep_for:.4f}s")
-        next_deadline = time.monotonic()
+  def _on_overrun(self, late_by_s: float) -> None:
+    self._telemetry.emit_event("control_overrun", tick=self._ticks, detail=f"late_by={late_by_s:.4f}s")

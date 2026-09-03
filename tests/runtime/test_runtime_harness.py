@@ -422,3 +422,73 @@ def test_sim_camera_does_not_stall_control_loop(tmp_path):
   assert rt.sink.path is not None and rt.sink.path.stat().st_size > 0
   time.sleep(0.05)
   assert _runtime_threads() == []
+
+
+def test_policy_loop_emits_its_own_telemetry_rows():
+  """The policy thread reports its cost the way the control thread does."""
+  from chuck_dreamer.runtime.telemetry import TelemetryQueue
+
+  policy   = _RecordingPolicy([0.1, 0.2])
+  channel  = ControlChannel()
+  backend  = FakeBackend(2, lower=np.full(2, -1.0), upper=np.full(2, 1.0))
+  telem    = TelemetryQueue(maxsize=100)
+  loop     = PolicyLoop(policy, channel, backend, rate_hz=200, telemetry=telem)
+
+  channel.publish_state(backend.read_state())
+  loop.start()
+  deadline = time.monotonic() + 1.0
+  while channel.seq == 0 and time.monotonic() < deadline:
+    time.sleep(0.005)
+  loop.stop()
+
+  rows = [r for r in telem.drain() if r.kind == "policy"]
+  assert rows, "policy loop emitted no telemetry"
+  r = rows[0]
+  assert r.policy_s > 0                      # the step was timed
+  assert r.act_s > 0                         # and so was policy.act
+  assert r.seq > 0                           # the published action is identified
+
+
+def test_policy_telemetry_is_optional():
+  """Omitting the queue leaves the loop working — it is instrumentation only."""
+  policy  = _RecordingPolicy([0.1, 0.2])
+  channel = ControlChannel()
+  backend = FakeBackend(2, lower=np.full(2, -1.0), upper=np.full(2, 1.0))
+  loop    = PolicyLoop(policy, channel, backend, rate_hz=200)   # no telemetry
+
+  channel.publish_state(backend.read_state())
+  loop.start()
+  deadline = time.monotonic() + 1.0
+  while channel.seq == 0 and time.monotonic() < deadline:
+    time.sleep(0.005)
+  loop.stop()
+  assert policy.seen
+
+
+def test_policy_loop_reports_an_overrun():
+  """A policy step slower than its period emits ``policy_overrun``.
+
+  Before the loop shared PacedLoop it had no overrun path at all: a slow
+  step silently slid the schedule forward, so a policy that could not hold
+  its configured rate looked identical to one that could.
+  """
+  from chuck_dreamer.runtime.telemetry import TelemetryQueue
+
+  class _SlowPolicy(_RecordingPolicy):
+    def act(self, obs):
+      time.sleep(0.05)                       # far longer than the 10 ms period
+      return super().act(obs)
+
+  channel = ControlChannel()
+  backend = FakeBackend(2, lower=np.full(2, -1.0), upper=np.full(2, 1.0))
+  telem   = TelemetryQueue(maxsize=200)
+  loop    = PolicyLoop(_SlowPolicy([0.1, 0.2]), channel, backend,
+                       rate_hz=100.0, telemetry=telem)
+
+  channel.publish_state(backend.read_state())
+  loop.start()
+  time.sleep(0.25)
+  loop.stop()
+
+  events = [r.event for r in telem.drain() if r.event]
+  assert "policy_overrun" in events

@@ -24,6 +24,7 @@ subsequent call is forwarded to it.
 
 import itertools
 import threading
+import time
 from typing import Any, Callable, Protocol
 
 import numpy as np
@@ -64,9 +65,15 @@ class Action:
   ``RuntimeObservation`` in the runtime, a component dict in sim -- and is kept
   only so a consumer can relate the action back to what it answers (the
   trajectory planner reads ``obs.t``). It is deliberately not narrowed here.
+
+  ``t_created`` is ``time.monotonic()`` at construction. ``obs.t`` cannot serve
+  this purpose: it is relative to the *producing* loop's start, so differencing
+  it against a consumer's clock measures the offset between the two origins,
+  not latency. The trajectory planner only ever differences ``obs.t`` against
+  another ``obs.t``, which is why it is safe there.
   """
 
-  __slots__ = ("obs", "seq", "_q", "_pos", "_quat", "_frame")
+  __slots__ = ("obs", "seq", "t_created", "_q", "_pos", "_quat", "_frame")
 
   def __init__(
     self,
@@ -77,6 +84,7 @@ class Action:
     world_pos=None,
     quat=None,
     seq: int | None = None,
+    t_created: float | None = None,
   ) -> None:
     given = [(name, value) for name, value in
              (("q", q), ("arm_pos", arm_pos), ("world_pos", world_pos))
@@ -106,12 +114,13 @@ class Action:
           f"quat must be [w, x, y, z]; got shape {orientation.shape}")
       orientation.flags.writeable = False
 
-    self.obs    = obs
-    self.seq    = _next_seq() if seq is None else int(seq)
-    self._q     = vec if name == "q" else None
-    self._pos   = None if name == "q" else vec
-    self._quat  = orientation
-    self._frame = (Frame.NONE if name == "q" else Frame.ARM if name == "arm_pos" else Frame.TABLE)
+    self.obs       = obs
+    self.seq       = _next_seq() if seq is None else int(seq)
+    self.t_created = time.monotonic() if t_created is None else float(t_created)
+    self._q        = vec if name == "q" else None
+    self._pos      = None if name == "q" else vec
+    self._quat     = orientation
+    self._frame    = (Frame.NONE if name == "q" else Frame.ARM if name == "arm_pos" else Frame.TABLE)
 
   # -- target ----------------------------------------------------------------
 
@@ -181,11 +190,25 @@ class Action:
     """The joint-space equivalent of this action, keeping ``obs`` and ``seq``.
 
     The seam IK plugs into: a resolver computes the joint vector for
-    :attr:`pos` and hands it back here. ``seq`` is carried over deliberately --
-    resolving does not make it a *different* command, so the loop still sees one
-    setpoint per policy step.
+    :attr:`pos` and hands it back here. ``seq`` and ``t_created`` are carried
+    over deliberately -- resolving does not make it a *different* command, so
+    the loop still sees one setpoint per policy step, and the latency clock
+    keeps running from when the policy produced it rather than restarting when
+    IK finished.
     """
-    return Action(self.obs, q=q, seq=self.seq)
+    return Action(self.obs, q=q, seq=self.seq, t_created=self.t_created)
+
+  def age_at(self, now: float) -> float:
+    """Seconds between this action's creation and ``now``.
+
+    ``now`` must come from the same clock as :attr:`t_created` -- raw
+    ``time.monotonic()``, which is why the stamp is absolute rather than
+    relative to any loop's start. A consumer passes the timestamp of the
+    measurement it is acting on (the control loop hands over ``state.now``),
+    so the result is the end-to-end hand-off latency: how long the setpoint
+    sat between being produced and being acted on.
+    """
+    return float(now) - self.t_created
 
   # -- identity --------------------------------------------------------------
 

@@ -17,13 +17,16 @@ module stays import-safe on a machine without OpenCV.
 
 from __future__ import annotations
 
+import logging
 import threading
-import time
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
 from .modalities import IMAGE
+from .threads import PacedLoop
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["Sensor", "SimCameraSensor", "WebcamSensor"]
 
@@ -143,7 +146,7 @@ class SimCameraSensor:
     return {IMAGE: img}
 
 
-class WebcamSensor:
+class WebcamSensor(PacedLoop):
   """Real camera via ``cv2.VideoCapture`` on a background poll thread."""
 
   produces: tuple[str, ...] = (IMAGE,)
@@ -157,16 +160,14 @@ class WebcamSensor:
     name: str = "camera/front",
     poll_rate_hz: float = 30.0,
   ) -> None:
-    self.name                             = name
-    self._device_index                    = int(device_index)
-    self._height                          = int(height)
-    self._width                           = int(width)
-    self._period                          = 1.0 / float(poll_rate_hz)
-    self._cap: Any                        = None  # cv2.VideoCapture (untyped import)
-    self._lock                            = threading.Lock()
-    self._latest: np.ndarray | None       = None
-    self._stop                            = threading.Event()
-    self._thread: threading.Thread | None = None
+    super().__init__("runtime-webcam", poll_rate_hz)
+    self.name                       = name
+    self._device_index              = int(device_index)
+    self._height                    = int(height)
+    self._width                     = int(width)
+    self._cap: Any                  = None  # cv2.VideoCapture (untyped import)
+    self._lock                      = threading.Lock()
+    self._latest: np.ndarray | None = None
 
   @classmethod
   def from_config(cls, cfg, **params) -> "WebcamSensor":
@@ -175,21 +176,14 @@ class WebcamSensor:
       params["height"], params["width"] = _parse_hw(render_size, default=(480, 640))
     return cls(**params)
 
-  def start(self) -> None:
+  def _on_start(self) -> None:
     import cv2  # type: ignore[import-not-found]
 
     self._cap = cv2.VideoCapture(self._device_index)
     self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
     self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
-    self._stop.clear()
-    self._thread = threading.Thread(target=self._run, name="runtime-webcam", daemon=True)
-    self._thread.start()
 
-  def stop(self, join_timeout: float = 5.0) -> None:
-    self._stop.set()
-    if self._thread is not None:
-      self._thread.join(timeout=join_timeout)
-      self._thread = None
+  def _on_stop(self) -> None:
     if self._cap is not None:
       self._cap.release()
       self._cap = None
@@ -202,14 +196,13 @@ class WebcamSensor:
   def _run(self) -> None:
     import cv2  # type: ignore[import-not-found]
 
-    next_deadline = time.monotonic()
-    while not self._stop.is_set():
+    for _ in self.paced():
       ok, frame = self._cap.read()
       if ok and frame is not None:
         # cv2 yields BGR; the rest of the pipeline expects RGB.
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         with self._lock:
           self._latest = np.asarray(rgb, dtype=np.uint8)
-      next_deadline += self._period
-      sleep_for = next_deadline - time.monotonic()
-      self._stop.wait(sleep_for if sleep_for > 0 else 0)
+
+  def _on_overrun(self, late_by_s: float) -> None:
+    logger.warning("webcam poll overran by %.4fs (rate %.1f Hz)", late_by_s, 1.0 / self.period)

@@ -32,6 +32,7 @@ import numpy as np
 
 from .modalities import EE, OBJECT_UV, OBJECT_XY
 from .telemetry import TelemetryQueue, TelemetryRecord
+from .threads import ManagedThread
 
 if TYPE_CHECKING:
   from .modalities import RuntimeObservation
@@ -57,7 +58,7 @@ class _ObsSnapshot:
 _VECTOR_MODALITIES = (EE, OBJECT_XY, OBJECT_UV)
 
 
-class RerunSink:
+class RerunSink(ManagedThread):
   """Logger thread draining control telemetry + policy observations to one .rrd."""
 
   def __init__(
@@ -73,11 +74,10 @@ class RerunSink:
     self._telemetry = telemetry
     self._n_joints = n_joints
     self._application_id = application_id
+    super().__init__("runtime-rerun")
     self._obs_q: "queue.Queue[_ObsSnapshot]" = queue.Queue(maxsize=obs_queue_maxsize)
     self._dropped = 0
     self._dropped_lock = threading.Lock()
-    self._stop = threading.Event()
-    self._thread: threading.Thread | None = None
     self._rec: Any = None
     self._path: Path | None = None
 
@@ -91,7 +91,13 @@ class RerunSink:
     with self._dropped_lock:
       return self._dropped
 
-  def start(self, recording_id: str) -> None:
+  def start(self, recording_id: str) -> None:      # type: ignore[override]
+    """Open the recording, then start the logger thread.
+
+    Unlike the other managed threads this takes an argument (the recording
+    id), so the recording is opened here and the base class is left to own
+    the thread itself.
+    """
     import rerun as rr
 
     self._rrd_dir.mkdir(parents=True, exist_ok=True)
@@ -99,15 +105,9 @@ class RerunSink:
     self._rec = rr.RecordingStream(
       application_id=self._application_id, recording_id=recording_id)
     self._rec.save(str(self._path))
-    self._stop.clear()
-    self._thread = threading.Thread(target=self._run, name="runtime-rerun", daemon=True)
-    self._thread.start()
+    super().start()
 
-  def stop(self, join_timeout: float = 5.0) -> None:
-    self._stop.set()
-    if self._thread is not None:
-      self._thread.join(timeout=join_timeout)
-      self._thread = None
+  def _on_stop(self) -> None:
     # Drain anything still queued so shutdown never loses tail records, then
     # force chunks to disk (the "flushed logs on shutdown" guarantee).
     if self._rec is not None:
@@ -162,22 +162,35 @@ class RerunSink:
   def _log_telemetry(self, rec: TelemetryRecord) -> None:
     import rerun as rr
 
-    self._rec.set_time("step", sequence=int(rec.tick))
+    if rec.kind != "policy":
+      self._rec.set_time("step", sequence=int(rec.tick))
     self._rec.set_time("time", duration=float(rec.t_mono))
     if rec.event:
       self._rec.log("events", rr.TextLog(f"{rec.event}: {rec.detail}"))
       return
-    self._rec.log("control/mode", rr.TextLog(rec.mode))
-    self._rec.log("control/clamped", rr.Scalars(int(rec.clamped)))
-    self._rec.log("control/stale", rr.Scalars(int(rec.stale)))
-    self._rec.log("control/dt", rr.Scalars(float(rec.dt)))
-    self._rec.log("control/seq", rr.Scalars(int(rec.seq)))
-    self._rec.log("control/backend_s", rr.Scalars(float(rec.backend_s)))
-    self._rec.log("control/ws_scale", rr.Scalars(float(rec.ws_scale)))
-    self._rec.log("control/ws_breach_m", rr.Scalars(float(rec.ws_breach_m)))
-    for name, arr in (("q_meas", rec.q_meas), ("q_cmd", rec.q_cmd), ("target", rec.target)):
-      if arr is not None:
-        self._rec.log(f"control/{name}", rr.Scalars(np.asarray(arr, dtype=float).tolist()))
+    if rec.kind == "policy":
+      self._rec.log("policy/sensor_s", rr.Scalars(float(rec.sensor_s)))
+      self._rec.log("policy/perception_s", rr.Scalars(float(rec.perception_s)))
+      self._rec.log("policy/act_s", rr.Scalars(float(rec.act_s)))
+      self._rec.log("policy/policy_s", rr.Scalars(float(rec.policy_s)))
+      self._rec.log("policy/dt", rr.Scalars(float(rec.dt)))
+      self._rec.log("policy/seq", rr.Scalars(int(rec.seq)))
+    else:
+      self._rec.log("control/mode", rr.TextLog(rec.mode))
+      self._rec.log("control/clamped", rr.Scalars(int(rec.clamped)))
+      self._rec.log("control/stale", rr.Scalars(int(rec.stale)))
+      self._rec.log("control/dt", rr.Scalars(float(rec.dt)))
+      self._rec.log("control/seq", rr.Scalars(int(rec.seq)))
+      self._rec.log("control/backend_s", rr.Scalars(float(rec.backend_s)))
+      # Only on ticks that consumed a new setpoint; -1 elsewhere would flatten
+      # the plot, so those ticks are simply not logged.
+      if rec.action_age_s >= 0.0:
+        self._rec.log("control/action_age_s", rr.Scalars(float(rec.action_age_s)))
+      self._rec.log("control/ws_scale", rr.Scalars(float(rec.ws_scale)))
+      self._rec.log("control/ws_breach_m", rr.Scalars(float(rec.ws_breach_m)))
+      for name, arr in (("q_meas", rec.q_meas), ("q_cmd", rec.q_cmd), ("target", rec.target)):
+        if arr is not None:
+          self._rec.log(f"control/{name}", rr.Scalars(np.asarray(arr, dtype=float).tolist()))
 
   def _log_observation_snapshot(self, snap: _ObsSnapshot) -> None:
     import rerun as rr

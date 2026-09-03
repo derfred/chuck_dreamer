@@ -117,3 +117,25 @@ def control_tick_rows(rec: _FakeRec) -> list[dict]:
   # Per-tick rows are those carrying control scalars (not the bare event rows
   # and not the observation-only steps from the policy thread).
   return [r for r in rows if not r["is_event"] and r["q_cmd"] is not None]
+
+
+def policy_step_rows(rec: _FakeRec) -> list[dict]:
+  """Collect the policy thread's per-step rows from a captured recording.
+
+  Policy rows deliberately carry no ``step`` sequence marker (that timeline is
+  the control tick), so they are gathered by entity path: each burst of
+  ``policy/*`` logs is one step.
+  """
+  rows: list[dict] = []
+  cur: dict = {}
+  for kind, a, b in rec.events:
+    if kind != "log" or not str(a).startswith("policy/"):
+      continue
+    field = str(a).split("/", 1)[1]
+    if field in cur:            # a repeated field starts the next step
+      rows.append(cur)
+      cur = {}
+    cur[field] = b.value
+  if cur:
+    rows.append(cur)
+  return rows

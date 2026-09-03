@@ -133,3 +133,41 @@ def test_writes_nonempty_rrd_with_real_rerun(tmp_path: Path):
   assert sink.path is not None
   assert sink.path.exists()
   assert sink.path.stat().st_size > 0
+
+
+def test_policy_row_logs_policy_entities(fake_rerun):
+  """A policy row lands under ``policy/*``, not ``control/*``."""
+  q = TelemetryQueue()
+  sink = RerunSink("unused", q, n_joints=2)
+  sink.start("ep")
+  rec = TelemetryRecord(t_wall=0.0, t_mono=0.5, tick=2)
+  with rec.timed("step"):
+    pass
+  rec.update_policy(dt=0.1)
+  rec.seq = 9
+  q.emit(rec)
+  _wait_until(lambda: "policy/policy_s" in fake_rerun.rec.logged_paths())
+  sink.stop()
+
+  paths = fake_rerun.rec.logged_paths()
+  for name in ("policy/sensor_s", "policy/perception_s", "policy/act_s",
+               "policy/policy_s", "policy/dt", "policy/seq"):
+    assert name in paths
+  # A policy row must not masquerade as control telemetry.
+  assert not any(p.startswith("control/") for p in paths)
+
+
+def test_policy_rows_do_not_stamp_the_control_step_timeline(fake_rerun):
+  """``step`` is the control tick; a policy step is a different sequence."""
+  q = TelemetryQueue()
+  sink = RerunSink("unused", q, n_joints=2)
+  sink.start("ep")
+  rec = TelemetryRecord(t_wall=0.0, t_mono=0.5, tick=42)
+  rec.update_policy(dt=0.1)
+  q.emit(rec)
+  _wait_until(lambda: "policy/policy_s" in fake_rerun.rec.logged_paths())
+  sink.stop()
+
+  steps = [b.get("sequence") for kind, a, b in fake_rerun.rec.events
+           if kind == "time" and a == "step"]
+  assert 42 not in steps          # the policy step never claimed a control tick

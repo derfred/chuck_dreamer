@@ -4,19 +4,6 @@ The record shape (spec §3.11) is intentionally flat — one row per control
 tick, plus sparse "event" rows (overrun, e-stop, mode change).
 The control loop emits :class:`TelemetryRecord`s onto a :class:`TelemetryQueue`;
 a sink thread drains and writes them.
-
-As of M3 the *active* runtime sink is the Rerun
-:class:`~chuck_dreamer.runtime.rerun_sink.RerunSink` (one ``.rrd`` per episode,
-control telemetry + the policy thread's observations on a shared timeline) —
-this fulfils the "upgrade the sink to Rerun without changing the record shape"
-plan. :class:`CsvSink` is kept here as a standalone, dependency-free sink (and
-the canonical documentation of the flat row layout) but is no longer wired into
-:class:`Runtime`.
-
-The control loop must never block on logging, so :meth:`TelemetryQueue.emit`
-is a non-blocking ``put_nowait`` that drops (and counts) on a full queue. A
-sink drains the queue on its own thread and flushes on a clean ``stop`` — that
-is the "flushed logs on shutdown" guarantee.
 """
 
 from __future__ import annotations
@@ -33,6 +20,8 @@ from typing import Any
 
 import numpy as np
 
+from .threads import ManagedThread
+
 
 @dataclass
 class TelemetryRecord:
@@ -45,6 +34,7 @@ class TelemetryRecord:
   t_wall: float
   t_mono: float
   tick: int
+  kind: str = "control" # Which loop produced this row.
   mode: str = ""
   clamped: bool = False
   stale: bool = False
@@ -56,6 +46,7 @@ class TelemetryRecord:
   event: str = ""
   detail: str = ""
   backend_s: float = 0.0
+  action_age_s: float = -1.0 # End-to-end setpoint latency
 
   # Measurement health, from the tick's ControlState (see control_state.py).
   q_age: float = 0.0
@@ -66,6 +57,16 @@ class TelemetryRecord:
   # workspace limiter
   ws_scale: float = 1.0
   ws_breach_m: float = 0.0
+
+  # -- policy rows (kind="policy") --------------------------------------------
+  # The policy loop's analogue of ``backend_s``: where its step time went.
+  # ``policy_s`` is the whole step, and the three below are its stages, so
+  # ``policy_s - (sensor_s + perception_s + act_s)`` is the loop's own
+  # overhead (observation build, publish, logging).
+  sensor_s: float = 0.0
+  perception_s: float = 0.0
+  act_s: float = 0.0
+  policy_s: float = 0.0
 
   _timed: dict[str, float] = field(default_factory=dict)
 
@@ -92,6 +93,7 @@ class TelemetryRecord:
     limits=None,
     mode=None,
     read_budget_s: float = 0.0,
+    action_age_s: float | None = None,
   ) -> None:
     """Fold one tick's outcome into the record.
 
@@ -113,6 +115,8 @@ class TelemetryRecord:
       self.target = np.asarray(ref[0], dtype=np.float64)
     if action is not None:
       self.seq = int(getattr(action, "seq", -1))
+    if action_age_s is not None:
+      self.action_age_s = float(action_age_s)
     if mode is not None:
       # Accept the enum or its value, so callers need not unwrap it.
       self.mode = str(getattr(mode, "value", mode))
@@ -122,11 +126,28 @@ class TelemetryRecord:
       self.ws_scale    = float(limits.get("ws_scale", 1.0))
       self.ws_breach_m = float(limits.get("ws_breach_m", 0.0))
 
+  def update_policy(self, *, action=None, dt: float = 0.0) -> None:
+    """Fold one policy step's outcome into the record (policy thread).
+
+    The stage timings come from :meth:`timed` blocks the caller already ran,
+    so this only has to total them — the same shape as ``backend_s`` on the
+    control side.
+    """
+    self.kind         = "policy"
+    self.dt           = float(dt)
+    self.sensor_s     = self.elapsed("sensors")
+    self.perception_s = self.elapsed("perception")
+    self.act_s        = self.elapsed("act")
+    self.policy_s     = self.elapsed("step")
+    if action is not None:
+      self.seq = int(getattr(action, "seq", -1))
+
 
 _SCALAR_FIELDS = [
-  "t_wall", "t_mono", "tick", "mode", "clamped",
+  "t_wall", "t_mono", "tick", "kind", "mode", "clamped",
   "stale", "dt", "seq", "event", "detail", "backend_s",
   "q_age", "read_s", "faults", "read_budget_s", "ws_scale", "ws_breach_m",
+  "action_age_s", "sensor_s", "perception_s", "act_s", "policy_s",
 ]
 
 
@@ -144,6 +165,7 @@ def record_to_row(rec: TelemetryRecord, n_joints: int) -> dict[str, Any]:
     "t_wall": rec.t_wall,
     "t_mono": rec.t_mono,
     "tick": rec.tick,
+    "kind": rec.kind,
     "mode": rec.mode,
     "clamped": int(rec.clamped),
     "stale": int(rec.stale),
@@ -158,6 +180,11 @@ def record_to_row(rec: TelemetryRecord, n_joints: int) -> dict[str, Any]:
     "read_budget_s": rec.read_budget_s,
     "ws_scale": rec.ws_scale,
     "ws_breach_m": rec.ws_breach_m,
+    "sensor_s": rec.sensor_s,
+    "perception_s": rec.perception_s,
+    "act_s": rec.act_s,
+    "policy_s": rec.policy_s,
+    "action_age_s": rec.action_age_s,
   }
   for name, arr in (("q_meas", rec.q_meas), ("q_cmd", rec.q_cmd), ("target", rec.target)):
     for i in range(n_joints):
@@ -208,7 +235,7 @@ class TelemetryQueue:
       return self._dropped
 
 
-class CsvSink:
+class CsvSink(ManagedThread):
   """Logger thread draining a :class:`TelemetryQueue` to a CSV file."""
 
   def __init__(
@@ -219,23 +246,14 @@ class CsvSink:
     *,
     flush_every_n: int = 50,
   ) -> None:
-    self._path                            = Path(path)
-    self._queue                           = queue_
-    self._n_joints                        = n_joints
-    self._flush_every_n                   = max(1, flush_every_n)
-    self._stop                            = threading.Event()
-    self._thread: threading.Thread | None = None
+    super().__init__("runtime-csv")
+    self._path          = Path(path)
+    self._queue         = queue_
+    self._n_joints      = n_joints
+    self._flush_every_n = max(1, flush_every_n)
 
-  def start(self) -> None:
+  def _on_start(self) -> None:
     self._path.parent.mkdir(parents=True, exist_ok=True)
-    self._thread = threading.Thread(target=self._run, name="runtime-csv", daemon=True)
-    self._thread.start()
-
-  def stop(self, join_timeout: float = 5.0) -> None:
-    self._stop.set()
-    if self._thread is not None:
-      self._thread.join(timeout=join_timeout)
-      self._thread = None
 
   def _run(self) -> None:
     fieldnames = record_fieldnames(self._n_joints)

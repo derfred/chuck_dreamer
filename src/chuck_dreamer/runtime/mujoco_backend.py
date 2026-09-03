@@ -23,11 +23,12 @@ import numpy as np
 from ..sim.scene_builder import SceneBuilder
 from ..sim.scene_config import SceneConfig
 from .backend import InstantReadMixin
+from .threads import ManagedThread
 
 _EE_SITE = "ee_site"
 
 
-class MujocoBackend(InstantReadMixin):
+class MujocoBackend(InstantReadMixin, ManagedThread):
   """SO-101 MuJoCo simulation as a :class:`RobotBackend`."""
 
   def __init__(
@@ -76,7 +77,7 @@ class MujocoBackend(InstantReadMixin):
     self.data.ctrl[self._ctrl_idx] = q0
     mujoco.mj_forward(self.model, self.data)
 
-    self._stop = threading.Event()
+    ManagedThread.__init__(self, "runtime-mujoco")
     self._thread: threading.Thread | None = None
 
   @classmethod
@@ -128,16 +129,6 @@ class MujocoBackend(InstantReadMixin):
     upper[unlimited] = self._ctrl_range[unlimited, 1]
     return lower, upper
 
-  def start(self) -> None:
-    self._stop.clear()
-    self._thread = threading.Thread(target=self._physics_run, name="runtime-mujoco", daemon=True)
-    self._thread.start()
-
-  def stop(self, join_timeout: float = 5.0) -> None:
-    self._stop.set()
-    if self._thread is not None:
-      self._thread.join(timeout=join_timeout)
-      self._thread = None
 
   # -- physics + viewer -----------------------------------------------------
 
@@ -147,7 +138,7 @@ class MujocoBackend(InstantReadMixin):
       for _ in range(n):
         mujoco.mj_step(self.model, self.data)
 
-  def _physics_run(self) -> None:
+  def _run(self) -> None:
     dt            = self.model.opt.timestep
     next_deadline = time.monotonic()
     while not self._stop.is_set():
@@ -165,24 +156,13 @@ class MujocoBackend(InstantReadMixin):
       return cast(np.ndarray, self.data.site_xpos[self._ee_sid].copy())
 
   def ee_quat(self) -> np.ndarray:
-    """EE orientation as a ``(4,)`` quaternion ``[w, x, y, z]`` (sim convention).
-
-    Mirrors ``ee_pos``; together they form the 7-D ``ee`` modality the
-    perception layer emits (``ee_pos ‖ ee_quat``), matching
-    ``Controller.get_ee_quat`` in ``sim/pushing_env.py``.
-    """
+    """EE orientation as a ``(4,)`` quaternion ``[w, x, y, z]`` (sim convention)."""
     quat = np.zeros(4, dtype=np.float64)
     with self._lock:
       mujoco.mju_mat2Quat(quat, self.data.site_xmat[self._ee_sid])
     return quat
 
   def physics_lock(self):
-    """The mutex serializing all access to ``self.data``.
-
-    The viewer's ``sync()`` reads ``self.data`` on the main thread while the
-    physics thread writes it via ``mj_step``; the caller holds this around
-    ``sync()`` (and overlay drawing) so the two never overlap.
-    """
     return self._lock
 
   @contextlib.contextmanager

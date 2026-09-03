@@ -76,3 +76,59 @@ def test_stop_drains_remaining_records(tmp_path):
   with (tmp_path / "t.csv").open() as f:
     rows = list(csv.DictReader(f))
   assert len(rows) == 500
+
+
+# -- policy-thread rows -------------------------------------------------------
+
+
+def test_policy_row_totals_its_stage_timings():
+  """``update_policy`` folds the timed blocks into the flat policy fields."""
+  rec = TelemetryRecord(t_wall=time.time(), t_mono=time.monotonic(), tick=7)
+  with rec.timed("step"):
+    with rec.timed("sensors"):
+      time.sleep(0.002)
+    with rec.timed("perception"):
+      time.sleep(0.002)
+    with rec.timed("act"):
+      time.sleep(0.002)
+  rec.update_policy(dt=0.1)
+
+  assert rec.kind == "policy"
+  assert rec.sensor_s > 0 and rec.perception_s > 0 and rec.act_s > 0
+  # The stages happened inside the step, so the step bounds their sum.
+  assert rec.policy_s >= rec.sensor_s + rec.perception_s + rec.act_s
+  assert rec.dt == 0.1
+
+
+def test_control_rows_default_to_control_kind():
+  """Existing control rows keep their shape; ``kind`` discriminates them."""
+  assert _tick_record(0).kind == "control"
+
+
+def test_policy_and_control_rows_share_one_queue(tmp_path):
+  """Both loops' rows survive the same queue and sink, tagged by ``kind``."""
+  n = 3
+  q = TelemetryQueue(maxsize=100)
+  sink = CsvSink(tmp_path / "t.csv", q, n_joints=n, flush_every_n=1)
+  sink.start()
+  q.emit(_tick_record(0, n))
+  policy = TelemetryRecord(t_wall=time.time(), t_mono=time.monotonic(), tick=0)
+  policy.update_policy(dt=0.1)
+  q.emit(policy)
+  sink.stop()
+
+  with (tmp_path / "t.csv").open() as f:
+    rows = list(csv.DictReader(f))
+  kinds = [r["kind"] for r in rows]
+  assert kinds == ["control", "policy"]
+
+
+def test_policy_fields_are_in_the_csv_header():
+  cols = record_fieldnames(3)
+  for name in ("kind", "sensor_s", "perception_s", "act_s", "policy_s", "action_age_s"):
+    assert name in cols
+
+
+def test_action_age_defaults_to_absent_on_a_control_row():
+  """Ticks that consumed no new setpoint report -1, not a stale age."""
+  assert _tick_record(0).action_age_s == -1.0

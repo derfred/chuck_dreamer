@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -131,3 +132,40 @@ def test_resolve_keeps_obs_and_seq():
   assert resolved.obs is obs
   assert resolved.is_joint_space
   np.testing.assert_array_equal(resolved.q, np.full(6, 0.5))
+
+
+# -- creation time / age -----------------------------------------------------
+
+
+def test_t_created_is_an_absolute_monotonic_stamp():
+  """Raw ``time.monotonic()``, so a consumer keeping a different clock origin
+  can still subtract it — the property ``obs.t`` lacks, since that one is
+  relative to the *producing* loop's start."""
+  before = time.monotonic()
+  a      = Action(_Obs(), q=np.zeros(3))
+  after  = time.monotonic()
+  assert before <= a.t_created <= after
+
+
+def test_age_at_measures_from_creation_to_the_given_instant():
+  a   = Action(_Obs(), q=np.zeros(3))
+  age = a.age_at(a.t_created + 0.25)
+  assert age == pytest.approx(0.25)
+  # And against a real later clock reading it is positive but small.
+  assert 0.0 <= a.age_at(time.monotonic()) < 1.0
+
+
+def test_age_at_is_negative_for_an_instant_before_creation():
+  """No clamping: a caller passing a stale timestamp gets an honest negative
+  rather than a zero that would hide the mistake."""
+  a = Action(_Obs(), q=np.zeros(3))
+  assert a.age_at(a.t_created - 0.1) == pytest.approx(-0.1)
+
+
+def test_resolve_keeps_the_original_creation_time():
+  """Resolving does not make it a different command (it keeps ``seq``), so it
+  must not reset the clock either — otherwise IK would erase the latency the
+  action accumulated before it."""
+  a = Action(_Obs(), arm_pos=[0.1, 0.2, 0.3])
+  r = a.resolve(np.zeros(6))
+  assert r.t_created == a.t_created

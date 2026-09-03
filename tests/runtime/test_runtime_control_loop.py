@@ -471,3 +471,30 @@ def test_mode_request_on_a_stopped_loop_does_not_block():
   t0   = time.monotonic()
   assert not loop.stop_for_shutdown(timeout=5.0)   # never started
   assert time.monotonic() - t0 < 1.0
+
+
+def test_action_age_is_recorded_on_the_tick_that_consumes_the_setpoint():
+  """Latency is measured where the setpoint lands, not where it was made.
+
+  The age must be positive (the action was created before the tick read it)
+  and must appear on exactly the tick that first picks the action up — the
+  ticks that follow are still slewing toward that same setpoint, so re-
+  reporting a growing age there would describe travel, not delay.
+  """
+  b       = FakeBackend(_N, lower=_LOWER, upper=_UPPER)
+  channel = ControlChannel()
+  telem   = TelemetryQueue()
+  loop    = ControlLoop(_cfg(rate_hz=200.0), b, channel, telem)
+
+  loop.start()
+  time.sleep(0.05)                       # ticks with no action published yet
+  channel.publish(Action(_Obs(0.0), q=np.full(_N, 0.2)))
+  time.sleep(0.1)                        # the loop consumes it, then keeps slewing
+  loop.stop()
+
+  rows = [r for r in telem.drain() if r.kind == "control" and not r.event]
+  aged = [r for r in rows if r.action_age_s >= 0.0]
+  assert len(aged) == 1, f"expected one consuming tick, got {len(aged)}"
+  assert 0.0 < aged[0].action_age_s < 0.5
+  # Every other tick reports "no new action", not a stale or growing age.
+  assert all(r.action_age_s == -1.0 for r in rows if r is not aged[0])

@@ -46,7 +46,8 @@ from .modalities import (
 from .perception import PerceptionPipeline
 from .registry import construct, import_symbol
 from .rerun_sink import RerunSink
-from .telemetry import TelemetryQueue
+from .telemetry import TelemetryQueue, TelemetryRecord
+from .threads import PacedLoop
 
 if TYPE_CHECKING:
   from .perception import PerceptionModule
@@ -58,7 +59,7 @@ logger = logging.getLogger(__name__)
 _FAKE_BACKEND_TARGET = "chuck_dreamer.runtime.backend:FakeBackend"
 
 
-class PolicyLoop:
+class PolicyLoop(PacedLoop):
   def __init__(
     self,
     policy: Policy,
@@ -70,9 +71,9 @@ class PolicyLoop:
     sensors: "list[Sensor] | None" = None,
     perception: PerceptionPipeline | None = None,
     rerun_sink: RerunSink | None = None,
+    telemetry: TelemetryQueue | None = None,
   ) -> None:
-    if rate_hz <= 0:
-      raise ValueError("rate_hz must be positive")
+    super().__init__("runtime-policy", rate_hz)
     self._policy     = policy
     self._channel    = channel
     self._backend    = backend
@@ -80,55 +81,62 @@ class PolicyLoop:
     self._sensors    = sensors or []
     self._perception = perception or PerceptionPipeline([])
     self._rerun_sink = rerun_sink
-    self._period     = 1.0 / float(rate_hz)
-    self._stop       = threading.Event()
-    self._thread: threading.Thread | None = None
+    self._telemetry  = telemetry
+    # Only for the overrun event, which fires outside the loop body.
+    self._step       = 0
 
-  def start(self) -> None:
+  def _on_start(self) -> None:
     self._policy.reset(self._backend.home_qpos)
     self._perception.reset()
-    self._stop.clear()
-    self._thread = threading.Thread(target=self._run, name="runtime-policy", daemon=True)
-    self._thread.start()
 
-  def stop(self, join_timeout: float = 5.0) -> None:
-    self._stop.set()
-    if self._thread is not None:
-      self._thread.join(timeout=join_timeout)
-      self._thread = None
+  def _on_overrun(self, late_by_s: float) -> None:
+    if self._telemetry is not None:
+      self._telemetry.emit_event(
+        "policy_overrun", tick=self._step, detail=f"late_by={late_by_s:.4f}s")
 
   def _run(self) -> None:
-    t0            = time.monotonic()
-    next_deadline = t0
-    step          = 0
-    while not self._stop.is_set():
+    t0        = time.monotonic()
+    last_time = t0
+    step      = 0
+
+    for _ in self.paced():
       t       = time.monotonic() - t0
       control = self._channel.state()
 
-      if control is not None:
+      if control is None:
+        continue
+      metrics = TelemetryRecord(t_wall=time.time(), t_mono=time.monotonic(), tick=step)
+
+      with metrics.timed("step"):
         leader = self._leader.latest() if self._leader is not None else None
 
         data: dict[str, Any] = {"t": t, "q_meas": control.q}
         if leader is not None:
           data["leader_qpos"] = leader.q
-        for s in self._sensors:
-          snap = s.latest()
-          if snap:
-            data.update(snap)
-        data = self._perception.run(data, t=t)
+        with metrics.timed("sensors"):
+          for s in self._sensors:
+            snap = s.latest()
+            if snap:
+              data.update(snap)
+        with metrics.timed("perception"):
+          data = self._perception.run(data, t=t)
 
         obs = RuntimeObservation.build(t=t, control=control, leader=leader, modalities=data)
 
-        action = self._policy.act(obs)
+        with metrics.timed("act"):
+          action = self._policy.act(obs)
         self._channel.publish(action)
 
-        if self._rerun_sink is not None:
-          self._rerun_sink.log_observation(obs, step=step, t=t)
-        step += 1
+      if self._rerun_sink is not None:
+        self._rerun_sink.log_observation(obs, step=step, t=t)
 
-      next_deadline += self._period
-      sleep_for      = next_deadline - time.monotonic()
-      self._stop.wait(sleep_for if sleep_for > 0 else 0)
+      if self._telemetry is not None:
+        now = time.monotonic()
+        metrics.update_policy(action=action, dt=now - last_time)
+        last_time = now
+        self._telemetry.emit(metrics)
+      step       = step + 1
+      self._step = step
 
 
 class Runtime:
@@ -167,6 +175,7 @@ class Runtime:
       self.policy, self.channel, self.backend,
       rate_hz=float(rt_cfg.policy_rate_hz), leader=self.leader,
       sensors=self.sensors, perception=self.perception, rerun_sink=self.sink,
+      telemetry=self.telemetry,
     )
 
     self._duration_s     = None if rt_cfg.duration_s is None else float(rt_cfg.duration_s)
