@@ -577,7 +577,6 @@ class FeetechBackend:
     q = np.asarray(q, dtype=np.float64)
     if q.shape != (_N_JOINTS,):
       raise ValueError(f"write_positions expects ({_N_JOINTS},); got {q.shape}")
-    action = follower_qpos_to_action(
-      q, jaw_lower=self._jaw_lower, jaw_upper=self._jaw_upper)
+    action = follower_qpos_to_action(q, jaw_lower=self._jaw_lower, jaw_upper=self._jaw_upper)
     with self._lock:
       self._follower.send_action(action)

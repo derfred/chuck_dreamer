@@ -21,7 +21,7 @@ from chuck_dreamer.runtime.control_loop import ControlLoop
 from chuck_dreamer.policy import Action
 from chuck_dreamer.runtime.control_mode import ControlMode
 from chuck_dreamer.runtime.control_state import ControlState, FaultFlags
-from chuck_dreamer.runtime.setpoint_channel import SetpointChannel
+from chuck_dreamer.runtime.control_channel import ControlChannel
 from chuck_dreamer.runtime.telemetry import TelemetryQueue
 
 _N = 6
@@ -59,7 +59,7 @@ class _Obs:
 
 
 def _loop(backend, cfg=None):
-  return ControlLoop(cfg or _cfg(), backend, SetpointChannel(), TelemetryQueue())
+  return ControlLoop(cfg or _cfg(), backend, ControlChannel(), TelemetryQueue())
 
 
 # -- budget plumbing ---------------------------------------------------------
@@ -230,7 +230,7 @@ def test_stopping_a_moving_arm_completes_within_the_coast_down():
   above cannot catch this: a stationary arm is already at rest on entry.
   """
   backend = FakeBackend(_N, lower=_LOWER, upper=_UPPER)
-  channel = SetpointChannel()
+  channel = ControlChannel()
   loop = ControlLoop(_cfg(), backend, channel, TelemetryQueue())
   loop.start()
   try:
@@ -255,7 +255,7 @@ def test_stopping_a_moving_arm_completes_within_the_coast_down():
 def test_braked_arm_ignores_new_setpoints():
   """A policy loop still draining must not re-accelerate an arm being stopped."""
   backend = FakeBackend(_N, lower=_LOWER, upper=_UPPER)
-  channel = SetpointChannel()
+  channel = ControlChannel()
   loop = ControlLoop(_cfg(), backend, channel, TelemetryQueue())
   loop.start()
   try:
@@ -341,7 +341,7 @@ def test_estop_does_not_creep_a_coasting_arm_forward():
   position rather than accumulating away from it.
   """
   backend = _CoastingBackend(_N, lower=_LOWER, upper=_UPPER)
-  channel = SetpointChannel()
+  channel = ControlChannel()
   loop = ControlLoop(_cfg(), backend, channel, TelemetryQueue())
   loop.start()
   try:
@@ -379,7 +379,7 @@ def test_estop_holds_even_if_the_arm_is_pushed_while_stopped():
   rather than a new setpoint the loop adopts.
   """
   backend = _CoastingBackend(_N, lower=_LOWER, upper=_UPPER)
-  loop = ControlLoop(_cfg(), backend, SetpointChannel(), TelemetryQueue())
+  loop = ControlLoop(_cfg(), backend, ControlChannel(), TelemetryQueue())
   loop.start()
   try:
     deadline = time.monotonic() + 1.0
@@ -402,7 +402,7 @@ def test_estop_holds_even_if_the_arm_is_pushed_while_stopped():
 def test_estop_ignores_new_setpoints():
   """The e-stop counterpart of the BRAKED case: a late action is not consumed."""
   backend = FakeBackend(_N, lower=_LOWER, upper=_UPPER)
-  channel = SetpointChannel()
+  channel = ControlChannel()
   loop = ControlLoop(_cfg(), backend, channel, TelemetryQueue())
   loop.start()
   try:
@@ -439,7 +439,7 @@ def test_stop_for_shutdown_returns_at_once_when_already_estopped():
 
 def test_stop_for_shutdown_waits_out_a_brake_already_in_flight():
   backend = FakeBackend(_N, lower=_LOWER, upper=_UPPER)
-  channel = SetpointChannel()
+  channel = ControlChannel()
   loop    = ControlLoop(_cfg(), backend, channel, TelemetryQueue())
   loop.start()
   try:

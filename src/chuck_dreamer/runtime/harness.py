@@ -10,7 +10,8 @@ The producer is a :class:`~chuck_dreamer.policy.Policy` (M0/M1 ships the
 scripted :class:`~chuck_dreamer.runtime.sources.GoToPose` /
 :class:`~chuck_dreamer.runtime.sources.SineSweep`; M6 swaps in Dreamer via
 config). :class:`PolicyLoop` calls ``policy.act(obs)`` each step with a
-:class:`RuntimeObservation` carrying elapsed time and the measured joints.
+:class:`RuntimeObservation` carrying elapsed time and the control loop's own
+measurement of the arm.
 
 Shutdown ordering (project plan): stop the policy loop first (no new
 setpoints), ask the control loop to brake and wait for the arm to stop, then
@@ -31,6 +32,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from ..policy import Policy
 from .backend import RobotBackend, ViewableBackend
+from .control_channel import ControlChannel
 from .control_loop import ControlLoop, build_control_config
 from .modalities import (
   RuntimeObservation,
@@ -41,7 +43,6 @@ from .modalities import (
 from .perception import PerceptionPipeline
 from .registry import construct, import_symbol
 from .rerun_sink import RerunSink
-from .setpoint_channel import SetpointChannel
 from .sources import GoToPose, ManualPolicy, SineSweep
 from .telemetry import TelemetryQueue
 
@@ -56,25 +57,10 @@ _FAKE_BACKEND_TARGET = "chuck_dreamer.runtime.backend:FakeBackend"
 
 
 class PolicyLoop:
-  """Threaded policy producer: sense → perceive → ``policy.act(obs)`` → channel.
-
-  Resets the policy and the perception pipeline once against the backend's home
-  pose, then, at the policy rate: samples each sensor's latest value, runs the
-  perception pipeline inline, composes a :class:`RuntimeObservation`, publishes
-  ``policy.act(obs)``, and (if a Rerun sink is wired) logs the observation. This
-  is the exact producer path Dreamer will use at M6.
-
-  Perception runs inline here, on the policy thread: a slow ``process`` only
-  delays the next ``channel.publish`` — the control loop keeps slewing the last
-  published setpoint, so slow perception reduces the *policy* rate, not control
-  correctness (spec §3.2/§4.1). The ``sleep_for <= 0`` branch lets the loop run
-  as fast as it can when a tick overruns its period.
-  """
-
   def __init__(
     self,
     policy: Policy,
-    channel: SetpointChannel,
+    channel: ControlChannel,
     backend: RobotBackend,
     *,
     rate_hz: float,
@@ -110,38 +96,36 @@ class PolicyLoop:
       self._thread = None
 
   def _run(self) -> None:
-    t0 = time.monotonic()
+    t0            = time.monotonic()
     next_deadline = t0
-    step = 0
+    step          = 0
     while not self._stop.is_set():
-      t      = time.monotonic() - t0
-      q_meas = self._backend.last_positions()
-      # latest() is non-blocking by contract, so the policy loop never waits on
-      # serial / the camera; when no leader is configured leader_qpos is None.
-      leader_qpos = self._leader.latest() if self._leader is not None else None
+      t       = time.monotonic() - t0
+      control = self._channel.state()
 
-      # Compose the modality dict: base + sensors + perception emits. The dict
-      # is the RuntimeObservation's full `modalities`; `t`/`q_meas`/`leader_qpos`
-      # also ride as named fields for the scripted policies.
-      data: dict[str, Any] = {"t": t, "q_meas": q_meas}
-      if leader_qpos is not None:
-        data["leader_qpos"] = leader_qpos
-      for s in self._sensors:
-        snap = s.latest()
-        if snap:
-          data.update(snap)
-      data = self._perception.run(data, t=t)
+      if control is not None:
+        leader = self._leader.latest() if self._leader is not None else None
 
-      obs = RuntimeObservation(
-        t=t, q_meas=q_meas, leader_qpos=leader_qpos, modalities=data,
-      )
-      self._channel.publish(self._policy.act(obs))
-      if self._rerun_sink is not None:
-        self._rerun_sink.log_observation(obs, step=step, t=t)
-      step += 1
+        data: dict[str, Any] = {"t": t, "q_meas": control.q}
+        if leader is not None:
+          data["leader_qpos"] = leader.q
+        for s in self._sensors:
+          snap = s.latest()
+          if snap:
+            data.update(snap)
+        data = self._perception.run(data, t=t)
+
+        obs = RuntimeObservation.build(t=t, control=control, leader=leader, modalities=data)
+
+        action = self._policy.act(obs)
+        self._channel.publish(action)
+
+        if self._rerun_sink is not None:
+          self._rerun_sink.log_observation(obs, step=step, t=t)
+        step += 1
 
       next_deadline += self._period
-      sleep_for = next_deadline - time.monotonic()
+      sleep_for      = next_deadline - time.monotonic()
       self._stop.wait(sleep_for if sleep_for > 0 else 0)
 
 
@@ -158,7 +142,7 @@ class Runtime:
     n_joints     = self.backend.n_joints
 
     # 3. Channel, telemetry queue, Rerun sink, loops.
-    self.channel   = SetpointChannel()
+    self.channel   = ControlChannel()
     self.telemetry = TelemetryQueue(maxsize=int(rt_cfg.logging.queue_maxsize))
     self.sink      = RerunSink(
       rt_cfg.logging.rerun.rrd_dir, self.telemetry, n_joints=n_joints,
@@ -174,8 +158,7 @@ class Runtime:
     #    starts if a required modality is unproduced.
     self.sensors     = self._build_sensors(rt_cfg)
     self.perception  = self._build_perception(rt_cfg)
-    self.available   = compose_modalities(
-      self.sensors, self.perception.modules, leader_present=self.leader is not None)
+    self.available   = compose_modalities(self.sensors, self.perception.modules, leader_present=self.leader is not None)
     check_required(required_modalities(rt_cfg), self.available)
 
     self.policy_loop = PolicyLoop(
@@ -204,8 +187,8 @@ class Runtime:
     ``from_config`` or carries its own geometry.
     """
     # `runtime.backend` is always a mapping {target: str, params: {...}}.
-    target = str(rt.backend.target)
-    params = _params_dict(rt.backend.get("params"))
+    target               = str(rt.backend.target)
+    params               = _params_dict(rt.backend.get("params"))
     spec: dict[str, Any] = {"target": target, "params": params}
 
     if target == _FAKE_BACKEND_TARGET:

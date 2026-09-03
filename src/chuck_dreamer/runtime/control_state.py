@@ -38,6 +38,12 @@ class ControlState:
   read_s:   float = 0.0              # wall cost of this read's transactions
   faults:   FaultFlags = FaultFlags.NONE
 
+  tick:     int = -1
+
+  def at_tick(self, tick: int) -> ControlState:
+    """Copy stamped with the control loop's tick number."""
+    return replace(self, tick=tick)
+
   @property
   def stale(self) -> bool:
     """Whether the safety layer should treat ``q`` as untrustworthy."""

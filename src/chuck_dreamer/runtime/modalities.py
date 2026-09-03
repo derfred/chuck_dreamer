@@ -40,8 +40,10 @@ from chuck_dreamer.training.observation import (
 from chuck_dreamer.training.observation import Observation as TrainingObservation
 
 if TYPE_CHECKING:
+  from .control_state import ControlState
   from .perception import PerceptionModule
   from .sensors import Sensor
+  from .teleop import LeaderState
 
 __all__ = [
   "RuntimeObservation",
@@ -81,7 +83,9 @@ class RuntimeObservation:
   """What a policy sees at one step: clock + joints + all produced modalities.
 
   ``t`` / ``q_meas`` / ``leader_qpos`` stay as named attributes so the M0–M2
-  scripted policies keep working unchanged. ``modalities`` is the full dict the
+  scripted policies keep working unchanged; they are now projections of the
+  :attr:`control` / :attr:`leader` state objects that carry the age and health
+  a bare vector cannot (see :meth:`build`). ``modalities`` is the full dict the
   sensor + perception layers composed for this step (it *includes* ``t`` /
   ``q_meas`` / ``leader_qpos`` so introspection over :meth:`present` is
   complete); the typed accessors and :meth:`get` read from it.
@@ -112,6 +116,23 @@ class RuntimeObservation:
   modalities: dict[str, np.ndarray] = field(default_factory=dict)
   """Every modality produced this step, keyed by modality name (sensor outputs,
   perception emits, and the base ``t`` / ``q_meas`` / ``leader_qpos``)."""
+
+  control: "ControlState | None" = None
+  """The control loop's own measurement for this step, straight off the control
+  channel: the same object its safety layer acted on, carrying ``q_age``,
+  :class:`~chuck_dreamer.runtime.control_state.FaultFlags` and whichever
+  diagnostics the tick's read budget covered. ``q_meas`` is its ``q``.
+
+  ``None`` only where no channel state was available -- a directly-constructed
+  observation in a test, or a policy loop running without a control loop."""
+
+  leader: "LeaderState | None" = None
+  """The leader reading behind :attr:`leader_qpos`, with its ``age`` and ``ok``.
+
+  The leader sits on a separate uncontended bus and is pulled directly by the
+  policy loop rather than routed through the control channel, so it is sampled
+  on a different clock from :attr:`control` -- ``age`` is how a consumer that
+  cares can tell how far apart they are."""
 
   # -- introspection (spec §5) ----------------------------------------------
 
@@ -148,6 +169,24 @@ class RuntimeObservation:
   def has_leader(self) -> bool:
     """Whether a leader-modality reading is present this step."""
     return self.leader_qpos is not None
+
+  @classmethod
+  def build(
+    cls,
+    *,
+    t: float,
+    control: "ControlState",
+    leader: "LeaderState | None",
+    modalities: dict[str, np.ndarray],
+  ) -> "RuntimeObservation":
+    return cls(
+      t=t,
+      q_meas=control.q,
+      leader_qpos=None if leader is None else leader.q,
+      modalities=modalities,
+      control=control,
+      leader=leader,
+    )
 
   # -- M6 adapter -----------------------------------------------------------
 

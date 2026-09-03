@@ -21,7 +21,8 @@ import pytest
 from omegaconf import OmegaConf
 
 from chuck_dreamer.config import load_config
-from chuck_dreamer.runtime.harness import Runtime
+from chuck_dreamer.policy import Action
+from chuck_dreamer.runtime.harness import PolicyLoop, Runtime
 from chuck_dreamer.runtime.control_mode import ControlMode
 from chuck_dreamer.runtime.modalities import RuntimeObservation
 from chuck_dreamer.runtime.sources import ManualPolicy
@@ -118,15 +119,32 @@ def test_inverse_mapping_rejects_zero_jaw_span():
 # -- FakeLeaderReader --------------------------------------------------------
 
 
-def test_fake_leader_none_then_pose_and_copy():
+def test_fake_leader_none_then_pose_and_is_immutable():
   r = FakeLeaderReader()
   assert r.latest() is None
   pose = np.arange(6, dtype=np.float64)
   r.set_pose(pose)
   got = r.latest()
-  np.testing.assert_array_equal(got, pose)
-  got[0] = 999.0                      # mutating the return must not change storage
-  np.testing.assert_array_equal(r.latest(), pose)
+  np.testing.assert_array_equal(got.q, pose)
+  assert got.ok
+  with pytest.raises(ValueError):     # the shared reading is not writeable
+    got.q[0] = 999.0
+  pose[0] = 999.0                     # nor does mutating the caller's array reach it
+  np.testing.assert_array_equal(r.latest().q, np.arange(6, dtype=np.float64))
+
+
+def test_fake_leader_reports_age_against_the_sampler_clock():
+  r = FakeLeaderReader(pose=np.zeros(6))
+  first = r.latest().age
+  time.sleep(0.02)
+  assert r.latest().age > first       # age grows between samples, storage unchanged
+
+
+def test_fake_leader_can_report_a_failed_poll():
+  r = FakeLeaderReader(pose=np.zeros(6))
+  assert r.latest().ok
+  r.set_pose(np.zeros(6), ok=False)
+  assert not r.latest().ok
 
 
 def test_fake_leader_rejects_wrong_shape():
@@ -182,7 +200,7 @@ def test_observation_with_leader_present():
   assert obs.has_leader is True
 
 
-# -- LerobotLeaderReader thread (monkeypatched lerobot, no device) -----------
+# -- LerobotLeaderReader (monkeypatched lerobot, no device) ------------------
 
 
 class _StubLeader:
@@ -193,6 +211,7 @@ class _StubLeader:
     self.connected = False
     self._action = _action([10.0, 20.0, 30.0, 40.0, 50.0], gripper_pct=100.0)
     self._raise = False
+    self.calls = 0
 
   def connect(self, calibrate=True):
     self.connected = True
@@ -201,6 +220,7 @@ class _StubLeader:
     self.connected = False
 
   def get_action(self):
+    self.calls += 1
     if self._raise:
       raise RuntimeError("simulated serial hiccup")
     return dict(self._action)
@@ -240,30 +260,64 @@ def _await(predicate, timeout=2.0, interval=0.005):
   return False
 
 
-def test_lerobot_reader_populates_latest_and_maps(stub_lerobot):
-  r = LerobotLeaderReader(port="/dev/null", jaw_lower=-0.174, jaw_upper=1.75, poll_rate_hz=200)
+def test_lerobot_reader_reads_on_demand_and_maps(stub_lerobot):
+  r = LerobotLeaderReader(port="/dev/null", jaw_lower=-0.174, jaw_upper=1.75)
+  assert r.latest() is None                   # nothing before connect
   r.start()
   try:
-    assert _await(lambda: r.latest() is not None), "reader never populated latest()"
-    q = r.latest()
-    np.testing.assert_allclose(q[:5], np.deg2rad([10.0, 20.0, 30.0, 40.0, 50.0]))
-    assert q[5] == pytest.approx(1.75)        # gripper 100% -> jaw upper
+    state = r.latest()                        # reads the bus on this thread
+    assert state is not None
+    np.testing.assert_allclose(state.q[:5], np.deg2rad([10.0, 20.0, 30.0, 40.0, 50.0]))
+    assert state.q[5] == pytest.approx(1.75)  # gripper 100% -> jaw upper
+    assert state.ok
+    assert state.age < 0.1                    # read inline: essentially fresh
   finally:
     r.stop()
+  # No polling thread exists to leak, and the reader is closed for business.
   assert not any(t.name == "runtime-leader" for t in threading.enumerate())
+  assert r.latest() is None
 
 
-def test_lerobot_reader_survives_poll_exception(stub_lerobot):
-  r = LerobotLeaderReader(port="/dev/null", jaw_lower=0.0, jaw_upper=1.0, poll_rate_hz=200)
+def test_lerobot_reader_reads_every_call(stub_lerobot):
+  """No caching between calls: each latest() is a fresh bus transaction."""
+  r = LerobotLeaderReader(port="/dev/null", jaw_lower=0.0, jaw_upper=1.0)
   r.start()
   try:
-    assert _await(lambda: r.latest() is not None)
+    before = stub_lerobot[0].calls
+    r.latest()
+    r.latest()
+    assert stub_lerobot[0].calls == before + 2
+  finally:
+    r.stop()
+
+
+def test_lerobot_reader_holds_last_value_over_a_failed_read(stub_lerobot):
+  """A serial error must not raise: this runs on the policy thread."""
+  r = LerobotLeaderReader(port="/dev/null", jaw_lower=0.0, jaw_upper=1.0)
+  r.start()
+  try:
     good = r.latest()
-    stub_lerobot[0]._raise = True               # subsequent polls now throw
-    time.sleep(0.1)                             # thread keeps spinning, holds last value
-    assert r.latest() is not None               # not killed
-    np.testing.assert_array_equal(r.latest(), good)
-    assert any(t.name == "runtime-leader" for t in threading.enumerate())
+    assert good.ok
+    stub_lerobot[0]._raise = True               # subsequent reads now throw
+    held = r.latest()                           # returns rather than raising
+    assert held is not None
+    assert not held.ok                          # and says the read failed
+    np.testing.assert_array_equal(held.q, good.q)   # last good value held
+    # `now` is not refreshed over a failure, so age keeps growing: that is what
+    # separates "one hiccup" from "the leader is gone".
+    later = r.latest()
+    assert later.age > held.age
+  finally:
+    r.stop()
+
+
+def test_lerobot_reader_returns_none_if_it_never_succeeded(stub_lerobot):
+  """A leader that fails from the first read has no value to hold."""
+  r = LerobotLeaderReader(port="/dev/null", jaw_lower=0.0, jaw_upper=1.0)
+  r.start()
+  stub_lerobot[0]._raise = True
+  try:
+    assert r.latest() is None
   finally:
     r.stop()
 
@@ -318,6 +372,43 @@ def test_manual_teleop_follower_tracks_leader(tmp_path, fake_rerun):
     # And it genuinely moved from home toward the leader (not coincidentally there).
     assert abs(pose[i] - last["q_cmd"][i]) < abs(pose[i] - home[i]) + 1e-9
   assert _runtime_threads() == []
+
+
+def test_leader_health_reaches_the_policy_observation(tmp_path, fake_rerun):
+  """The leader arrives as a LeaderState, so `age`/`ok` are visible to a policy.
+
+  The leader is pulled straight off its own reader rather than routed through
+  the control channel (separate, uncontended bus), so it is sampled on a
+  different clock than `obs.control` -- `age` is what lets a consumer tell how
+  far apart the two are.
+  """
+  seen: list = []
+
+  class _Recorder:
+    def reset(self, start):
+      pass
+
+    def act(self, obs):
+      seen.append(obs)
+      return Action(obs, q=np.asarray(obs.q_meas, dtype=np.float64))
+
+  pose = [0.1, -0.2, 0.3, 0.0, 0.0, 0.1]
+  rt   = Runtime(_manual_cfg(tmp_path, pose))
+  rt.policy = _Recorder()
+  rt.policy_loop = PolicyLoop(
+    rt.policy, rt.channel, rt.backend,
+    rate_hz=float(rt.cfg.runtime.policy_rate_hz), leader=rt.leader,
+    sensors=rt.sensors, perception=rt.perception, rerun_sink=rt.sink)
+  rt.run()
+
+  assert seen, "policy never ran"
+  obs = seen[-1]
+  assert obs.leader is not None
+  np.testing.assert_allclose(obs.leader.q, pose)
+  np.testing.assert_allclose(obs.leader_qpos, pose)   # the flat view agrees
+  assert obs.leader.ok
+  assert obs.leader.age >= 0.0
+  assert obs.has_leader
 
 
 def test_manual_teleop_out_of_box_is_clamped(tmp_path, fake_rerun):

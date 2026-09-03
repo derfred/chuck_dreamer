@@ -293,8 +293,6 @@ runtime:
       freq_hz:   0.25         # Hz; scalar or per-joint
       phase:     0.0          # rad; scalar or per-joint
 
-  # Leader arm (M2, spec §3.8).
-  # TODO: move to sensors
   leader:
     enabled: false   # start the reader whenever a leader is configured
     target: "chuck_dreamer.runtime.teleop:FakeLeaderReader"
@@ -306,7 +304,7 @@ runtime:
     #   enabled: true
     #   target: "chuck_dreamer.runtime.teleop:LerobotLeaderReader"
     #   params: { port: "/dev/tty.usbmodemXXX", calibration_id: null,
-    #             use_degrees: true, poll_rate_hz: 100 }
+    #             use_degrees: true }
 
   # Telemetry -> Rerun (spec §3.11)
   logging:

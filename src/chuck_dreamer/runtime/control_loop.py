@@ -9,10 +9,10 @@ import numpy as np
 from omegaconf import DictConfig
 
 from .backend import RobotBackend
+from .control_channel import ControlChannel
 from .control_mode import ControlMode, ControlModeMachine
 from .control_state import ControlState, FaultFlags, parse_read_budget
 from .control_trajectory import ControlTrajectory, ControlTrajectoryConfig
-from .setpoint_channel import SetpointChannel
 from .telemetry import TelemetryQueue, TelemetryRecord
 from .workspace import WorkspaceLimit, WorkspaceLimiter, build_workspace_limiter
 
@@ -37,7 +37,7 @@ class ControlLoop:
     self,
     cfg: DictConfig,
     backend: RobotBackend,
-    channel: SetpointChannel,
+    channel: ControlChannel,
     telemetry: TelemetryQueue,
     workspace: WorkspaceLimiter | None = None,
   ) -> None:
@@ -240,7 +240,8 @@ class ControlLoop:
       metrics = TelemetryRecord(t_wall=time.time(), t_mono=time.monotonic(), tick=self._ticks)
 
       with metrics.timed("read_state"):
-        state = self._backend.read_state(self._budget_s)
+        state = self._backend.read_state(self._budget_s).at_tick(self._ticks)
+      self._channel.publish_state(state)
 
       dt        = state.now - last_time
       last_time = state.now

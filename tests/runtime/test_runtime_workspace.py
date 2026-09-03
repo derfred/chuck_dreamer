@@ -27,7 +27,7 @@ from chuck_dreamer.runtime.backend import FakeBackend
 from chuck_dreamer.runtime.control_loop import ControlLoop
 from chuck_dreamer.runtime.control_mode import ControlMode
 from chuck_dreamer.runtime.control_state import ControlState, FaultFlags
-from chuck_dreamer.runtime.setpoint_channel import SetpointChannel
+from chuck_dreamer.runtime.control_channel import ControlChannel
 from chuck_dreamer.runtime.telemetry import TelemetryQueue
 from chuck_dreamer.runtime.workspace import (
   WorkspaceBox,
@@ -283,7 +283,7 @@ def _running_loop(q_init, limiter):
   """A started ControlLoop over a FakeBackend seeded at ``q_init``."""
   backend = FakeBackend(_N, lower=np.full(_N, -2.0), upper=np.full(_N, 2.0), q_init=q_init)
   backend.start()
-  loop = ControlLoop(_loop_cfg(), backend, SetpointChannel(), TelemetryQueue(), workspace=limiter)
+  loop = ControlLoop(_loop_cfg(), backend, ControlChannel(), TelemetryQueue(), workspace=limiter)
   loop.start()
   return backend, loop
 
@@ -394,7 +394,7 @@ def test_a_box_that_excludes_the_home_pose_is_refused_at_construction():
   backend.start()
   try:
     with pytest.raises(ValueError, match="does not contain the arm's home pose"):
-      ControlLoop(_loop_cfg(), backend, SetpointChannel(), TelemetryQueue(),
+      ControlLoop(_loop_cfg(), backend, ControlChannel(), TelemetryQueue(),
                   workspace=_limiter())
   finally:
     backend.stop()

@@ -26,9 +26,9 @@ from omegaconf import OmegaConf
 from chuck_dreamer.config import load_config
 from chuck_dreamer.policy import Action
 from chuck_dreamer.runtime.backend import FakeBackend
+from chuck_dreamer.runtime.control_channel import ControlChannel
 from chuck_dreamer.runtime.harness import PolicyLoop, Runtime
 from chuck_dreamer.runtime.modalities import ModalityError
-from chuck_dreamer.runtime.setpoint_channel import SetpointChannel
 
 from .conftest import control_tick_rows
 
@@ -74,11 +74,15 @@ class _RecordingPolicy:
 
 def test_policy_loop_resets_and_publishes_act_output():
   policy = _RecordingPolicy([0.1, 0.2])
-  channel = SetpointChannel()
+  channel = ControlChannel()
   home = np.array([0.3, -0.4])
   backend = FakeBackend(2, lower=np.full(2, -1.0), upper=np.full(2, 1.0),
                         q_init=home)
   loop = PolicyLoop(policy, channel, backend, rate_hz=200)
+
+  # No control loop here: stand in for its per-tick publish, since the policy
+  # loop now takes its measurement off the channel rather than the backend.
+  channel.publish_state(backend.read_state())
 
   loop.start()
   deadline = time.monotonic() + 1.0
@@ -97,6 +101,67 @@ def test_policy_loop_resets_and_publishes_act_output():
   assert obs.t >= 0.0                                      # obs carries elapsed time
   assert obs.q_meas.shape == (2,)                          # and measured joints
   assert obs.present() >= {"t", "q_meas"}                  # M3 modality dict present
+  # q_meas is a projection of the channel state, not an independent sample
+  assert obs.control is not None
+  np.testing.assert_array_equal(obs.q_meas, obs.control.q)
+  np.testing.assert_array_equal(obs.q_meas, home)
+
+
+def test_policy_is_not_called_until_a_control_state_exists():
+  """No state means nothing to build an observation around, so the policy waits."""
+  policy  = _RecordingPolicy([0.1, 0.2])
+  channel = ControlChannel()
+  backend = FakeBackend(2, lower=np.full(2, -1.0), upper=np.full(2, 1.0))
+  loop    = PolicyLoop(policy, channel, backend, rate_hz=200)
+
+  loop.start()                               # no control loop running
+  try:
+    time.sleep(0.05)
+    assert not policy.seen                   # never called with a missing measurement
+    assert channel.seq == 0                  # so nothing was published either
+
+    channel.publish_state(backend.read_state())   # the control loop comes up
+    deadline = time.monotonic() + 1.0
+    while channel.seq == 0 and time.monotonic() < deadline:
+      time.sleep(0.005)
+    assert channel.seq > 0                   # and the loop picks up from there
+  finally:
+    loop.stop()
+
+
+def test_policy_observes_the_control_loops_own_state(tmp_path, fake_rerun):
+  """End-to-end: the obs a policy sees carries the control thread's measurement.
+
+  The point of the two-way channel. Before it, the policy sampled
+  ``backend.last_positions()`` -- a bare vector on its own clock, with no age
+  and no fault flags. Now the object on the observation is the one the safety
+  layer was handed.
+  """
+  seen: list = []
+
+  class _Recorder:
+    def reset(self, start):
+      pass
+
+    def act(self, obs):
+      seen.append(obs)
+      return Action(obs, q=np.asarray(obs.q_meas, dtype=np.float64))
+
+  cfg = _cfg(tmp_path)
+  rt  = Runtime(cfg)
+  rt.policy = _Recorder()
+  rt.policy_loop = PolicyLoop(
+    rt.policy, rt.channel, rt.backend,
+    rate_hz=float(cfg.runtime.policy_rate_hz), leader=rt.leader,
+    sensors=rt.sensors, perception=rt.perception, rerun_sink=rt.sink)
+  rt.run()
+
+  assert seen, "policy never ran"
+  for obs in seen:
+    assert obs.control is not None                 # a real ControlState, not None
+    assert obs.q_meas is obs.control.q             # q_meas projects it, not a resample
+    assert obs.control.q_age >= 0.0                # and the age rides along
+  assert obs.leader is None                        # no leader configured here
 
 
 def test_boots_runs_and_shuts_down_cleanly(tmp_path, fake_rerun):
