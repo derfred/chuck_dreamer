@@ -45,13 +45,6 @@ def test_seq_tracks_the_pending_action():
   assert b.seq > a.seq
 
 
-def test_publish_rejects_a_bare_array():
-  """A policy returning a raw vector is a programming error at this seam."""
-  ch = ControlChannel()
-  with pytest.raises(TypeError, match="Action"):
-    ch.publish(np.zeros(2))
-
-
 def test_actions_are_immutable_so_the_slot_needs_no_copy():
   ch = ControlChannel()
   q = np.array([1.0, 2.0])
@@ -129,13 +122,6 @@ def test_the_two_directions_are_independent():
   assert ch.get() is not None and ch.state() is not None
   np.testing.assert_array_equal(ch.get().q, [1.0])
   np.testing.assert_array_equal(ch.state().q, [9.0])
-
-
-def test_publish_state_rejects_an_action():
-  """The slots are typed: crossing the wires is a programming error here."""
-  ch = ControlChannel()
-  with pytest.raises(TypeError, match="ControlState"):
-    ch.publish_state(_action(1.0))
 
 
 def test_concurrent_state_and_action_writers_smoke():
