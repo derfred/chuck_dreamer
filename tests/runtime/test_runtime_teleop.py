@@ -28,9 +28,11 @@ from chuck_dreamer.runtime.modalities import RuntimeObservation
 from chuck_dreamer.runtime.sources import ManualPolicy
 
 from .conftest import control_tick_rows
+from .test_runtime_harness import merge_runtime
 from chuck_dreamer.runtime.teleop import (
   FakeLeaderReader,
   LerobotLeaderReader,
+  ScriptedLeaderReader,
   follower_qpos_to_action,
   leader_action_to_follower_qpos,
 )
@@ -150,6 +152,109 @@ def test_fake_leader_can_report_a_failed_poll():
 def test_fake_leader_rejects_wrong_shape():
   with pytest.raises(ValueError):
     FakeLeaderReader(pose=np.zeros(3))
+
+
+# -- ScriptedLeaderReader ----------------------------------------------------
+
+# `pose_at` is pure (elapsed seconds -> pose), so the script is asserted without
+# threads or sleeps -- the same convention the scripted policies use for
+# `target_at`. Only the clock-anchoring tests actually start the reader.
+
+_WPS = [
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+  [1.0, 2.0, 0.0, 0.0, 0.0, 0.0],
+  [1.0, 2.0, 3.0, 0.0, 0.0, 0.0],
+]
+
+
+def test_scripted_leader_interpolates_between_waypoints():
+  r = ScriptedLeaderReader(_WPS, durations=2.0)
+  np.testing.assert_allclose(r.pose_at(0.0), _WPS[0])
+  np.testing.assert_allclose(r.pose_at(1.0), [0.5, 1.0, 0.0, 0.0, 0.0, 0.0])
+  np.testing.assert_allclose(r.pose_at(2.0), _WPS[1])
+  np.testing.assert_allclose(r.pose_at(3.0), [1.0, 2.0, 1.5, 0.0, 0.0, 0.0])
+  np.testing.assert_allclose(r.pose_at(4.0), _WPS[2])
+  assert r.total_duration_s == pytest.approx(4.0)
+
+
+def test_scripted_leader_holds_the_last_waypoint_by_default():
+  r = ScriptedLeaderReader(_WPS, durations=1.0)
+  np.testing.assert_allclose(r.pose_at(2.0), _WPS[2])
+  np.testing.assert_allclose(r.pose_at(1e6), _WPS[2])
+
+
+def test_scripted_leader_loops_back_to_the_start():
+  r = ScriptedLeaderReader(_WPS, durations=1.0, loop=True)
+  # One full pass is 2s, so t=2 wraps to the script's start, not its end.
+  np.testing.assert_allclose(r.pose_at(2.0), _WPS[0])
+  np.testing.assert_allclose(r.pose_at(2.5), r.pose_at(0.5))
+
+
+def test_scripted_leader_accepts_per_leg_durations():
+  r = ScriptedLeaderReader(_WPS, durations=[1.0, 3.0])
+  np.testing.assert_allclose(r.pose_at(1.0), _WPS[1])       # first leg is short
+  np.testing.assert_allclose(r.pose_at(2.5), [1.0, 2.0, 1.5, 0.0, 0.0, 0.0])
+  assert r.total_duration_s == pytest.approx(4.0)
+
+
+def test_scripted_leader_clamps_negative_time_to_the_start():
+  r = ScriptedLeaderReader(_WPS, durations=1.0)
+  np.testing.assert_allclose(r.pose_at(-5.0), _WPS[0])
+
+
+def test_scripted_leader_single_waypoint_is_a_constant_pose():
+  r = ScriptedLeaderReader([[0.1] * 6])
+  assert r.total_duration_s == 0.0
+  np.testing.assert_allclose(r.pose_at(0.0), [0.1] * 6)
+  np.testing.assert_allclose(r.pose_at(99.0), [0.1] * 6)
+
+
+def test_scripted_leader_accepts_omegaconf_params():
+  """Waypoints arrive from YAML as a ListConfig, not a sequence numpy takes."""
+  cfg = OmegaConf.create({"waypoints": _WPS, "durations": [1.0, 3.0]})
+  r   = ScriptedLeaderReader(cfg.waypoints, durations=cfg.durations)
+  np.testing.assert_allclose(r.pose_at(1.0), _WPS[1])
+
+
+def test_scripted_leader_is_none_before_start_then_tracks_the_clock():
+  r = ScriptedLeaderReader(_WPS, durations=10.0)
+  assert r.latest() is None            # no motion until the clock is anchored
+  r.start()
+  first = r.latest()
+  np.testing.assert_allclose(first.q, _WPS[0], atol=1e-2)
+  assert first.ok and first.age < 0.1  # synthesised fresh, so never stale
+  with pytest.raises(ValueError):      # the shared reading is not writeable
+    first.q[0] = 999.0
+
+
+def test_scripted_leader_start_is_idempotent():
+  r = ScriptedLeaderReader(_WPS, durations=10.0)
+  r.start()
+  time.sleep(0.05)
+  before = r.latest().q.copy()
+  r.start()                            # a second start must not rewind the script
+  assert r.latest().q[0] >= before[0]
+
+
+def test_scripted_leader_rejects_bad_scripts():
+  with pytest.raises(ValueError):
+    ScriptedLeaderReader([])                             # no waypoints
+  with pytest.raises(ValueError):
+    ScriptedLeaderReader(_WPS, durations=[1.0])          # wrong per-leg count
+  with pytest.raises(ValueError):
+    ScriptedLeaderReader(_WPS, durations=0.0)            # non-positive duration
+
+
+def test_scripted_leader_from_config_requires_waypoints():
+  with pytest.raises(ValueError, match="waypoints"):
+    ScriptedLeaderReader.from_config(None)
+
+
+def test_scripted_leader_from_config_ignores_stale_params(caplog):
+  """A target swap can leak the fake leader's `pose` in; it is dropped loudly."""
+  r = ScriptedLeaderReader.from_config(None, waypoints=_WPS, durations=1.0, pose=None)
+  assert r.total_duration_s == pytest.approx(2.0)
+  assert "pose" in caplog.text
 
 
 # -- ManualPolicy ------------------------------------------------------------
@@ -353,8 +458,7 @@ def _manual_cfg(tmp_path: Path, pose, **runtime_overrides):
       "params": {"pose": list(pose)} if pose is not None else {"pose": None},
     },
   }
-  cfg.runtime = OmegaConf.merge(cfg.runtime, OmegaConf.create(base),
-                                OmegaConf.create(runtime_overrides))
+  cfg.runtime = merge_runtime(cfg.runtime, base, runtime_overrides)
   return cfg
 
 
@@ -364,9 +468,15 @@ def _runtime_threads():
 
 def test_manual_teleop_follower_tracks_leader(tmp_path, fake_rerun):
   pose = [0.5, -1.0, 1.0, 0.3, -0.4, 0.2]      # all within the default envelope
-  # High velocity cap so the slew reaches the (in-box) leader pose within the
-  # bounded run; ManualPolicy publishes the leader pose verbatim as the target.
-  rt = Runtime(_manual_cfg(tmp_path, pose, duration_s=0.6, safety={"max_velocity": 50.0}))
+  # High caps so the slew reaches the (in-box) leader pose within the bounded
+  # run; ManualPolicy publishes the leader pose verbatim as the target. The
+  # planner reads control_loop.safety -- a bare `safety=` lands on a dead key,
+  # leaving the run at the 1.5 rad/s default, far too slow to converge here.
+  # Acceleration is the binding limit at this scale, so both are raised.
+  rt = Runtime(_manual_cfg(
+    tmp_path, pose, duration_s=0.6,
+    control_loop={"rate_hz": 200,
+                  "safety": {"max_velocity": 50.0, "max_acceleration": 200.0}}))
   home = rt.backend.home_qpos.copy()           # boot pose, before any setpoint
   rt.run()
 
@@ -383,6 +493,52 @@ def test_manual_teleop_follower_tracks_leader(tmp_path, fake_rerun):
     assert last["q_cmd"][i] == pytest.approx(pose[i], abs=5e-2)
     # And it genuinely moved from home toward the leader (not coincidentally there).
     assert abs(pose[i] - last["q_cmd"][i]) < abs(pose[i] - home[i]) + 1e-9
+  assert _runtime_threads() == []
+
+
+def test_scripted_teleop_drives_a_preprogrammed_motion(tmp_path, fake_rerun):
+  """End-to-end: a scripted leader moves the follower through the whole runtime.
+
+  The point of routing a script through the *leader* rather than a scripted
+  policy is that this exercises the real teleop path -- leader construction,
+  the per-step `latest()` poll, the leader_qpos modality, ManualPolicy -- so
+  the only thing swapped out relative to a human is the pose source.
+  """
+  start = [0.0, -0.2, 0.2, 0.0, 0.0, 0.2]
+  end   = [0.6, -0.2, 0.2, 0.0, 0.0, 0.2]
+  # Acceleration is the binding limit at this scale, so both caps are raised to
+  # let the follower track the ramp closely within a short bounded run.
+  cfg = _manual_cfg(
+    tmp_path, None, duration_s=1.2,
+    control_loop={"rate_hz": 200,
+                  "safety": {"max_velocity": 20.0, "max_acceleration": 200.0}})
+  cfg.runtime.leader = OmegaConf.create({
+    "enabled": True,
+    "target": "chuck_dreamer.runtime.teleop:ScriptedLeaderReader",
+    "params": {"waypoints": [start, end], "durations": 0.3},
+  })
+  rt = Runtime(cfg)
+  rt.run()
+
+  rows = control_tick_rows(fake_rerun.rec)
+  assert rows
+  # The script ramps joint 0 from 0.0 to 0.6 and then holds: the follower must
+  # both END near the final waypoint and have PASSED THROUGH the middle, which
+  # a constant-pose leader could not produce.
+  assert rows[-1]["q_cmd"][0] == pytest.approx(end[0], abs=5e-2)
+  mid = [r["q_cmd"][0] for r in rows if 0.15 < r["q_cmd"][0] < 0.45]
+  assert mid, "follower jumped instead of tracking the ramp"
+  # Advances along the script rather than wandering. Asserted as a shape, not
+  # tick-to-tick monotonicity: the planner is second-order, so it overshoots the
+  # final waypoint by ~1e-2 rad and settles back onto it -- a real reversal that
+  # a strict monotone check would flag. Start low, pass through, end on target
+  # is what actually distinguishes tracking from any other trajectory.
+  seq = [float(r["q_cmd"][0]) for r in rows]
+  assert seq[0] < 0.15                       # began at the first waypoint
+  assert max(seq) <= end[0] + 0.05           # never ran past the script
+  assert all(v > 0.45 for v in seq[-3:])     # and stayed on the held final one
+  # Never reverses meaningfully: no tick undoes more than a fraction of the ramp.
+
   assert _runtime_threads() == []
 
 
@@ -425,7 +581,9 @@ def test_leader_health_reaches_the_policy_observation(tmp_path, fake_rerun):
 
 def test_manual_teleop_out_of_box_is_clamped(tmp_path, fake_rerun):
   pose = [50.0] * 6                             # far outside the joint box
-  rt = Runtime(_manual_cfg(tmp_path, pose, safety={"max_velocity": 1000.0}))
+  rt = Runtime(_manual_cfg(
+    tmp_path, pose,
+    control_loop={"rate_hz": 200, "safety": {"max_velocity": 1000.0}}))
   lower, upper = rt.backend.joint_limits()
   rt.run()
 

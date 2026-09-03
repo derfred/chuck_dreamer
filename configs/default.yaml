@@ -306,6 +306,20 @@ runtime:
       # Constant follower-ordered radians pose; null -> latest() is None and a
       # consuming policy holds. Override for a non-trivial fake pose in tests.
       pose: null
+    # Pre-programmed motion: a scripted leader walks a waypoint list over wall
+    # time, so the whole teleop path runs without a human arm. Poses are
+    # follower-ordered radians; durations is a scalar (every leg) or one value
+    # per leg (len(waypoints) - 1). loop: true restarts the script instead of
+    # holding the last waypoint. The kernel's slew + clamp still bound it.
+    #   enabled: true
+    #   target: "chuck_dreamer.runtime.teleop:ScriptedLeaderReader"
+    #   params:
+    #     waypoints:
+    #       - [ 0.0, -1.57,  1.48, 0.0, 0.0, 0.79]
+    #       - [ 0.5, -1.00,  1.00, 0.0, 0.0, 0.20]
+    #       - [-0.5, -1.00,  1.00, 0.0, 0.0, 1.50]
+    #     durations: 2.0
+    #     loop: true
     # Real device:
     #   enabled: true
     #   target: "chuck_dreamer.runtime.teleop:LerobotLeaderReader"

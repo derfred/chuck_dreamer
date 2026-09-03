@@ -33,6 +33,32 @@ from chuck_dreamer.runtime.modalities import ModalityError
 from .conftest import control_tick_rows
 
 
+def merge_runtime(runtime, *overrides):
+  """Merge override dicts into a runtime config, rejecting unknown keys.
+
+  Plain :func:`OmegaConf.merge` *creates* a key that is not already in the
+  config, so a mistyped or mis-nested override lands somewhere nothing reads
+  and the test silently runs on defaults instead. (This is not hypothetical:
+  ``safety={...}`` here reads as ``runtime.safety``, but the planner reads
+  ``runtime.control_loop.safety`` -- so the cap never applied.) Struct mode
+  turns that class of typo into a loud failure at merge time.
+
+  The ``params`` blocks under ``policy`` / ``leader`` / ``backend`` are exempt:
+  their keys are defined by whichever registry target is selected, so an
+  unknown key there is the normal case, not a typo.
+  """
+  merged = OmegaConf.create(runtime)
+  OmegaConf.set_struct(merged, True)
+  for node in ("policy", "leader", "backend"):
+    params = OmegaConf.select(merged, f"{node}.params")
+    if params is not None:
+      OmegaConf.set_struct(params, False)
+  for override in overrides:
+    merged = OmegaConf.merge(merged, OmegaConf.create(override))
+  OmegaConf.set_struct(merged, False)   # the runtime itself may add keys
+  return merged
+
+
 def _cfg(tmp_path: Path, **runtime_overrides):
   """Full default config with the runtime block patched for a fast test."""
   cfg = load_config()
@@ -44,8 +70,7 @@ def _cfg(tmp_path: Path, **runtime_overrides):
     "logging": {"rerun": {"rrd_dir": str(tmp_path / "rrd")}},
     "viewer": {"enabled": False},
   }
-  cfg.runtime = OmegaConf.merge(cfg.runtime, OmegaConf.create(base),
-                                OmegaConf.create(runtime_overrides))
+  cfg.runtime = merge_runtime(cfg.runtime, base, runtime_overrides)
   return cfg
 
 
@@ -271,7 +296,9 @@ def test_out_of_envelope_sweep_is_clamped_every_tick(tmp_path, fake_rerun):
     tmp_path,
     policy={"target": "chuck_dreamer.runtime.sources:SineSweep",
             "params": {"amplitude": 50.0, "freq_hz": 2.0, "phase": 0.0}},
-    safety={"max_velocity": 1000.0},  # let it race to the boundary fast
+    # let it race to the boundary fast. Note the full path: the planner reads
+    # control_loop.safety, so a bare `safety=` would land on a dead key.
+    control_loop={"rate_hz": 200, "safety": {"max_velocity": 1000.0}},
   )
   rt = Runtime(cfg)
   lower, upper = rt.backend.joint_limits()

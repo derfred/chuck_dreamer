@@ -4,11 +4,24 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 import numpy as np
+from omegaconf import OmegaConf
 
 logger = logging.getLogger(__name__)
+
+
+def _as_plain(value: Any) -> Any:
+  """Unwrap an OmegaConf node so numpy sees a plain list/scalar.
+
+  Leader params arrive straight from ``runtime.leader.params``, so a YAML
+  waypoint list is a ``ListConfig`` rather than a sequence numpy understands.
+  """
+  if OmegaConf.is_config(value):
+    return OmegaConf.to_container(value, resolve=True)
+  return value
+
 
 # lerobot motor order, verified against the SO-101 leader's
 # lerobot.teleoperators.so_leader.so_leader and the SO-101 follower's
@@ -218,6 +231,132 @@ class LerobotLeaderReader:
       if self._latest is not None and self._latest.ok:
         self._latest = LeaderState(q=self._latest.q, now=self._latest.now, ok=False)
     return None if self._latest is None else self._latest.aged(time.monotonic())
+
+
+class ScriptedLeaderReader:
+  """A fake leader that walks a pre-programmed waypoint list over wall time.
+
+  Drives the *teleop path* — the leader modality, its ``age``/``ok`` health, and
+  the follower-order radian convention — from a script instead of a human arm,
+  so pre-programmed motions exercise exactly the code a real leader would.
+  (To move the arm without involving the leader at all, a scripted
+  :class:`~chuck_dreamer.policy.Policy` in :mod:`chuck_dreamer.runtime.sources`
+  is the simpler tool.)
+
+  ``waypoints`` is a list of follower-ordered radian poses, shape ``(n,)`` each.
+  The reader linearly interpolates from waypoint ``i`` to ``i+1`` over the
+  matching entry of ``durations`` (a scalar broadcast to every leg, or one value
+  per leg, i.e. ``len(waypoints) - 1`` of them). Motion starts at the first
+  :meth:`start` and is a pure function of elapsed time thereafter — the
+  time -> pose math lives in :meth:`pose_at` so a script is asserted without
+  threads, exactly as the scripted policies expose :meth:`target_at`.
+
+  Past the final waypoint the reader either holds it (``loop=False``, the
+  default) or restarts the script from the beginning (``loop=True``). A
+  single-waypoint script is a constant pose, i.e. :class:`FakeLeaderReader`.
+
+  The interpolation is deliberately position-only and unsmoothed: the control
+  kernel's slew and clamp shape and bound the motion, the same as for a human
+  leader, so a script may name poses outside the safety envelope and the
+  kernel's clamp is what holds the boundary.
+  """
+
+  def __init__(
+    self,
+    waypoints: Any,
+    *,
+    durations: Any = 2.0,
+    loop:      bool = False,
+  ) -> None:
+    wps = np.asarray(_as_plain(waypoints), dtype=np.float64)
+    if wps.ndim != 2 or wps.shape[0] < 1:
+      raise ValueError(
+        f"waypoints must be a non-empty list of joint vectors; got shape {wps.shape}")
+    wps.flags.writeable = False
+    self._wps   = wps
+    self._n_leg = wps.shape[0] - 1
+
+    durs = np.asarray(_as_plain(durations), dtype=np.float64)
+    if durs.ndim == 0:
+      durs = np.full((self._n_leg,), float(durs))
+    elif durs.shape != (self._n_leg,):
+      raise ValueError(
+        f"durations must be a scalar or {self._n_leg} values "
+        f"(one per leg between {wps.shape[0]} waypoints); got shape {durs.shape}")
+    if self._n_leg and not np.all(durs > 0.0):
+      raise ValueError("every duration must be positive")
+    self._durs  = durs
+    # Cumulative leg-end times, so pose_at is a searchsorted rather than a walk.
+    self._ends  = np.cumsum(durs) if self._n_leg else np.zeros(0)
+    self._total = float(self._ends[-1]) if self._n_leg else 0.0
+    self._loop  = bool(loop)
+
+    self._lock = threading.Lock()
+    self._t0: float | None = None
+
+  @property
+  def total_duration_s(self) -> float:
+    """Wall-clock length of one pass through the script, in seconds."""
+    return self._total
+
+  def pose_at(self, t: float) -> np.ndarray:
+    """The scripted pose at ``t`` seconds since :meth:`start` (pure)."""
+    if self._n_leg == 0:
+      return cast(np.ndarray, self._wps[0])
+    t = max(0.0, float(t))
+    if t >= self._total:
+      if not self._loop:
+        return cast(np.ndarray, self._wps[-1])
+      t = t % self._total
+    leg   = int(np.searchsorted(self._ends, t, side="right"))
+    leg   = min(leg, self._n_leg - 1)          # guard the float-equality edge
+    start = self._ends[leg] - self._durs[leg]
+    frac  = (t - start) / self._durs[leg]
+    frac  = min(1.0, max(0.0, frac))
+    a, b  = self._wps[leg], self._wps[leg + 1]
+    return cast(np.ndarray, a + frac * (b - a))
+
+  def start(self) -> None:
+    """Anchor the script's clock at now (idempotent: a restart does not rewind)."""
+    with self._lock:
+      if self._t0 is None:
+        self._t0 = time.monotonic()
+
+  def stop(self) -> None:
+    pass
+
+  def latest(self) -> LeaderState | None:
+    """The scripted pose for right now; ``None`` before :meth:`start`."""
+    with self._lock:
+      t0 = self._t0
+    if t0 is None:
+      return None
+    now = time.monotonic()
+    q   = np.asarray(self.pose_at(now - t0), dtype=np.float64).copy()
+    q.flags.writeable = False  # handed to the observation; never mutated
+    # Synthesised fresh every call, so `now` is the sample time and age ~= 0 --
+    # a scripted leader never goes stale, unlike a serial one.
+    return LeaderState(q=q, now=now, ok=True).aged(time.monotonic())
+
+  @classmethod
+  def from_config(
+    cls,
+    cfg,
+    *,
+    waypoints=None,
+    durations=2.0,
+    loop=False,
+    **ignored,
+  ) -> "ScriptedLeaderReader":
+    if ignored:
+      logger.warning(
+        "ScriptedLeaderReader ignoring leader params it does not use: %s",
+        sorted(ignored))
+    if waypoints is None:
+      raise ValueError(
+        "ScriptedLeaderReader needs runtime.leader.params.waypoints: a list of "
+        "follower-ordered radian joint vectors")
+    return cls(waypoints, durations=durations, loop=loop)
 
 
 class FakeLeaderReader:

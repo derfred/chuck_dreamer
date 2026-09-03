@@ -17,6 +17,7 @@ from .teleop import (
   FakeLeaderReader,
   LeaderReader,
   LeaderState,
+  ScriptedLeaderReader,
   leader_action_to_follower_qpos,
 )
 
@@ -41,6 +42,7 @@ __all__ = [
   "ManualPolicy",
   "LeaderReader",
   "FakeLeaderReader",
+  "ScriptedLeaderReader",
   "LeaderState",
   "leader_action_to_follower_qpos",
 ]
