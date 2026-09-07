@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import time
 from typing import Any
@@ -14,7 +15,11 @@ from .control_state import ControlState, FaultFlags, parse_read_budget
 from .control_trajectory import ControlTrajectory, ControlTrajectoryConfig
 from .telemetry import TelemetryQueue, TelemetryRecord
 from .threads import PacedLoop
-from .workspace import WorkspaceLimit, WorkspaceLimiter, build_workspace_limiter
+from .workspace import (
+  EeTracker, WorkspaceLimit, WorkspaceLimiter, build_ee_tracker, build_workspace_limiter,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def build_control_config(rt: DictConfig, *, n_joints: int) -> DictConfig:
@@ -60,9 +65,35 @@ class ControlLoop(PacedLoop):
     # Cartesian envelope (None unless configured); see workspace.py. Built here
     # rather than injected so a misconfigured box fails at construction, before
     # any thread has started commanding an arm.
-    self._workspace: WorkspaceLimiter | None = workspace if workspace is not None else build_workspace_limiter(cfg)
+    #
+    # The FK tip evaluator is built unconditionally -- the tip is telemetry on
+    # every rig, whereas the box is opt-in -- and the envelope shares it so the
+    # tick evaluates FK once. An injected limiter brings its own tracker, so
+    # the caller stays in charge of which FK is in play.
+    self._ee: EeTracker | None
+    self._workspace: WorkspaceLimiter | None
+    if workspace is not None:
+      self._workspace = workspace
+      self._ee        = workspace.tracker
+    else:
+      self._ee        = self._build_ee_tracker(cfg)
+      self._workspace = build_workspace_limiter(cfg, tracker=self._ee)
     if self._workspace is not None:
       self._check_home_inside_workspace(backend)
+
+  @staticmethod
+  def _build_ee_tracker(cfg: DictConfig) -> EeTracker | None:
+    """The FK tip evaluator, or ``None`` if the rig cannot supply one.
+
+    Tip telemetry is a nicety, not a safety function, so a missing URDF must
+    not stop the runtime from commanding an arm -- the envelope, which *is* a
+    safety function, still raises from its own builder.
+    """
+    try:
+      return build_ee_tracker(cfg)
+    except Exception as exc:                              # noqa: BLE001
+      logger.warning("no FK tip telemetry: %s", exc)
+      return None
 
   def _check_home_inside_workspace(self, backend: RobotBackend) -> None:
     """Refuse a box that does not contain the arm's rest pose."""
@@ -183,6 +214,17 @@ class ControlLoop(PacedLoop):
 
     return q_cmd, limits
 
+  def _tip(self, q: np.ndarray) -> np.ndarray | None:
+    """Measured tip position for telemetry, or ``None`` without an FK model.
+
+    Evaluated on every tick from the *measured* pose, so the trace is
+    continuous even when the arm is e-stopped or holding and the command path
+    never reaches the safety limiter.
+    """
+    if self._ee is None:
+      return None
+    return self._ee(q)
+
   def _breach(self, ws: "WorkspaceLimit") -> None:
     """Latch an e-stop for a workspace breach, announcing it once.
 
@@ -246,7 +288,7 @@ class ControlLoop(PacedLoop):
           trajectory     = trajectory.update(action, state, q_ref_actual=q_cmd_last)
           current_action = action
 
-      metrics.update(state=state, dt=dt, mode=mode)
+      metrics.update(state=state, dt=dt, mode=mode, ee_pos=self._tip(state.q))
       if trajectory is not None:
         ref = trajectory.tick(dt)
         if ref is None:

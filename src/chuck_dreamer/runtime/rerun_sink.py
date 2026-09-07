@@ -202,6 +202,10 @@ class RerunSink(ManagedThread):
       for name, arr in (("q_meas", rec.q_meas), ("q_cmd", rec.q_cmd), ("target", rec.target)):
         if arr is not None:
           self._rec.log(f"control/{name}", rr.Scalars(np.asarray(arr, dtype=float).tolist()))
+      if rec.ee_pos is not None:
+        ee = np.asarray(rec.ee_pos, dtype=float)
+        self._rec.log("control/ee_pos", rr.Scalars(ee.tolist()))
+        self._rec.log("world/ee_tip", rr.Points3D(ee.reshape(1, 3)))
 
   def _log_observation_snapshot(self, snap: _ObsSnapshot) -> None:
     import rerun as rr

@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 from omegaconf import OmegaConf
 
+from chuck_dreamer.common import FK_MODEL_PATH
 from chuck_dreamer.runtime.backend import FakeBackend
 from chuck_dreamer.runtime.control_loop import ControlLoop
 from chuck_dreamer.policy import Action
@@ -498,3 +499,65 @@ def test_action_age_is_recorded_on_the_tick_that_consumes_the_setpoint():
   assert 0.0 < aged[0].action_age_s < 0.5
   # Every other tick reports "no new action", not a stale or growing age.
   assert all(r.action_age_s == -1.0 for r in rows if r is not aged[0])
+
+
+# -- FK tip telemetry ---------------------------------------------------------
+
+
+@pytest.mark.skipif(not FK_MODEL_PATH.exists(), reason="SO-101 URDF not present")
+def test_the_tip_is_logged_without_a_workspace_envelope():
+  """FK tip telemetry does not depend on the (opt-in) Cartesian envelope.
+
+  The ``ee`` observation modality only works on a MuJoCo backend, so on a real
+  arm this record field is the *only* source of end-effector position.
+  """
+  b     = FakeBackend(_N, lower=_LOWER, upper=_UPPER)
+  telem = TelemetryQueue()
+  loop  = ControlLoop(_cfg(), b, ControlChannel(), telem)
+  assert loop._workspace is None, "this test wants the no-envelope path"
+
+  loop.start()
+  time.sleep(0.05)
+  loop.stop()
+
+  rows = [r for r in telem.drain() if r.kind == "control" and not r.event]
+  assert rows
+  assert all(r.ee_pos is not None for r in rows), "a tick logged no tip"
+  assert all(r.ee_pos.shape == (3,) for r in rows)
+  # The arm holds at home, so the tip must agree with FK on the home pose.
+  expected = loop._ee(b.home_qpos)
+  np.testing.assert_allclose(rows[-1].ee_pos, expected, atol=1e-9)
+
+
+@pytest.mark.skipif(not FK_MODEL_PATH.exists(), reason="SO-101 URDF not present")
+def test_the_tip_is_logged_on_ticks_that_never_reach_the_safety_limiter():
+  """An e-stopped arm still reports where it is.
+
+  The tip is computed from the *measured* pose next to the other per-tick
+  state, not from the command path -- which a stopping mode short-circuits.
+  """
+  b     = FakeBackend(_N, lower=_LOWER, upper=_UPPER)
+  telem = TelemetryQueue()
+  loop  = ControlLoop(_cfg(), b, ControlChannel(), telem)
+
+  loop.start()
+  loop.request_estop()
+  time.sleep(0.05)
+  loop.stop()
+
+  rows = [r for r in telem.drain() if r.kind == "control" and not r.event]
+  stopped = [r for r in rows if r.mode == ControlMode.ESTOP.value]
+  assert stopped, "expected e-stopped ticks"
+  assert all(r.ee_pos is not None for r in stopped)
+
+
+@pytest.mark.skipif(not FK_MODEL_PATH.exists(), reason="SO-101 URDF not present")
+def test_the_envelope_and_the_tip_telemetry_share_one_fk():
+  """One Pinocchio ``Data`` per loop: the tick must not evaluate FK twice."""
+  cfg = _cfg()
+  cfg.control_loop.safety.workspace = [[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]]
+  loop = ControlLoop(cfg, FakeBackend(_N, lower=_LOWER, upper=_UPPER),
+                     ControlChannel(), TelemetryQueue())
+
+  assert loop._workspace is not None
+  assert loop._ee is loop._workspace.tracker

@@ -54,6 +54,8 @@ class TelemetryRecord:
   ws_scale: float = 1.0
   ws_breach_m: float = 0.0
 
+  ee_pos: np.ndarray | None = None
+
   # -- policy rows (kind="policy") --------------------------------------------
   # The policy loop's analogue of ``backend_s``: where its step time went.
   # ``policy_s`` is the whole step, and the three below are its stages, so
@@ -90,9 +92,12 @@ class TelemetryRecord:
     limits=None,
     mode=None,
     action_age_s: float | None = None,
+    ee_pos=None,
   ) -> None:
     """Fold one tick's outcome into the record."""
     self.dt = float(dt)
+    if ee_pos is not None:
+      self.ee_pos = np.asarray(ee_pos, dtype=np.float64)
     if state is not None:
       self.q_meas    = state.q
       self.q_age     = float(state.q_age)
@@ -131,10 +136,15 @@ class TelemetryRecord:
 # Per-joint quantities: stored as arrays, expanded to `<name>_<i>` columns.
 _ARRAY_FIELDS = ("q_meas", "q_cmd", "target")
 
+# Fixed-width array fields, as ``(name, suffixes)``. Unlike _ARRAY_FIELDS these
+# are not joint-width: the tip is three Cartesian components whatever the arm.
+_XYZ_FIELDS = (("ee_pos", ("x", "y", "z")),)
+
 
 def _scalar_fields() -> list[str]:
   """Every scalar field, in declaration order, derived from the dataclass."""
-  return [f.name for f in fields(TelemetryRecord) if f.name not in _ARRAY_FIELDS] + ["backend_s"]
+  wide = set(_ARRAY_FIELDS) | {name for name, _ in _XYZ_FIELDS}
+  return [f.name for f in fields(TelemetryRecord) if f.name not in wide] + ["backend_s"]
 
 
 def record_fieldnames(n_joints: int) -> list[str]:
@@ -142,6 +152,8 @@ def record_fieldnames(n_joints: int) -> list[str]:
   cols = _scalar_fields()
   for name in _ARRAY_FIELDS:
     cols.extend(f"{name}_{i}" for i in range(n_joints))
+  for name, suffixes in _XYZ_FIELDS:
+    cols.extend(f"{name}_{s}" for s in suffixes)
   return cols
 
 
@@ -157,6 +169,10 @@ def record_to_row(rec: TelemetryRecord, n_joints: int) -> dict[str, Any]:
     arr = getattr(rec, name)
     for i in range(n_joints):
       row[f"{name}_{i}"] = "" if arr is None else float(arr[i])
+  for name, suffixes in _XYZ_FIELDS:
+    arr = getattr(rec, name)
+    for i, suffix in enumerate(suffixes):
+      row[f"{name}_{suffix}"] = "" if arr is None else float(arr[i])
   return row
 
 

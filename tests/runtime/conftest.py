@@ -73,6 +73,9 @@ class _FakeRerun(types.ModuleType):
   def TextLog(self, s):  # noqa: N802
     return _FakeArchetype("textlog", s)
 
+  def Points3D(self, p):  # noqa: N802
+    return _FakeArchetype("points3d", np.asarray(p))
+
 
 @pytest.fixture
 def fake_rerun(monkeypatch):

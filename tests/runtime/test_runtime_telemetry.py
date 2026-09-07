@@ -150,10 +150,17 @@ def test_csv_columns_track_the_dataclass_automatically():
   """The header is derived, so a new field needs no second edit to appear."""
   from dataclasses import fields as dc_fields
 
+  from chuck_dreamer.runtime.telemetry import _ARRAY_FIELDS, _XYZ_FIELDS
+
   cols = set(record_fieldnames(2))
+  xyz  = dict(_XYZ_FIELDS)
   for f in dc_fields(TelemetryRecord):
-    if f.name in ("q_meas", "q_cmd", "target"):
+    if f.name in _ARRAY_FIELDS:
       assert f"{f.name}_0" in cols and f"{f.name}_1" in cols
+    elif f.name in xyz:
+      # Fixed-width, not joint-width: one column per component.
+      for suffix in xyz[f.name]:
+        assert f"{f.name}_{suffix}" in cols, f"{f.name}_{suffix} missing"
     else:
       assert f.name in cols, f"{f.name} declared but not a CSV column"
 

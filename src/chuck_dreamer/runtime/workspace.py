@@ -39,7 +39,10 @@ from typing import Any
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
-__all__ = ["WorkspaceBox", "WorkspaceLimiter", "WorkspaceLimit", "build_workspace_limiter"]
+__all__ = [
+  "EeTracker", "WorkspaceBox", "WorkspaceLimiter", "WorkspaceLimit",
+  "build_ee_tracker", "build_workspace_limiter",
+]
 
 # FK positions the tip from the first five joints; the jaw (joint 6) does not.
 N_POSITIONING_JOINTS = 5
@@ -92,6 +95,34 @@ class WorkspaceBox:
     return np.maximum(p - self.lower, 0.0), np.maximum(self.upper - p, 0.0)
 
 
+class EeTracker:
+  """Evaluates the tip position for a joint vector, via Pinocchio FK.
+
+  Not thread-safe -- :class:`~chuck_dreamer.common.fk.FK` holds mutable Pinocchio ``Data``
+  """
+
+  def __init__(self, fk: Any, *, dq: np.ndarray | None = None) -> None:
+    self._fk = fk
+    self._dq = None if dq is None else np.asarray(dq, dtype=np.float64).reshape(N_POSITIONING_JOINTS)
+
+  def __call__(self, q: np.ndarray) -> np.ndarray:
+    """Tip position (arm frame, metres) for a full joint vector."""
+    return np.asarray(self._fk(self.positioning(q), self._dq), dtype=np.float64).reshape(3)
+
+  def jacobian(self, q: np.ndarray) -> np.ndarray:
+    """Positional Jacobian at ``q``, for the five positioning joints."""
+    return self._fk.jacobian(self.positioning(q), self._dq)
+
+  def positioning(self, q: np.ndarray) -> np.ndarray:
+    """The five FK joints of ``q``, zero-padded if the arm reports fewer."""
+    q = np.asarray(q, dtype=np.float64).reshape(-1)
+    if q.size >= N_POSITIONING_JOINTS:
+      return q[:N_POSITIONING_JOINTS]
+    padded          = np.zeros(N_POSITIONING_JOINTS, dtype=np.float64)
+    padded[:q.size] = q
+    return padded
+
+
 @dataclass(frozen=True)
 class WorkspaceLimit:
   """What the limiter did to one tick's command, for telemetry."""
@@ -129,10 +160,11 @@ class WorkspaceLimiter:
   ) -> None:
     if margin_m <= 0.0:
       raise ValueError(f"workspace margin_m must be positive; got {margin_m}")
-    self._fk       = fk
+    # Accept either a raw FK or an already-built tracker, so the control loop
+    # can hand over the one it logs from and the tick's FK is shared.
+    self._tracker  = fk if isinstance(fk, EeTracker) else EeTracker(fk, dq=dq)
     self._box      = box
     self._margin   = float(margin_m)
-    self._dq       = None if dq is None else np.asarray(dq, dtype=np.float64).reshape(N_POSITIONING_JOINTS)
     self._verify_iters = int(verify_iters)
 
   @property
@@ -144,18 +176,18 @@ class WorkspaceLimiter:
     """Width of the slowdown ramp inside each wall, metres."""
     return self._margin
 
+  @property
+  def tracker(self) -> EeTracker:
+    """The FK evaluator behind the envelope (shared with the control loop)."""
+    return self._tracker
+
   def ee_pos(self, q: np.ndarray) -> np.ndarray:
     """Tip position (arm frame, metres) for a full joint vector."""
-    return np.asarray(self._fk(self._positioning(q), self._dq), dtype=np.float64).reshape(3)
+    return self._tracker(q)
 
   def _positioning(self, q: np.ndarray) -> np.ndarray:
     """The five FK joints of ``q``, zero-padded if the arm reports fewer."""
-    q = np.asarray(q, dtype=np.float64).reshape(-1)
-    if q.size >= N_POSITIONING_JOINTS:
-      return q[:N_POSITIONING_JOINTS]
-    padded                = np.zeros(N_POSITIONING_JOINTS, dtype=np.float64)
-    padded[:q.size]       = q
-    return padded
+    return self._tracker.positioning(q)
 
   def limit(self, q_meas: np.ndarray, q_cmd: np.ndarray) -> tuple[np.ndarray, WorkspaceLimit]:
     """Constrain ``q_cmd`` against the box, given where the arm actually is.
@@ -186,7 +218,7 @@ class WorkspaceLimiter:
       return q_cmd, WorkspaceLimit(scale=1.0, breach_m=0.0, ee_pos=p)
 
     # Cartesian displacement this step would produce, to first order.
-    dp    = self._fk.jacobian(self._positioning(q_meas), self._dq) @ self._positioning(step)
+    dp    = self._tracker.jacobian(q_meas) @ self._positioning(step)
     scale = self._verified(q_meas, step, self._scale_for(p, dp))
     return q_meas + scale * step, WorkspaceLimit(scale=scale, breach_m=0.0, ee_pos=p)
 
@@ -251,8 +283,31 @@ def _corners(value) -> tuple[np.ndarray, np.ndarray]:
   return arr[0], arr[1]
 
 
-def build_workspace_limiter(cfg: DictConfig) -> WorkspaceLimiter | None:
+def build_ee_tracker(cfg: DictConfig) -> EeTracker:
+  """Build the FK tip evaluator from the ``fk`` config block.
+
+  Unconditional: unlike the envelope there is nothing to opt into, since the
+  URDF and the per-arm zero offsets are rig facts the runtime always has. The
+  control loop logs the tip from this on every tick.
+  """
+  from chuck_dreamer.common import FK_MODEL_PATH
+  from chuck_dreamer.common.fk import FK, load_fk_dq
+
+  fk_cfg = OmegaConf.select(cfg, "fk") or {}
+  dq_dir = fk_cfg.get("dq_dir")
+  return EeTracker(
+    FK(fk_cfg.get("model") or FK_MODEL_PATH),
+    dq=None if dq_dir is None else load_fk_dq(str(dq_dir)),
+  )
+
+
+def build_workspace_limiter(
+  cfg: DictConfig, *, tracker: EeTracker | None = None,
+) -> WorkspaceLimiter | None:
   """Build the limiter from ``runtime.control_loop.safety.workspace``, or ``None``.
+
+  ``tracker`` lets the caller hand over the FK evaluator it already built, so
+  the envelope and the tip telemetry share one Pinocchio ``Data``.
 
   No box means no Cartesian envelope, which is the default: the box is rig
   geometry and there is no safe value to guess. Stating one turns the envelope
@@ -269,13 +324,7 @@ def build_workspace_limiter(cfg: DictConfig) -> WorkspaceLimiter | None:
 
   box = WorkspaceBox.from_corners(*_corners(ws))
 
-  from chuck_dreamer.common import FK_MODEL_PATH
-  from chuck_dreamer.common.fk import FK, load_fk_dq
-
-  fk_cfg = OmegaConf.select(cfg, "fk") or {}
-  dq_dir = fk_cfg.get("dq_dir")
   return WorkspaceLimiter(
-    FK(fk_cfg.get("model") or FK_MODEL_PATH), box,
+    tracker if tracker is not None else build_ee_tracker(cfg), box,
     margin_m=float(OmegaConf.select(cfg, "control_loop.safety.workspace_margin_m") or 0.05),
-    dq=None if dq_dir is None else load_fk_dq(str(dq_dir)),
   )

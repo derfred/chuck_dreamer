@@ -194,3 +194,38 @@ def test_both_producers_share_one_time_epoch(fake_rerun):
   # The same raw stamp from either producer maps to the same, near-zero offset.
   assert all(0.0 <= t < 1.0 for t in times), times
   assert max(times) - min(times) < 0.1
+
+
+def test_tip_rides_as_scalars_and_a_3d_point(fake_rerun):
+  """``ee_pos`` is both a scalar trace and a point in the 3-D view."""
+  q = TelemetryQueue()
+  sink = RerunSink("unused", q, n_joints=2)
+  sink.start("ep")
+  q.emit(TelemetryRecord(
+    t_wall=0.0, t_mono=0.0, tick=0, mode="normal",
+    q_meas=np.zeros(2), q_cmd=np.zeros(2), target=np.zeros(2), seq=0,
+    ee_pos=np.array([0.3, -0.1, 0.2])))
+  _wait_until(lambda: "world/ee_tip" in fake_rerun.rec.logged_paths())
+  sink.stop()
+
+  assert "control/ee_pos" in fake_rerun.rec.logged_paths()
+  np.testing.assert_allclose(
+    fake_rerun.rec.logged("control/ee_pos")[0].value, [0.3, -0.1, 0.2])
+  # Points3D wants (N, 3), not a bare (3,).
+  assert fake_rerun.rec.logged("world/ee_tip")[0].value.shape == (1, 3)
+
+
+def test_a_record_without_a_tip_logs_no_tip_entities(fake_rerun):
+  """No FK model means no tip -- not a zero, which would read as the origin."""
+  q = TelemetryQueue()
+  sink = RerunSink("unused", q, n_joints=2)
+  sink.start("ep")
+  q.emit(TelemetryRecord(
+    t_wall=0.0, t_mono=0.0, tick=0, mode="normal",
+    q_meas=np.zeros(2), q_cmd=np.zeros(2), target=np.zeros(2), seq=0))
+  _wait_until(lambda: "control/q_meas" in fake_rerun.rec.logged_paths())
+  sink.stop()
+
+  paths = fake_rerun.rec.logged_paths()
+  assert "control/ee_pos" not in paths
+  assert "world/ee_tip" not in paths
