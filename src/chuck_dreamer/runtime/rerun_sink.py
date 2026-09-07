@@ -12,11 +12,9 @@ Both runtime threads feed one ``.rrd`` per episode on a shared timeline:
   frame, perception outputs, and composed observation onto the sink's own
   internal queue — so the policy loop never blocks on Rerun encoding.
 
-A single logger thread drains both queues and logs to the recording, stamping
-every entry with ``step`` (sequence) and ``time`` (duration) so control scalars
-and camera frames line up in the viewer (spec §4.3). Entity-path conventions
-and the ``RecordingStream`` / ``flush`` recipe are reused from
-``common/episode_writer.py``'s ``RerunEpisodeWriter``; frames ride as per-step
+Entity-path conventions and the ``RecordingStream`` / ``flush`` recipe are
+reused from ``common/episode_writer.py``'s ``RerunEpisodeWriter``; frames ride
+as per-step
 ``rr.Image`` rather than an encoded video blob — simpler for a streaming sink,
 at the cost of a larger ``.rrd`` (a fine M3 trade).
 """
@@ -25,6 +23,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -41,7 +40,11 @@ __all__ = ["RerunSink"]
 
 
 class _ObsSnapshot:
-  """A per-step policy-thread record: the composed observation + its step/time."""
+  """A per-step policy-thread record: the composed observation + its step/time.
+
+  :attr:`t` is a raw ``time.monotonic()`` stamp; the sink rebases it onto the
+  recording epoch when logging.
+  """
 
   __slots__ = ("step", "t", "image", "q_meas", "leader_qpos", "vectors")
 
@@ -80,6 +83,9 @@ class RerunSink(ManagedThread):
     self._dropped_lock = threading.Lock()
     self._rec: Any = None
     self._path: Path | None = None
+    # Recording epoch: raw monotonic stamps from both producers are rebased
+    # onto this so the "time" timeline is zero-based and shared.
+    self._t0: float = 0.0
 
   @property
   def path(self) -> Path | None:
@@ -100,6 +106,7 @@ class RerunSink(ManagedThread):
     """
     import rerun as rr
 
+    self._t0 = time.monotonic()
     self._rrd_dir.mkdir(parents=True, exist_ok=True)
     self._path = self._rrd_dir / f"{recording_id}.rrd"
     self._rec = rr.RecordingStream(
@@ -117,7 +124,11 @@ class RerunSink(ManagedThread):
       self._rec = None
 
   def log_observation(self, obs: "RuntimeObservation", *, step: int, t: float) -> None:
-    """Enqueue one observation for the logger thread (policy-thread, non-blocking)."""
+    """Enqueue one observation for the logger thread (policy-thread, non-blocking).
+
+    ``t`` is a raw ``time.monotonic()`` stamp, not loop-elapsed time — the sink
+    rebases it onto the recording epoch shared with control telemetry.
+    """
     image = obs.image
     snap = _ObsSnapshot(
       step, t,
@@ -164,7 +175,7 @@ class RerunSink(ManagedThread):
 
     if rec.kind != "policy":
       self._rec.set_time("step", sequence=int(rec.tick))
-    self._rec.set_time("time", duration=float(rec.t_mono))
+    self._rec.set_time("time", duration=float(rec.t_mono) - self._t0)
     if rec.event:
       self._rec.log("events", rr.TextLog(f"{rec.event}: {rec.detail}"))
       return
@@ -196,7 +207,7 @@ class RerunSink(ManagedThread):
     import rerun as rr
 
     self._rec.set_time("step", sequence=int(snap.step))
-    self._rec.set_time("time", duration=float(snap.t))
+    self._rec.set_time("time", duration=float(snap.t) - self._t0)
     if snap.image is not None:
       self._rec.log("camera/image", rr.Image(snap.image))
     self._rec.log("obs/joint_qpos", rr.Scalars(snap.q_meas.tolist()))

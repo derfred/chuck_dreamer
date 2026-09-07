@@ -100,7 +100,8 @@ class PolicyLoop(PacedLoop):
     step      = 0
 
     for _ in self.paced():
-      t       = time.monotonic() - t0
+      t_mono  = time.monotonic()
+      t       = t_mono - t0
       control = self._channel.state()
 
       if control is None:
@@ -128,7 +129,7 @@ class PolicyLoop(PacedLoop):
         self._channel.publish(action)
 
       if self._rerun_sink is not None:
-        self._rerun_sink.log_observation(obs, step=step, t=t)
+        self._rerun_sink.log_observation(obs, step=step, t=t_mono)
 
       if self._telemetry is not None:
         now = time.monotonic()

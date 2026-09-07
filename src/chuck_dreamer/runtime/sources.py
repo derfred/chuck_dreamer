@@ -1,33 +1,3 @@
-"""Scripted policies for M1 — go-to-pose and sine sweep.
-
-Until the learned policy is integrated (M6), the runtime is driven by
-scripted joint-space setpoints (project plan M1: "go-to-pose, sine sweep —
-no policy"). These are real :class:`~chuck_dreamer.policy.Policy`
-implementations so the runtime has a single producer abstraction: the policy
-loop calls ``reset`` once then ``act(obs)`` each step, exactly as it will for
-Dreamer at M6. Swapping in a different policy is a config change, no new loop
-code.
-
-That extends to construction: the harness builds these through the same
-``{target, params}`` registry path as any other policy (``runtime.policy``),
-so there is no scripted-vs-learned branch anywhere. Their constructors take
-config values directly — a scalar or a per-joint list, ``OmegaConf`` wrappers
-included — and every parameter has a default, so a bare ``target:`` with no
-``params`` constructs.
-
-Each scripted policy is a pure function of its own elapsed clock: ``act``
-reads ``obs.t`` (seconds since :meth:`reset`) and ignores everything else, so
-the trajectory is asserted in tests without threads. The underlying time →
-target math lives in :meth:`target_at` for that reason.
-
-``reset`` accepts either a joint vector (the runtime hands over the current
-measured pose) or a :class:`SceneConfig` whose ``joint_initial_qpos`` is used
-— mirroring how :class:`~chuck_dreamer.policy.GatedPolicy` takes "whatever
-the inner policy expects". Scripted policies may deliberately command targets
-outside the safety envelope; the kernel's clamp is what holds the boundary,
-and exercising it is the point.
-"""
-
 from __future__ import annotations
 
 from typing import Any, cast
@@ -119,7 +89,6 @@ class ManualPolicy:
     self._last_cmd: np.ndarray | None = None
 
   def reset(self, scene_or_q0: Any) -> None:
-    # Anchor the no-op fallback at the start pose (shared with the scripted sources).
     self._last_cmd = _start_qpos(scene_or_q0).copy()
 
   def act(self, obs: RuntimeObservation) -> Action:
@@ -128,9 +97,6 @@ class ManualPolicy:
       cmd            = np.asarray(leader, dtype=np.float64)
       self._last_cmd = cmd
       return Action(obs, q=cmd)
-    # No-op: hold the last commanded pose; fall back to the measured joints
-    # before the first leader reading. The control loop plans a zero-delta
-    # segment, so the arm simply holds.
     if self._last_cmd is not None:
       return Action(obs, q=self._last_cmd)
     return Action(obs, q=np.asarray(obs.q_meas, dtype=np.float64))

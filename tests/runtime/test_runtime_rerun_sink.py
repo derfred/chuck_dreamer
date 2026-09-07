@@ -171,3 +171,26 @@ def test_policy_rows_do_not_stamp_the_control_step_timeline(fake_rerun):
   steps = [b.get("sequence") for kind, a, b in fake_rerun.rec.events
            if kind == "time" and a == "step"]
   assert 42 not in steps          # the policy step never claimed a control tick
+
+
+def test_both_producers_share_one_time_epoch(fake_rerun):
+  q = TelemetryQueue()
+  sink = RerunSink("unused", q, n_joints=2)
+  sink.start("ep")
+  now = time.monotonic()
+  q.emit(TelemetryRecord(
+    t_wall=0.0, t_mono=now, tick=0, mode="normal",
+    q_meas=np.zeros(2), q_cmd=np.zeros(2), target=np.zeros(2), seq=0))
+  obs = RuntimeObservation(t=0.0, q_meas=np.zeros(2),
+                           modalities={"t": 0.0, "q_meas": np.zeros(2)})
+  sink.log_observation(obs, step=0, t=now)
+  _wait_until(lambda: "obs/joint_qpos" in fake_rerun.rec.logged_paths()
+              and "control/q_meas" in fake_rerun.rec.logged_paths())
+  sink.stop()
+
+  times = [b.get("duration") for kind, a, b in fake_rerun.rec.events
+           if kind == "time" and a == "time"]
+  assert times, "no time-timeline stamps captured"
+  # The same raw stamp from either producer maps to the same, near-zero offset.
+  assert all(0.0 <= t < 1.0 for t in times), times
+  assert max(times) - min(times) < 0.1
