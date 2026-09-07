@@ -46,7 +46,6 @@ class ControlLoop(PacedLoop):
     telemetry: TelemetryQueue,
     workspace: WorkspaceLimiter | None = None,
   ) -> None:
-    # PacedLoop validates the rate (and owns the thread + schedule).
     super().__init__("runtime-control", float(cfg.control_loop.rate_hz))
 
     read_cfg = cfg.control_loop.get("read", {}) or {}
@@ -62,14 +61,6 @@ class ControlLoop(PacedLoop):
     # limiter refuses to extend motion past this bound (see _safety_limit).
     self._stale_hold_s                    = float(read_cfg.get("stale_hold_s", 0.100))
     self._traj_cfg                        = ControlTrajectoryConfig.build(cfg, n_joints=backend.n_joints)
-    # Cartesian envelope (None unless configured); see workspace.py. Built here
-    # rather than injected so a misconfigured box fails at construction, before
-    # any thread has started commanding an arm.
-    #
-    # The FK tip evaluator is built unconditionally -- the tip is telemetry on
-    # every rig, whereas the box is opt-in -- and the envelope shares it so the
-    # tick evaluates FK once. An injected limiter brings its own tracker, so
-    # the caller stays in charge of which FK is in play.
     self._ee: EeTracker | None
     self._workspace: WorkspaceLimiter | None
     if workspace is not None:
@@ -83,12 +74,7 @@ class ControlLoop(PacedLoop):
 
   @staticmethod
   def _build_ee_tracker(cfg: DictConfig) -> EeTracker | None:
-    """The FK tip evaluator, or ``None`` if the rig cannot supply one.
-
-    Tip telemetry is a nicety, not a safety function, so a missing URDF must
-    not stop the runtime from commanding an arm -- the envelope, which *is* a
-    safety function, still raises from its own builder.
-    """
+    """The FK tip evaluator, or ``None`` if the rig cannot supply one."""
     try:
       return build_ee_tracker(cfg)
     except Exception as exc:                              # noqa: BLE001
@@ -111,12 +97,6 @@ class ControlLoop(PacedLoop):
   @property
   def ticks(self) -> int:
     return self._ticks
-
-  # -- mode ------------------------------------------------------------------
-  #
-  # The machine lives in control_mode.py; the loop owns an instance and wraps
-  # it so callers drive the *loop*, not its internals. Requests are latched:
-  # nothing resumes until release() is called.
 
   @property
   def mode(self) -> ControlMode:
