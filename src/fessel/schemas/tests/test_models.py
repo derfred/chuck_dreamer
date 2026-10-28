@@ -77,17 +77,27 @@ def test_state_response_defaults():
 
 def test_state_response_with_plugs():
   st = StateResponse(
-    safety_state=SafetyState.SHUTDOWN_ARM,
+    safety_state=SafetyState.STOPPED,
     jetson={"state": "stopped"},
     plugs={
-      "arm": PlugState(on=False, verified=True, verified_at="2026-06-04T00:00:00Z"),
-      "jetson": PlugState(on=True, verified=True, verified_at="2026-06-04T00:00:00Z"),
+      "room-light": PlugState(
+        on=True,
+        verified=True,
+        verified_at="2026-06-04T00:00:00Z",
+        label="Room light",
+        auto_off_at="2026-06-04T02:00:00Z",
+      ),
+      "desk-lamp": PlugState(on=False, verified=True, verified_at="2026-06-04T00:00:00Z"),
     },
   )
   dumped = st.model_dump()
-  assert dumped["safety_state"] == "SHUTDOWN_ARM"
-  assert dumped["plugs"]["arm"]["on"] is False
-  assert dumped["plugs"]["arm"]["verified"] is True
+  assert dumped["safety_state"] == "STOPPED"
+  assert dumped["plugs"]["room-light"]["on"] is True
+  assert dumped["plugs"]["room-light"]["label"] == "Room light"
+  assert dumped["plugs"]["room-light"]["auto_off_at"] == "2026-06-04T02:00:00Z"
+  assert dumped["plugs"]["desk-lamp"]["auto_off_at"] is None
+  # Config order is preserved on the wire (the dashboard renders in this order).
+  assert list(dumped["plugs"]) == ["room-light", "desk-lamp"]
 
 
 def test_plug_state_unverified_default():

@@ -113,24 +113,37 @@ class FakeJetson:
     pass
 
 
-def make_control(*, arm_fail=False, jetson_fail=False, published=None, now=None):
+AUTO_OFF_S = 3600.0
+
+
+def make_control(*, light_fail=False, jetson_fail=False, published=None, now=None):
   """Build a ControlPlane wired to fake actuators. The publish callback
   records (topic, payload, qos, retain) into `published` if provided. `now`
-  overrides the clock used for heartbeat-freshness checks (defaults to the
-  real time.monotonic)."""
+  overrides the clock used for heartbeat-freshness checks and auto-off
+  deadlines (defaults to the real time.monotonic).
+
+  Two plugs: `room-light` (auto-off after AUTO_OFF_S; `light_fail` makes its
+  bulb drop every command) and `desk-lamp` (no auto-off)."""
   pub_sink = published if published is not None else []
 
   def publish(topic, payload, qos, retain):
     pub_sink.append((topic, payload, qos, retain))
 
   plugs = {
-    "arm": PlugController(
-      PlugConfig(name="arm", address="x", retries=2, retry_delay_s=0.0),
-      FakeBulb(on=True, fail=arm_fail),
+    "room-light": PlugController(
+      PlugConfig(
+        name="room-light",
+        address="x",
+        retries=2,
+        retry_delay_s=0.0,
+        label="Room light",
+        auto_off_after_s=AUTO_OFF_S,
+      ),
+      FakeBulb(on=True, fail=light_fail),
     ),
-    "jetson": PlugController(
-      PlugConfig(name="jetson", address="y", retries=2, retry_delay_s=0.0),
-      FakeBulb(on=True),
+    "desk-lamp": PlugController(
+      PlugConfig(name="desk-lamp", address="y", retries=2, retry_delay_s=0.0, label="Desk lamp"),
+      FakeBulb(on=False),
     ),
   }
   jetson = FakeJetson(fail=jetson_fail)
@@ -272,7 +285,12 @@ def test_state_default_placeholder(monkeypatch):
   assert body["jetson"] is None  # not reached yet
   assert body["camera"]["up"] is None
   # Plugs exist but are unverified until an action or refresh confirms them.
-  assert body["plugs"]["arm"]["verified"] is False
+  # /state is how the dashboard discovers them: config order + label.
+  assert list(body["plugs"]) == ["room-light", "desk-lamp"]
+  light = body["plugs"]["room-light"]
+  assert light["verified"] is False
+  assert light["label"] == "Room light"
+  assert light["auto_off_at"] is None
 
 
 def test_state_reflects_camera_from_mqtt(monkeypatch):
@@ -364,64 +382,201 @@ def test_jetson_failure_is_5xx_not_swallowed(monkeypatch):
 # --- Slice 3: WiZ plug control, send-and-verify (S3.1/S3.4) ------------------
 
 
-def test_shutdown_arm_verifies_and_publishes(monkeypatch):
+def test_plug_on_verifies_publishes_and_starts_auto_off(monkeypatch):
   published = []
   ctl, _, pub = make_control(published=published)
   client, _ = make_client(monkeypatch, control=ctl)
   with client:
-    r = client.post("/control/shutdown/arm")
+    r = client.post("/control/plugs/room-light/on")
     assert r.status_code == 200
     body = r.json()
-    assert body["plug"] == "arm"
-    assert body["state"]["on"] is False
+    assert body["plug"] == "room-light"
+    assert body["state"]["on"] is True
     assert body["state"]["verified"] is True
     assert body["state"]["verified_at"]
-    # /state reflects the verified off state and the shutdown placeholder.
+    assert body["state"]["label"] == "Room light"
+    assert body["state"]["auto_off_at"]  # timer running
     st = client.get("/state").json()
-    assert st["plugs"]["arm"]["on"] is False
-    assert st["safety_state"] == "SHUTDOWN_ARM"
+    assert st["plugs"]["room-light"]["on"] is True
+    assert st["plugs"]["room-light"]["auto_off_at"] == body["state"]["auto_off_at"]
+    # Plugs are utility switches: the safety state is untouched.
+    assert st["safety_state"] == "IDLE"
   # Verified plug state was published retained on the plug topic.
-  plug_pub = [p for p in pub if p[0] == "arm/supervisor/plug/arm"]
+  plug_pub = [p for p in pub if p[0] == "arm/supervisor/plug/room-light"]
   assert plug_pub, "expected a retained plug-state publish"
   _topic, payload, qos, retain = plug_pub[-1]
-  assert payload["on"] is False and payload["verified"] is True
+  assert payload["on"] is True and payload["verified"] is True
   assert retain is True and qos == 1
 
 
-def test_poweron_arm_returns_to_idle(monkeypatch):
+def test_plug_off_clears_auto_off(monkeypatch):
   ctl, _, _ = make_control()
   client, _ = make_client(monkeypatch, control=ctl)
   with client:
-    client.post("/control/shutdown/arm")
-    r = client.post("/control/poweron/arm")
+    client.post("/control/plugs/room-light/on")
+    r = client.post("/control/plugs/room-light/off")
+    assert r.status_code == 200
+    assert r.json()["state"]["on"] is False
+    assert r.json()["state"]["auto_off_at"] is None
+    st = client.get("/state").json()
+    assert st["plugs"]["room-light"]["auto_off_at"] is None
+    assert st["safety_state"] == "IDLE"
+
+
+def test_plug_without_auto_off_has_no_timer(monkeypatch):
+  ctl, _, _ = make_control()
+  client, _ = make_client(monkeypatch, control=ctl)
+  with client:
+    r = client.post("/control/plugs/desk-lamp/on")
     assert r.status_code == 200
     assert r.json()["state"]["on"] is True
-    assert client.get("/state").json()["safety_state"] == "IDLE"
+    assert r.json()["state"]["auto_off_at"] is None
 
 
 def test_plug_verify_failure_is_5xx_and_visible_in_state(monkeypatch):
-  # The arm plug drops every command: send-and-verify never confirms off.
-  ctl, _, _ = make_control(arm_fail=True)
+  # The light's bulb drops every command: send-and-verify never confirms off.
+  ctl, _, _ = make_control(light_fail=True)
   client, _ = make_client(monkeypatch, control=ctl)
   with client:
-    r = client.post("/control/shutdown/arm")
+    r = client.post("/control/plugs/room-light/off")
     assert r.status_code == 503
     detail = r.json()["detail"]
     assert detail["error"] == "plug_verify_failed"
-    assert detail["plug"] == "arm"
+    assert detail["plug"] == "room-light"
     assert detail["intended_on"] is False
     assert detail["observed_on"] is True  # never went off
     # The failed verify is visible in /state (verified=False), not hidden.
-    arm = client.get("/state").json()["plugs"]["arm"]
-    assert arm["verified"] is False
+    light = client.get("/state").json()["plugs"]["room-light"]
+    assert light["verified"] is False
 
 
 def test_unknown_plug_is_404(monkeypatch):
   ctl, _, _ = make_control()
   client, _ = make_client(monkeypatch, control=ctl)
   with client:
-    r = client.post("/control/shutdown/toaster")
-    assert r.status_code == 404
+    assert client.post("/control/plugs/toaster/on").status_code == 404
+    assert client.post("/control/plugs/toaster/off").status_code == 404
+
+
+# --- auto-off ----------------------------------------------------------------
+
+
+def test_auto_off_switches_plug_off_after_duration():
+  clock = _Clock()
+  ctl, _, _ = make_control(now=clock)
+  ctl.plug_on("room-light")
+  clock.t += AUTO_OFF_S - 1
+  ctl.check_auto_off()
+  assert ctl.state().plugs["room-light"].on is True  # not yet due
+  clock.t += 1
+  ctl.check_auto_off()
+  light = ctl.state().plugs["room-light"]
+  assert light.on is False and light.verified is True
+  assert light.auto_off_at is None
+
+
+def test_turning_on_again_restarts_the_countdown():
+  clock = _Clock()
+  ctl, _, _ = make_control(now=clock)
+  ctl.plug_on("room-light")
+  clock.t += AUTO_OFF_S - 10
+  ctl.plug_on("room-light")
+  clock.t += 20  # past the first deadline, well before the second
+  ctl.check_auto_off()
+  assert ctl.state().plugs["room-light"].on is True
+
+
+def test_failed_auto_off_keeps_timer_and_retries():
+  clock = _Clock()
+  ctl, _, _ = make_control(now=clock, light_fail=True)
+  # The bulb starts on and drops commands, so "on" still verifies.
+  ctl.plug_on("room-light")
+  clock.t += AUTO_OFF_S
+  ctl.check_auto_off()
+  light = ctl.state().plugs["room-light"]
+  assert light.on is True and light.verified is False
+  assert light.auto_off_at is not None  # timer kept for a retry
+  ctl._plugs["room-light"]._bulb._fail = False  # the plug recovers
+  ctl.check_auto_off()
+  light = ctl.state().plugs["room-light"]
+  assert light.on is False and light.verified is True
+  assert light.auto_off_at is None
+
+
+def test_refresh_starts_timer_for_plug_found_on_without_one():
+  # Supervisor restarted while the light was on: the in-memory timer is gone.
+  # The first refresh that sees it on starts a fresh countdown.
+  clock = _Clock()
+  ctl, _, _ = make_control(now=clock)
+  assert ctl.state().plugs["room-light"].auto_off_at is None
+  ctl._refresh_plugs()
+  assert ctl.state().plugs["room-light"].auto_off_at is not None
+  # desk-lamp has no auto-off configured (and is off): no timer.
+  assert ctl.state().plugs["desk-lamp"].auto_off_at is None
+  clock.t += AUTO_OFF_S
+  ctl.check_auto_off()
+  assert ctl.state().plugs["room-light"].on is False
+
+
+def test_refresh_does_not_restart_a_running_timer():
+  clock = _Clock()
+  ctl, _, _ = make_control(now=clock)
+  ctl.plug_on("room-light")
+  at = ctl.state().plugs["room-light"].auto_off_at
+  clock.t += 100
+  ctl._refresh_plugs()
+  assert ctl.state().plugs["room-light"].auto_off_at == at
+
+
+# --- plug config parsing -------------------------------------------------------
+
+
+def _build(plugs, driver="fake"):
+  from supervisor.control import build_control_plane
+
+  return build_control_plane(
+    {"control": {"plugs": plugs, "wiz": {"driver": driver}}}, lambda *a: None
+  )
+
+
+def test_build_control_plane_reads_plug_list_in_order():
+  ctl = _build(
+    [
+      {"name": "room-light", "label": "Room light", "auto_off_after_s": 7200},
+      {"name": "desk-lamp"},
+    ]
+  )
+  assert list(ctl._plugs) == ["room-light", "desk-lamp"]
+  assert ctl._plugs["room-light"].label == "Room light"
+  assert ctl._plugs["room-light"].auto_off_after_s == 7200
+  # label defaults to the name; auto-off is optional.
+  assert ctl._plugs["desk-lamp"].label == "desk-lamp"
+  assert ctl._plugs["desk-lamp"].auto_off_after_s is None
+
+
+def test_build_control_plane_without_plugs():
+  assert _build(None)._plugs == {}
+
+
+def test_build_control_plane_rejects_bad_plug_config():
+  import pytest
+
+  # The old name->settings mapping fails loud rather than being misread.
+  with pytest.raises(ValueError, match="must be a list"):
+    _build({"arm": {"address": "192.168.1.50"}})
+  with pytest.raises(ValueError, match="name"):
+    _build([{"name": "Room Light"}])
+  with pytest.raises(ValueError, match="name"):
+    _build([{"address": "x"}])
+  with pytest.raises(ValueError, match="duplicate"):
+    _build([{"name": "a"}, {"name": "a"}])
+  with pytest.raises(ValueError, match="auto_off_after_s"):
+    _build([{"name": "a", "auto_off_after_s": 0}])
+  with pytest.raises(ValueError, match="auto_off_after_s"):
+    _build([{"name": "a", "auto_off_after_s": "2h"}])
+  # The real driver needs an address.
+  with pytest.raises(ValueError, match="address"):
+    _build([{"name": "a"}], driver="pywizlight")
 
 
 # --- §2.13 SIGHUP reload: hot-reloadable control tunables --------------------
@@ -450,7 +605,12 @@ def test_apply_config_does_not_rebind_plug_addresses():
   ctl, _, _ = make_control()
   before = {name: p._cfg.address for name, p in ctl._plugs.items()}
   ctl.apply_config(
-    {"control": {"plugs": {"arm": {"address": "999.999.999.999"}}, "wiz": {"retries": 4}}}
+    {
+      "control": {
+        "plugs": [{"name": "room-light", "address": "999.999.999.999"}],
+        "wiz": {"retries": 4},
+      }
+    }
   )
   after = {name: p._cfg.address for name, p in ctl._plugs.items()}
   assert after == before  # addresses unchanged (reload ignores plug bindings)

@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """Slice 3 control-plane end-to-end smoke check (X3.1).
 
-  ⚠️  THIS TOUCHES REAL HARDWARE AND CUTS REAL POWER.  ⚠️
+  ⚠️  THIS TOUCHES REAL HARDWARE.  ⚠️
 
 This is NOT part of the Slice 1.5 integration harness (driver/run_tests.py),
 which deliberately avoids real WiZ plugs and a real Jetson. Run this on demand,
 against a deployment wired to the actual actuators, when you want to prove the
-Slice 3 surface end-to-end. It will pause/resume the Jetson and power-cycle the
-Jetson plug, so only run it when that is safe.
+Slice 3 surface end-to-end. It will pause/resume the Jetson and switch a WiZ
+plug off and back on, so only run it when that is safe.
 
 The scenario (X3.1):
 
   1. POST /api/control/pause   -> Jetson /state reflects paused.
   2. POST /api/control/resume  -> Jetson reflects resumed.
-  3. POST /api/control/shutdown/jetson -> /api/state shows the plug off
+  3. POST /api/control/plugs/<name>/off -> /api/state shows the plug off
      (verified), optionally cross-checked via direct getPilot() on the plug.
-  4. POST /api/control/poweron/jetson  -> recovery; plug on again.
+  4. POST /api/control/plugs/<name>/on  -> plug on again (verified).
 
 It reaches webui-backend the same way the operator's browser does, but supplies
 the oauth2-proxy identity header itself (oauth2-proxy is out of this loop, same
@@ -23,8 +23,8 @@ as the Slice 1.5/2 driver). Configure via env:
 
   WEBUI                 backend base URL (default http://webui:8000)
   FESSEL_AUTH_USER_HEADER / FESSEL_TEST_OPERATOR   identity header + value
-  PLUG_NAME             which plug to power-cycle (default 'jetson' — safer
-                        than the arm; the arm cut is left to manual testing)
+  PLUG_NAME             which configured plug to switch (default 'room-light',
+                        the name in the shipped fessel.yaml.example)
   WIZ_PLUG_ADDRESS      if set, cross-check the plug directly via pywizlight
   ACTION_TIMEOUT_S      per-action wait for the expected state (default 15)
 
@@ -43,7 +43,7 @@ import urllib.request
 WEBUI = os.environ.get("WEBUI", "http://webui:8000").rstrip("/")
 AUTH_USER_HEADER = os.environ.get("FESSEL_AUTH_USER_HEADER", "X-Auth-Request-User")
 AUTH_USER = os.environ.get("FESSEL_TEST_OPERATOR", "slice3-smoke")
-PLUG_NAME = os.environ.get("PLUG_NAME", "jetson")
+PLUG_NAME = os.environ.get("PLUG_NAME", "room-light")
 WIZ_PLUG_ADDRESS = os.environ.get("WIZ_PLUG_ADDRESS")
 ACTION_TIMEOUT_S = float(os.environ.get("ACTION_TIMEOUT_S", "15"))
 
@@ -131,19 +131,19 @@ def main() -> int:
   wait_until(lambda s: jetson_state(s) in ("active", "resumed", "running"), "jetson resumed")
   print("[PASS] resume", flush=True)
 
-  # 3. shutdown plug -> verified off (and optionally cross-checked).
-  control(f"shutdown/{PLUG_NAME}")
+  # 3. plug off -> verified off (and optionally cross-checked).
+  control(f"plugs/{PLUG_NAME}/off")
   wait_until(lambda s: plug_on(s, PLUG_NAME) is False, f"{PLUG_NAME} plug verified off")
   if WIZ_PLUG_ADDRESS:
     verify_plug_directly(WIZ_PLUG_ADDRESS, expect_on=False)
-  print(f"[PASS] shutdown/{PLUG_NAME} (verified off)", flush=True)
+  print(f"[PASS] plugs/{PLUG_NAME}/off (verified off)", flush=True)
 
-  # 4. poweron plug -> verified on (recovery).
-  control(f"poweron/{PLUG_NAME}")
+  # 4. plug on -> verified on.
+  control(f"plugs/{PLUG_NAME}/on")
   wait_until(lambda s: plug_on(s, PLUG_NAME) is True, f"{PLUG_NAME} plug verified on")
   if WIZ_PLUG_ADDRESS:
     verify_plug_directly(WIZ_PLUG_ADDRESS, expect_on=True)
-  print(f"[PASS] poweron/{PLUG_NAME} (recovered)", flush=True)
+  print(f"[PASS] plugs/{PLUG_NAME}/on (verified on)", flush=True)
 
   print("[smoke] all Slice 3 control-plane assertions passed", flush=True)
   return 0

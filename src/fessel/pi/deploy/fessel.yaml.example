@@ -152,17 +152,23 @@ supervisor:
     # tls_keyfile: /etc/fessel/tls/supervisor.key
 
   # Slice 3 control plane: the actuators supervisor drives directly.
-  # Omit a plug (no address) or the jetson block to disable the matching
-  # endpoints rather than have them pretend an actuator exists.
+  # Omit the jetson block to disable the matching endpoints rather than have
+  # them pretend an actuator exists.
   control:
+    # WiZ smart plugs on the local LAN (pywizlight over UDP, port 38899),
+    # switched on/off from the dashboard (e.g. the room lighting). The
+    # dashboard shows one row per entry, in this order. Restart-only: changes
+    # to this list take effect when supervisor restarts, not on SIGHUP.
     plugs:
-      # WiZ smart plugs on the local LAN (pywizlight over UDP, port 38899).
-      # IMPORTANT: the device switching the ARM supply must be load-rated for
-      # the arm's current draw — a hardware prerequisite, verified at install.
-      arm:
-        address: 192.168.1.50
-      jetson:
-        address: 192.168.1.51
+      # name: stable id (lowercase slug) used in URLs, the MQTT topic and /state.
+      # label: what the dashboard shows (defaults to name).
+      # auto_off_after_s: optional — switch the plug off this long after it
+      #   was turned on, in case it is forgotten after a session. Omit to
+      #   leave the plug on until switched off.
+      - name: room-light
+        label: Room light
+        address: 192.168.1.60
+        auto_off_after_s: 14400
     wiz:
       # Send-and-verify retry policy. A lost UDP power-off is a missed safety
       # intervention, so each attempt re-issues the command and reads it back.

@@ -560,33 +560,53 @@ def main() -> int:
       lambda s: s["jetson"]["state"] in ("active", "running"), "jetson resumed"
     )
 
-  def t_power_cycle_verified():
+  # The test config (fessel.test.yaml) defines two plugs: `room-light`
+  # (happy path, auto-off after 6s) and `broken-light` (always drops commands).
+  LIGHT = "room-light"
+
+  def light(s: dict) -> dict:
+    return s["plugs"][LIGHT]
+
+  def t_plug_switch_verified():
     # send-and-verify -> cached verified state -> /api/state. No real power.
-    st, _ = control_post("shutdown/jetson")
-    assert st == 200, f"shutdown/jetson -> {st}"
+    st, _ = control_post(f"plugs/{LIGHT}/off")
+    assert st == 200, f"plugs/{LIGHT}/off -> {st}"
     wait_api_state(
-      lambda s: s["plugs"]["jetson"]["on"] is False and s["plugs"]["jetson"]["verified"],
-      "jetson plug verified off",
+      lambda s: light(s)["on"] is False and light(s)["verified"] and light(s)["auto_off_at"] is None,
+      f"{LIGHT} verified off, no timer",
     )
-    st, _ = control_post("poweron/jetson")
-    assert st == 200, f"poweron/jetson -> {st}"
+    st, _ = control_post(f"plugs/{LIGHT}/on")
+    assert st == 200, f"plugs/{LIGHT}/on -> {st}"
+    s = wait_api_state(
+      lambda s: light(s)["on"] is True and light(s)["verified"] and light(s)["auto_off_at"],
+      f"{LIGHT} verified on with auto-off timer",
+    )
+    # /api/state is how the dashboard discovers the config-defined plugs.
+    assert list(s["plugs"]) == [LIGHT, "broken-light"], f"plug order: {list(s['plugs'])}"
+    assert light(s)["label"] == "Room light", f"label: {light(s)}"
+
+  def t_plug_auto_off():
+    # Turned on above (or re-armed here): the 6s auto-off must switch it off on
+    # its own via the supervisor's background loop (2s tick in the test config).
+    st, _ = control_post(f"plugs/{LIGHT}/on")
+    assert st == 200, f"plugs/{LIGHT}/on -> {st}"
     wait_api_state(
-      lambda s: s["plugs"]["jetson"]["on"] is True and s["plugs"]["jetson"]["verified"],
-      "jetson plug verified on",
+      lambda s: light(s)["on"] is False and light(s)["verified"] and light(s)["auto_off_at"] is None,
+      f"{LIGHT} auto-off fired",
+      timeout=30.0,
     )
 
   def t_verify_failure_surfaces():
-    # The `arm` plug is wired (test config) to always DROP commands, so
-    # send-and-verify exhausts retries -> 503 with the structured body, and
-    # /state shows verified=False — NOT a false success. (arm is a real
-    # /api/control name; the backend only forwards the seven known actions.)
-    st, body = control_post("shutdown/arm")
+    # The `broken-light` plug is wired (test config) to always DROP commands,
+    # so send-and-verify exhausts retries -> 503 with the structured body, and
+    # /state shows verified=False — NOT a false success.
+    st, body = control_post("plugs/broken-light/off")
     assert st == 503, f"expected 503 from a failing plug, got {st}: {body}"
     detail = body.get("detail", body)
     assert detail.get("error") == "plug_verify_failed", f"bad 503 body: {body}"
     st2 = api_state()
-    assert st2["plugs"]["arm"]["verified"] is False, (
-      f"failed verify not visible in /state: {st2['plugs'].get('arm')}"
+    assert st2["plugs"]["broken-light"]["verified"] is False, (
+      f"failed verify not visible in /state: {st2['plugs'].get('broken-light')}"
     )
 
   def t_control_requires_auth():
@@ -699,7 +719,8 @@ def main() -> int:
   suite.run("rapid_reconnect_no_leak", t_rapid_reconnect)
   # Slice 3 control plane (mocked actuators).
   suite.run("control_pause_resume", t_control_pause_resume)
-  suite.run("control_power_cycle_verified", t_power_cycle_verified)
+  suite.run("control_plug_switch_verified", t_plug_switch_verified)
+  suite.run("control_plug_auto_off", t_plug_auto_off)
   suite.run("control_verify_failure_surfaces", t_verify_failure_surfaces)
   suite.run("control_requires_auth", t_control_requires_auth, known_gap=AUTH_BYPASS_GAP)
   # Slice 5.5 recording round-trip through the new ingest path (disk backend,

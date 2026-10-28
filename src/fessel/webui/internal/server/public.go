@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -36,14 +37,16 @@ import (
 // forwards to (B3.1). One source of truth so the endpoints and the audit log
 // agree on names.
 var controlActions = map[string]string{
-	"pause":           "/control/pause",
-	"stop":            "/control/stop",
-	"resume":          "/control/resume",
-	"shutdown/arm":    "/control/shutdown/arm",
-	"shutdown/jetson": "/control/shutdown/jetson",
-	"poweron/arm":     "/control/poweron/arm",
-	"poweron/jetson":  "/control/poweron/jetson",
+	"pause":  "/control/pause",
+	"stop":   "/control/stop",
+	"resume": "/control/resume",
 }
+
+// plugNameRE is the slug a plug name must match before it is spliced into the
+// supervisor path. Plugs are defined in the Pi config, so the backend cannot
+// allowlist names; it only guarantees the name is a single safe path segment
+// (supervisor 404s an unknown plug). Mirrors supervisor's PLUG_NAME_RE.
+var plugNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 // SupervisorAPI is the slice of the supervisor client the handlers use.
 type SupervisorAPI interface {
@@ -117,19 +120,21 @@ func (p *Public) Handler() http.Handler {
 	for action, supPath := range controlActions {
 		action, supPath := action, supPath
 		mux.HandleFunc("POST /api/control/"+action, func(w http.ResponseWriter, r *http.Request) {
-			// Read identity in-handler so a missing-auth rejection is audited
-			// as `auth_missing` (B3.3) before the 401.
-			t0 := time.Now()
-			identity := p.Auth.Read(r)
-			if identity == nil {
-				auditControl(action, "unknown", "auth_missing", t0)
-				writeDetail(w, http.StatusUnauthorized, "authentication required")
+			p.forwardControl(w, r, action, supPath)
+		})
+	}
+	// Plug switches: the plug set comes from the Pi config (surfaced via
+	// /api/state), so one pattern route covers them all.
+	for _, state := range []string{"on", "off"} {
+		state := state
+		mux.HandleFunc("POST /api/control/plugs/{name}/"+state, func(w http.ResponseWriter, r *http.Request) {
+			name := r.PathValue("name")
+			if !plugNameRE.MatchString(name) {
+				writeDetail(w, http.StatusNotFound, "unknown plug")
 				return
 			}
-			result := p.Supervisor.Post(supPath, nil)
-			auditControl(action, identity.User, auditOutcome(result.StatusCode), t0)
-			// Pass supervisor's status + body straight through to the frontend.
-			writeJSON(w, result.StatusCode, result.Body)
+			action := "plugs/" + name + "/" + state
+			p.forwardControl(w, r, action, "/control/"+action)
 		})
 	}
 
@@ -742,6 +747,23 @@ func sortByStartedAtDesc(items []map[string]any) {
 			items[j-1], items[j] = items[j], items[j-1]
 		}
 	}
+}
+
+// forwardControl relays one operator control action to supervisor, auditing
+// it under `action`. Identity is read in-handler so a missing-auth rejection
+// is audited as `auth_missing` (B3.3) before the 401.
+func (p *Public) forwardControl(w http.ResponseWriter, r *http.Request, action, supPath string) {
+	t0 := time.Now()
+	identity := p.Auth.Read(r)
+	if identity == nil {
+		auditControl(action, "unknown", "auth_missing", t0)
+		writeDetail(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	result := p.Supervisor.Post(supPath, nil)
+	auditControl(action, identity.User, auditOutcome(result.StatusCode), t0)
+	// Pass supervisor's status + body straight through to the frontend.
+	writeJSON(w, result.StatusCode, result.Body)
 }
 
 // auditOutcome maps a forwarded status to an audit outcome tag: 2xx ->

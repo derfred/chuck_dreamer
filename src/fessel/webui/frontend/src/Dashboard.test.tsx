@@ -5,6 +5,7 @@
 //   - a destructive action opens a confirmation modal whose default focus is
 //     Cancel; Confirm issues the POST, Cancel does not;
 //   - a control 5xx renders the diagnostic inline next to the button;
+//   - the plug groups come from /api/state (config-defined), not hardcoded;
 //   - a 401 (on poll or action) escalates to re-auth (redirect), not a retry;
 //   - a 5xx on the state poll shows a transient banner but keeps last state.
 
@@ -12,12 +13,20 @@ import { render, screen, fireEvent, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "./Dashboard";
 
+const AUTO_OFF_AT = "2026-06-04T21:30:00Z";
+
 const STATE = {
-  safety_state: "SHUTDOWN_ARM",
+  safety_state: "STOPPED",
   jetson: { state: "stopped" },
   plugs: {
-    arm: { on: false, verified: true, verified_at: "t" },
-    jetson: { on: true, verified: false, verified_at: "t" },
+    "room-light": {
+      on: true,
+      verified: true,
+      verified_at: "t",
+      label: "Room light",
+      auto_off_at: AUTO_OFF_AT,
+    },
+    "desk-lamp": { on: false, verified: false, verified_at: "t", label: "Desk lamp" },
   },
   camera: { up: false },
 };
@@ -85,7 +94,7 @@ describe("status panel removed (moved to the navbar Pi-health indicator)", () =>
     await renderReady();
     // These now live in the App-chrome PiHealthIndicator drill-down, not the
     // dashboard. The dashboard must not resurrect them.
-    expect(screen.queryByText("SHUTDOWN_ARM")).toBeNull();
+    expect(screen.queryByText("STOPPED")).toBeNull();
     expect(screen.queryByText("on (unverified)")).toBeNull();
     expect(screen.queryByText("Status")).toBeNull();
   });
@@ -113,7 +122,7 @@ describe("destructive action confirmation (F3.3)", () => {
   it("opens a modal with Cancel focused; Confirm issues the POST", async () => {
     const fn = await renderReady();
     await act(async () => {
-      fireEvent.click(screen.getByText("Power off arm"));
+      fireEvent.click(screen.getByText("Stop"));
     });
     const dialog = screen.getByRole("dialog");
     expect(dialog).toBeTruthy();
@@ -124,7 +133,7 @@ describe("destructive action confirmation (F3.3)", () => {
 
     await clickAndFlush("Confirm");
     const posted = fn.mock.calls.find((c) => c[1]?.method === "POST");
-    expect(posted?.[0]).toBe("/api/control/shutdown/arm");
+    expect(posted?.[0]).toBe("/api/control/stop");
   });
 
   it("Cancel closes the modal without issuing the POST", async () => {
@@ -158,15 +167,62 @@ describe("action failure (F3.2)", () => {
       installFetch(() => ({
         status: 503,
         body: {
-          detail: { error: "plug_verify_failed", message: "arm plug reported on after retries" },
+          detail: { error: "plug_verify_failed", message: "plug reported off after issuing on" },
         },
       })),
     );
-    await clickAndFlush("Power on arm"); // non-destructive, no modal
-    expect(screen.getByText("arm plug reported on after retries")).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Desk lamp on" }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("plug reported off after issuing on")).toBeTruthy();
   });
 });
 
+describe("plug switches (config-defined)", () => {
+  it("renders one labelled On/Off group per plug from /api/state, in order", async () => {
+    await renderReady();
+    const buttons = screen
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label"))
+      .filter(Boolean);
+    expect(buttons).toEqual(["Room light on", "Room light off", "Desk lamp on", "Desk lamp off"]);
+    expect(screen.getByText("Room light")).toBeTruthy();
+    expect(screen.getByText("Desk lamp")).toBeTruthy();
+    // The removed hardcoded arm/Jetson power groups must not come back.
+    expect(screen.queryByText(/Power on|Power off/)).toBeNull();
+  });
+
+  it("shows each plug's state, the unverified flag and the auto-off time", async () => {
+    await renderReady();
+    const at = new Date(AUTO_OFF_AT).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    expect(screen.getByText(`On · auto-off at ${at}`)).toBeTruthy();
+    expect(screen.getByText("Off (unverified)")).toBeTruthy();
+  });
+
+  it("switches a plug without a confirmation modal", async () => {
+    const fn = await renderReady();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Room light off" }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    const posted = fn.mock.calls.find((c) => c[1]?.method === "POST");
+    expect(posted?.[0]).toBe("/api/control/plugs/room-light/off");
+  });
+
+  it("renders no plug groups when the Pi config defines none", async () => {
+    const saved = STATE.plugs;
+    (STATE as { plugs: object }).plugs = {};
+    try {
+      await renderReady();
+      expect(screen.queryByRole("button", { name: /on$/ })).toBeNull();
+      expect(screen.getByText("Pause")).toBeTruthy();
+    } finally {
+      STATE.plugs = saved;
+    }
+  });
+});
 
 describe("re-auth escalation (F3.4)", () => {
   it("re-authenticates (reload) on a 401 from the state poll", async () => {

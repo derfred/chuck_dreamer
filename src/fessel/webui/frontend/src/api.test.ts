@@ -154,10 +154,10 @@ describe("postControl", () => {
     expect(fn.mock.calls[0][1]).toMatchObject({ method: "POST" });
   });
 
-  it("encodes the slash in shutdown/arm into the path", async () => {
+  it("keeps the slashes of a plug action in the path", async () => {
     const fn = mockFetch(200, {});
-    await postControl("shutdown/arm");
-    expect(fn.mock.calls[0][0]).toBe("/api/control/shutdown/arm");
+    await postControl("plugs/room-light/on");
+    expect(fn.mock.calls[0][0]).toBe("/api/control/plugs/room-light/on");
   });
 
   it("throws AuthError on 401 (does NOT retry)", async () => {
@@ -167,11 +167,11 @@ describe("postControl", () => {
 
   it("throws ControlError carrying supervisor's diagnostic on a 5xx", async () => {
     mockFetch(503, {
-      detail: { error: "plug_verify_failed", message: "arm plug reported on after retries" },
+      detail: { error: "plug_verify_failed", message: "plug reported on after issuing off" },
     });
-    const err = await postControl("shutdown/arm").catch((e) => e);
+    const err = await postControl("plugs/room-light/off").catch((e) => e);
     expect(err).toBeInstanceOf(ControlError);
-    expect(err.message).toBe("arm plug reported on after retries");
+    expect(err.message).toBe("plug reported on after issuing off");
     expect(err.status).toBe(503);
   });
 

@@ -68,6 +68,10 @@ class PlugConfig:
   address: str
   retries: int = 3
   retry_delay_s: float = 0.2
+  # Display name for the dashboard; build_control_plane defaults it to `name`.
+  label: str = ""
+  # Switch the plug off this long after it is turned on (None = never).
+  auto_off_after_s: float | None = None
 
 
 class PlugController:
@@ -85,6 +89,14 @@ class PlugController:
   @property
   def name(self) -> str:
     return self._cfg.name
+
+  @property
+  def label(self) -> str:
+    return self._cfg.label or self._cfg.name
+
+  @property
+  def auto_off_after_s(self) -> float | None:
+    return self._cfg.auto_off_after_s
 
   def set_retry_policy(self, retries: int, retry_delay_s: float) -> None:
     """Update the send-and-verify retry counts (SIGHUP reload, §2.13). Only the

@@ -7,8 +7,8 @@ settled upstream (oauth2-proxy in front of webui); supervisor is a relay, not
 a gate (architecture §2.9).
 
 Slice 3 adds supervisor's *action surface* (§2.4): the operator control
-commands that take real-world action — pause/stop/resume the Jetson, cut and
-restore power to the arm and Jetson via WiZ plugs — plus a read-only `/state`
+commands that take real-world action — pause/stop/resume the Jetson, switch
+the configured WiZ plugs (room lighting) on/off — plus a read-only `/state`
 aggregation that drives the dashboard. The full safety state machine is still
 Slice 6; the safety_state field is a placeholder (see control.py).
 
@@ -23,8 +23,8 @@ Endpoints (authenticated at the network layer by Tailscale identity):
   POST /control/pause            -> Jetson POST /control/pause
   POST /control/stop             -> Jetson POST /control/stop
   POST /control/resume           -> Jetson POST /control/resume
-  POST /control/shutdown/{arm,jetson}   -> WiZ turn_off (send-and-verify)
-  POST /control/poweron/{arm,jetson}    -> WiZ turn_on  (send-and-verify)
+  POST /control/plugs/{name}/on  -> WiZ turn_on  (send-and-verify; starts auto-off)
+  POST /control/plugs/{name}/off -> WiZ turn_off (send-and-verify)
 """
 
 from __future__ import annotations
@@ -510,14 +510,14 @@ def create_app(
   def control_resume(request: Request) -> dict:
     return {"jetson": _run_control("resume", request, ctl.resume)}
 
-  @app.post("/control/shutdown/{name}")
-  def control_shutdown(name: str, request: Request) -> dict:
-    ps = _run_control(f"shutdown/{name}", request, lambda: ctl.shutdown(name))
+  @app.post("/control/plugs/{name}/on")
+  def control_plug_on(name: str, request: Request) -> dict:
+    ps = _run_control(f"plugs/{name}/on", request, lambda: ctl.plug_on(name))
     return {"plug": name, "state": ps.model_dump()}
 
-  @app.post("/control/poweron/{name}")
-  def control_poweron(name: str, request: Request) -> dict:
-    ps = _run_control(f"poweron/{name}", request, lambda: ctl.poweron(name))
+  @app.post("/control/plugs/{name}/off")
+  def control_plug_off(name: str, request: Request) -> dict:
+    ps = _run_control(f"plugs/{name}/off", request, lambda: ctl.plug_off(name))
     return {"plug": name, "state": ps.model_dump()}
 
   # --- Slice 4: recording control + ring/recordings proxy --------------------

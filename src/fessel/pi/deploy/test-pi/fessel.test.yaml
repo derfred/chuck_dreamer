@@ -63,11 +63,13 @@ supervisor:
       retries: 3
       retry_delay_s: 0.05
     plugs:
-      # `jetson` is the happy-path plug (power-cycled + verified in the test).
-      # `arm` is wired to always DROP commands so /api/control/shutdown/arm
-      # deterministically fails verify -> 503 — the safety-path assertion.
-      jetson: { mode: ok }
-      arm: { mode: drop }
+      # `room-light` is the happy-path plug (switched + verified in the test),
+      # with a short auto-off so the test can watch the timer fire.
+      # `broken-light` is wired to always DROP commands so
+      # /api/control/plugs/broken-light/off deterministically fails verify
+      # -> 503 — the failure-path assertion.
+      - { name: room-light, label: Room light, mode: ok, auto_off_after_s: 6 }
+      - { name: broken-light, label: Broken light, mode: drop }
     jetson:
       base_url: http://jetson-mock:8080
       timeout_s: 3.0

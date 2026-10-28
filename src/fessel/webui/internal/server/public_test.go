@@ -156,16 +156,59 @@ func TestCapabilitiesRequiresIdentityAndReportsRecordingModeAndLookback(t *testi
 
 func TestControlForwardsAndPassesStatusThrough(t *testing.T) {
 	sup := newFakeSupervisor()
-	sup.results["/control/shutdown/arm"] = supervisor.ForwardResult{
+	sup.results["/control/plugs/room-light/off"] = supervisor.ForwardResult{
 		StatusCode: 503, Body: map[string]any{"error": "plug_unverified"},
 	}
 	h := newPublic(sup, nil).Handler()
-	w := do(t, h, "POST", "/api/control/shutdown/arm", "", true)
+	w := do(t, h, "POST", "/api/control/plugs/room-light/off", "", true)
 	if w.Code != 503 || decode(t, w)["error"] != "plug_unverified" {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	if len(sup.posts) != 1 || sup.posts[0] != "/control/shutdown/arm" {
+	if len(sup.posts) != 1 || sup.posts[0] != "/control/plugs/room-light/off" {
 		t.Fatalf("posts: %v", sup.posts)
+	}
+}
+
+func TestPlugControlRoutesOnAndOff(t *testing.T) {
+	sup := newFakeSupervisor()
+	h := newPublic(sup, nil).Handler()
+	for _, path := range []string{"/api/control/plugs/room-light/on", "/api/control/plugs/desk_lamp2/off"} {
+		if w := do(t, h, "POST", path, "", true); w.Code != 200 {
+			t.Fatalf("%s: %d", path, w.Code)
+		}
+	}
+	want := []string{"/control/plugs/room-light/on", "/control/plugs/desk_lamp2/off"}
+	if len(sup.posts) != 2 || sup.posts[0] != want[0] || sup.posts[1] != want[1] {
+		t.Fatalf("posts: %v", sup.posts)
+	}
+}
+
+func TestPlugControlRejectsUnsafeNamesWithoutForwarding(t *testing.T) {
+	sup := newFakeSupervisor()
+	h := newPublic(sup, nil).Handler()
+	for _, path := range []string{
+		"/api/control/plugs/Room/on",
+		"/api/control/plugs/-x/on",
+		"/api/control/plugs/a%2Fb/on",
+		"/api/control/plugs/room-light/toggle",
+	} {
+		if w := do(t, h, "POST", path, "", true); w.Code != 404 && w.Code != 405 {
+			t.Fatalf("%s: %d", path, w.Code)
+		}
+	}
+	if len(sup.posts) != 0 {
+		t.Fatalf("forwarded an unsafe plug path: %v", sup.posts)
+	}
+}
+
+func TestPlugControlRejectsUnauthenticated(t *testing.T) {
+	sup := newFakeSupervisor()
+	h := newPublic(sup, nil).Handler()
+	if w := do(t, h, "POST", "/api/control/plugs/room-light/on", "", false); w.Code != 401 {
+		t.Fatalf("%d", w.Code)
+	}
+	if len(sup.posts) != 0 {
+		t.Fatalf("forwarded despite missing auth: %v", sup.posts)
 	}
 }
 

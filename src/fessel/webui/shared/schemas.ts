@@ -18,6 +18,8 @@ export type Reason = string;
 export type On = boolean | null;
 export type Verified = boolean;
 export type VerifiedAt = string | null;
+export type Label = string | null;
+export type AutoOffAt = string | null;
 export type Up = boolean | null;
 /**
  * video's explicit-recording branch state machine (V4.3).
@@ -108,8 +110,7 @@ export type Video = string | null;
  * real transitions land in Slice 6. The full set is declared here so the
  * enum doesn't have to change later.
  */
-export type SafetyState =
-  "INIT" | "IDLE" | "RUNNING" | "PAUSED" | "STOPPED" | "SHUTDOWN_ARM" | "SHUTDOWN_JETSON" | "DEGRADED";
+export type SafetyState = "INIT" | "IDLE" | "RUNNING" | "PAUSED" | "STOPPED" | "DEGRADED";
 export type Jetson = {
   [k: string]: unknown;
 } | null;
@@ -208,11 +209,19 @@ export interface LiveViewError {
  * background refresh — not the last command issued. `verified` is False when
  * the most recent verify failed (the command may have been sent but could not
  * be confirmed); `verified_at` is the ISO-8601 timestamp of that read.
+ *
+ * Plugs are defined entirely in the Pi config (`supervisor.control.plugs`), so
+ * /state is also how the dashboard learns which plugs exist: `label` is the
+ * configured display name, and `auto_off_at` is the ISO-8601 wall-clock time
+ * the running auto-off timer will switch the plug off (null when no timer is
+ * running — the plug is off, or has no `auto_off_after_s` configured).
  */
 export interface PlugState {
   on?: On;
   verified?: Verified;
   verified_at?: VerifiedAt;
+  label?: Label;
+  auto_off_at?: AutoOffAt;
   [k: string]: unknown;
 }
 /**

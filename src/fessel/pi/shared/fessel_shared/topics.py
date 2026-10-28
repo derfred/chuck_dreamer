@@ -29,11 +29,12 @@ STATE_CAMERA = f"{SITE_PREFIX}/video/state/camera"
 # Supervisor safety state, published retained by supervisor on every state
 # change. Architecture §2.7 lists this primarily as a /metrics source; Slice 5
 # adds an actual retained MQTT publish so video's rest-period detection (V5.4)
-# can learn the operator-driven safety state (PAUSED/STOPPED/SHUTDOWN_ARM).
+# can learn the operator-driven safety state (PAUSED/STOPPED).
 STATE_SUPERVISOR = f"{SITE_PREFIX}/supervisor/state"
 
 # Verified WiZ plug state, published retained by supervisor on every confirmed
-# state change (S3.1). `<name>` is the plug name (arm | jetson).
+# state change (S3.1). `<name>` is the plug's configured name
+# (`supervisor.control.plugs[].name`).
 PLUG_STATE_PREFIX = f"{SITE_PREFIX}/supervisor/plug"
 
 

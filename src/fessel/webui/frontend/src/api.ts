@@ -118,17 +118,11 @@ export function modeToCanonical(m: ModeTriplet): string {
 
 // --- Slice 3 control plane (F3.1–F3.4) --------------------------------------
 
-// The seven operator control actions. The string is the /api/control/<action>
-// path segment AND the audit action name; it matches CONTROL_ACTIONS on the
-// backend exactly.
-export type ControlAction =
-  | "pause"
-  | "stop"
-  | "resume"
-  | "shutdown/arm"
-  | "shutdown/jetson"
-  | "poweron/arm"
-  | "poweron/jetson";
+// The operator control actions. The string is the /api/control/<action> path
+// segment AND the audit action name. pause/stop/resume match controlActions on
+// the backend; plugs/<name>/{on,off} is the pattern route for the plugs the
+// Pi config defines (names come from /api/state's `plugs`).
+export type ControlAction = "pause" | "stop" | "resume" | `plugs/${string}/${"on" | "off"}`;
 
 // Thrown when a control POST fails with a non-2xx that is NOT a 401. Carries
 // the human-facing diagnostic the backend/supervisor returned (e.g. "plug

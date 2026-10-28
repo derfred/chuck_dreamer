@@ -46,9 +46,8 @@ from .vision import FrameResult, VisionAnalyzer
 log = logging.getLogger(__name__)
 
 # Safety states that imply a rest period (V5.4). Operator-driven rest; episode
-# boundaries are the other source. SHUTDOWN_JETSON is not "arm rest" — the arm
-# may still be powered — but the arm-relevant ones are.
-_REST_SAFETY_STATES = {"PAUSED", "STOPPED", "SHUTDOWN_ARM"}
+# boundaries are the other source.
+_REST_SAFETY_STATES = {"PAUSED", "STOPPED"}
 
 # Jetson event types that bracket the active (non-rest) phase. Between an
 # episode_end and the next episode_start the arm is at rest (plan §V5.4).
@@ -207,7 +206,7 @@ class AnalysisCoordinator:
     self._recompute_rest()
 
   def note_supervisor_state(self, safety_state: str | None) -> None:
-    """Supervisor's safety state. PAUSED/STOPPED/SHUTDOWN_ARM imply rest."""
+    """Supervisor's safety state. PAUSED/STOPPED imply rest."""
     st = (safety_state or "").upper()
     self._safety_rest_reason = _safety_rest_reason(st)
     self._recompute_rest()
@@ -235,5 +234,4 @@ def _safety_rest_reason(state: str) -> str | None:
   return {
     "PAUSED": "paused",
     "STOPPED": "stopped",
-    "SHUTDOWN_ARM": "shutdown_arm",
   }[state]

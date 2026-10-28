@@ -113,8 +113,6 @@ class SafetyState(str, Enum):
   RUNNING = "RUNNING"
   PAUSED = "PAUSED"
   STOPPED = "STOPPED"
-  SHUTDOWN_ARM = "SHUTDOWN_ARM"
-  SHUTDOWN_JETSON = "SHUTDOWN_JETSON"
   DEGRADED = "DEGRADED"
 
 
@@ -125,11 +123,19 @@ class PlugState(BaseModel):
   background refresh — not the last command issued. `verified` is False when
   the most recent verify failed (the command may have been sent but could not
   be confirmed); `verified_at` is the ISO-8601 timestamp of that read.
+
+  Plugs are defined entirely in the Pi config (`supervisor.control.plugs`), so
+  /state is also how the dashboard learns which plugs exist: `label` is the
+  configured display name, and `auto_off_at` is the ISO-8601 wall-clock time
+  the running auto-off timer will switch the plug off (null when no timer is
+  running — the plug is off, or has no `auto_off_after_s` configured).
   """
 
   on: bool | None = None
   verified: bool = False
   verified_at: str | None = None
+  label: str | None = None
+  auto_off_at: str | None = None
 
 
 class CameraState(BaseModel):

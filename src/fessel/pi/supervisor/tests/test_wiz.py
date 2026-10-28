@@ -143,12 +143,12 @@ def test_build_control_plane_fake_driver_no_address_needed():
     {
       "control": {
         "wiz": {"driver": "fake", "retries": 1, "retry_delay_s": 0.0},
-        "plugs": {"jetson": {}, "armfail": {"mode": "drop"}},
+        "plugs": [{"name": "light"}, {"name": "light-fail", "mode": "drop"}],
       }
     },
     lambda *a: published.append(a),
   )
   # Happy plug verifies; the always-drop plug raises PlugError.
-  assert ctl.poweron("jetson").on is True
+  assert ctl.plug_on("light").on is True
   with pytest.raises(PlugError):
-    ctl.shutdown("armfail")
+    ctl.plug_off("light-fail")

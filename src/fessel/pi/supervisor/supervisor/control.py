@@ -1,14 +1,22 @@
 """supervisor control plane: cached state + actuator dispatch (S3.3, S3.4).
 
 This is the *action surface* of the interventions the architecture assigns to
-supervisor (§2.4) — pause/stop/resume the Jetson, cut/restore power via the
-WiZ plugs — plus the read-only `/state` aggregation that drives the dashboard.
+supervisor (§2.4) — pause/stop/resume the Jetson, switch the WiZ plugs on/off
+— plus the read-only `/state` aggregation that drives the dashboard.
 
 The full safety **state machine** (transitions, anomaly fusion, tier timers)
 is Slice 6. Slice 3 ships a **placeholder** safety state that holds whatever
-the operator's last command implies: pause -> PAUSED, stop -> STOPPED,
-shutdown/arm -> SHUTDOWN_ARM, power-on -> IDLE, etc. It is enough to drive the
-dashboard and explicitly not a real safety machine.
+the operator's last Jetson command implies: pause -> PAUSED, stop -> STOPPED,
+resume -> RUNNING. It is enough to drive the dashboard and explicitly not a
+real safety machine.
+
+The plugs are defined entirely in the Pi config (`control.plugs`, a list) and
+are utility switches (room lighting), not safety actuators: switching one
+never changes the safety state. A plug may carry `auto_off_after_s`: turning
+it on starts a timer, and the background loop switches it off when the timer
+expires (a forgotten light after a session). The timer lives in memory; a
+plug found on with no timer running (e.g. after a supervisor restart) gets a
+fresh one.
 
 `/state` is read-only and idempotent: it returns supervisor's locally cached
 view, NOT a fresh re-query of the Jetson and plugs on every call (that would
@@ -22,10 +30,11 @@ Plug state in the cache is the last *verified* read from send-and-verify
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fessel_schemas import (
   CameraState,
@@ -45,10 +54,10 @@ from .wiz import PlugController, PlugError
 
 log = logging.getLogger(__name__)
 
-# Plug names. Stable strings used in URLs (/control/shutdown/<name>), the
-# cache keys, and the MQTT plug-state topic.
-PLUG_ARM = "arm"
-PLUG_JETSON = "jetson"
+# Plug names are stable ids used in URLs (/control/plugs/<name>/on), the cache
+# keys, and the MQTT plug-state topic — so they are restricted to a URL- and
+# topic-safe slug. The webui backend enforces the same pattern.
+PLUG_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 UPLOADER_HEARTBEAT_STALENESS_S = 90.0
 
@@ -97,6 +106,9 @@ class ControlPlane:
     self._lock = threading.Lock()
     self._safety = SafetyState.IDLE
     self._plug_state: dict[str, PlugState] = {name: PlugState() for name in plugs}
+    # Running auto-off timers: plug name -> (deadline on the self._now clock,
+    # ISO wall-clock time of that deadline for /state). Absent = no timer.
+    self._auto_off: dict[str, tuple[float, str]] = {}
     self._jetson_state: dict | None = None
     self._camera_up: bool | None = None
     # Slice 4: recording state + upload backlog, fed from the retained MQTT
@@ -167,8 +179,8 @@ class ControlPlane:
   @staticmethod
   def validate_config(cfg: dict) -> None:
     """Reject a control config whose reloadable tunables are malformed. Raises
-    so the reloader keeps the running config. Restart-only keys (plug
-    addresses, wiz.driver, jetson.base_url) are NOT validated here — they are
+    so the reloader keeps the running config. Restart-only keys (the plug
+    list, wiz.driver, jetson.base_url) are NOT validated here — they are
     not applied on reload, so a change to them is inert until restart."""
     control = cfg.get("control", {})
     refresh = control.get("refresh", {})
@@ -189,10 +201,11 @@ class ControlPlane:
     """Apply the hot-reloadable control tunables (§2.13 conservative scope):
     the background-refresh intervals and the WiZ send-and-verify retry policy.
 
-    NOT reloaded (restart-only, deliberately): which physical device each plug
-    actuates (`control.plugs.*.address`), the WiZ driver, and the Jetson
-    base_url — re-binding a safety actuator or a control endpoint at runtime is
-    a footgun, so a change to those is inert until a restart. The Jetson client
+    NOT reloaded (restart-only, deliberately): the plug list (`control.plugs`:
+    which devices exist, their addresses, labels and auto-off durations), the
+    WiZ driver, and the Jetson base_url — re-binding an actuator or a control
+    endpoint at runtime is a footgun, so a change to those is inert until a
+    restart. The Jetson client
     is also left as-is (rebuilding it is in the next scope tier, not this one)."""
     control = cfg.get("control", {})
     refresh = control.get("refresh", {})
@@ -223,7 +236,7 @@ class ControlPlane:
       return StateResponse(
         safety_state=self._safety,
         jetson=self._jetson_state,
-        plugs={name: ps.model_copy() for name, ps in self._plug_state.items()},
+        plugs={name: self._plug_view_locked(name) for name in self._plugs},
         camera=CameraState(up=self._camera_up),
         recording=self._recording.model_copy(),
         upload_backlog=backlog,
@@ -260,11 +273,11 @@ class ControlPlane:
 
   # --- plug actions ----------------------------------------------------------
 
-  def shutdown(self, name: str) -> PlugState:
-    return self._set_plug(name, on=False)
-
-  def poweron(self, name: str) -> PlugState:
+  def plug_on(self, name: str) -> PlugState:
     return self._set_plug(name, on=True)
+
+  def plug_off(self, name: str) -> PlugState:
+    return self._set_plug(name, on=False)
 
   def _set_plug(self, name: str, *, on: bool) -> PlugState:
     plug = self._plugs.get(name)
@@ -275,29 +288,54 @@ class ControlPlane:
     except PlugError as e:
       # Record the failed verify in the cache so /state reflects it, then
       # re-raise so the HTTP layer returns a 5xx. `verified=False` is the
-      # signal that the cached `on` is NOT trustworthy.
-      ps = PlugState(on=e.observed, verified=False, verified_at=_now_iso())
+      # signal that the cached `on` is NOT trustworthy. A running auto-off
+      # timer is left in place, so a failed auto-off is retried next tick.
       with self._lock:
-        self._plug_state[name] = ps
+        self._plug_state[name] = PlugState(on=e.observed, verified=False, verified_at=_now_iso())
       raise
-    ps = PlugState(on=verified_on, verified=True, verified_at=_now_iso())
-    new_safety = self._safety_after_plug(name, verified_on)
     with self._lock:
-      self._plug_state[name] = ps
-      changed = self._safety != new_safety
-      self._safety = new_safety
+      self._plug_state[name] = PlugState(on=verified_on, verified=True, verified_at=_now_iso())
+      if verified_on:
+        # Turning on (again) starts the countdown from now.
+        self._start_auto_off_locked(name)
+      else:
+        self._auto_off.pop(name, None)
+      ps = self._plug_view_locked(name)
     self._publish_plug(name, ps)
-    if changed:
-      self._publish_safety_state(new_safety)
     return ps
 
-  @staticmethod
-  def _safety_after_plug(name: str, on: bool) -> SafetyState:
-    # Placeholder semantics: a verified power-off implies the matching
-    # shutdown state; a verified power-on returns to IDLE.
-    if not on:
-      return SafetyState.SHUTDOWN_ARM if name == PLUG_ARM else SafetyState.SHUTDOWN_JETSON
-    return SafetyState.IDLE
+  def _start_auto_off_locked(self, name: str) -> None:
+    after_s = self._plugs[name].auto_off_after_s
+    if after_s is None:
+      return
+    at = (datetime.now(UTC) + timedelta(seconds=after_s)).isoformat()
+    self._auto_off[name] = (self._now() + after_s, at)
+
+  def _plug_view_locked(self, name: str) -> PlugState:
+    """The cached verified state plus the plug's label and auto-off deadline."""
+    timer = self._auto_off.get(name)
+    return self._plug_state[name].model_copy(
+      update={"label": self._plugs[name].label, "auto_off_at": timer[1] if timer else None}
+    )
+
+  def check_auto_off(self) -> None:
+    """Switch off every plug whose auto-off timer has expired. Called from the
+    background loop; a failed switch-off keeps the timer, so it is retried on
+    the next call and stays visible as `verified: false` in /state."""
+    with self._lock:
+      now = self._now()
+      due = [name for name, (deadline, _) in self._auto_off.items() if deadline <= now]
+    for name in due:
+      try:
+        self._set_plug(name, on=False)
+      except PlugError as e:
+        log.warning(
+          '{"event":"plug_auto_off","plug":"%s","outcome":"error","detail":"%s"}',
+          name,
+          e.detail,
+        )
+        continue
+      log.info('{"event":"plug_auto_off","plug":"%s","outcome":"ok"}', name)
 
   def _publish_plug(self, name: str, ps: PlugState) -> None:
     self._publish(topics.plug_state(name), ps.model_dump(), topics.QOS_PLUG, topics.RETAIN_PLUG)
@@ -325,6 +363,9 @@ class ControlPlane:
       if elapsed >= next_plugs:
         self._refresh_plugs()
         next_plugs = elapsed + self._plug_refresh_s
+      # Every tick: auto-off deadlines are hours long, so tick granularity
+      # (a few seconds) is precise enough.
+      self.check_auto_off()
 
   def _refresh_jetson(self) -> None:
     if self._jetson is None:
@@ -353,9 +394,15 @@ class ControlPlane:
           prev = self._plug_state.get(name, PlugState())
           self._plug_state[name] = PlugState(on=prev.on, verified=False, verified_at=_now_iso())
         continue
-      ps = PlugState(on=on, verified=True, verified_at=_now_iso())
       with self._lock:
-        self._plug_state[name] = ps
+        self._plug_state[name] = PlugState(on=on, verified=True, verified_at=_now_iso())
+        if not on:
+          self._auto_off.pop(name, None)
+        elif name not in self._auto_off:
+          # On with no timer: the timer was lost (supervisor restart) — start
+          # a fresh one rather than leave the plug on indefinitely.
+          self._start_auto_off_locked(name)
+        ps = self._plug_view_locked(name)
       self._publish_plug(name, ps)
 
 
@@ -367,9 +414,11 @@ def build_control_plane(config: dict, publish: PublishFn) -> ControlPlane:
   Expected shape (all under `control:`):
 
     control:
-      plugs:
-        arm:    {address: 192.168.1.50}
-        jetson: {address: 192.168.1.51}
+      plugs:                        # a list; rendered in this order
+        - name: room-light          # stable slug id (URL, MQTT topic, /state key)
+          label: Room light         # dashboard display name (default: name)
+          address: 192.168.1.60
+          auto_off_after_s: 7200    # optional; omit for no auto-off
       wiz:
         driver: pywizlight          # 'pywizlight' (prod) | 'fake' (integration)
         retries: 3
@@ -385,9 +434,9 @@ def build_control_plane(config: dict, publish: PublishFn) -> ControlPlane:
   Plug controllers are built via the pywizlight driver (real device) by
   default. The integration harness sets `wiz.driver: fake` for an in-memory
   bulb, and a plug may carry `mode: drop` to make it always fail verify (the
-  safety-path assertion). When a plug has no address AND the driver is
-  pywizlight, it is omitted (the matching endpoints then 404 rather than
-  pretending an actuator exists); the fake driver needs no address.
+  failure-path assertion); the fake driver needs no address. A malformed plug
+  entry raises ValueError: the plug list is restart-only, so failing loud at
+  startup beats silently dropping a plug.
   """
   from .wiz import PlugConfig, build_controller
 
@@ -398,17 +447,22 @@ def build_control_plane(config: dict, publish: PublishFn) -> ControlPlane:
   retry_delay = float(wiz_cfg.get("retry_delay_s", 0.2))
 
   plugs: dict[str, PlugController] = {}
-  for name, pcfg in (cc.get("plugs") or {}).items():
-    pcfg = pcfg or {}
-    address = pcfg.get("address")
-    mode = pcfg.get("mode", "ok")
+  for pcfg in _plug_entries(cc.get("plugs")):
+    name = pcfg["name"]
     # Real driver needs an address; the fake driver synthesises the bulb.
-    if driver != "fake" and not address:
-      continue
+    if driver != "fake" and not pcfg.get("address"):
+      raise ValueError(f"control.plugs: plug {name!r} has no address")
     plugs[name] = build_controller(
-      PlugConfig(name=name, address=address or "fake", retries=retries, retry_delay_s=retry_delay),
+      PlugConfig(
+        name=name,
+        address=pcfg.get("address") or "fake",
+        retries=retries,
+        retry_delay_s=retry_delay,
+        label=pcfg.get("label") or name,
+        auto_off_after_s=pcfg.get("auto_off_after_s"),
+      ),
       driver=driver,
-      mode=mode,
+      mode=pcfg.get("mode", "ok"),
     )
 
   jetson_client: JetsonClient | None = None
@@ -441,3 +495,38 @@ def build_control_plane(config: dict, publish: PublishFn) -> ControlPlane:
     plug_refresh_s=float(refresh.get("plug_s", 10.0)),
     anomalies=anomalies,
   )
+
+
+def _plug_entries(raw: object) -> list[dict]:
+  """Validate the `control.plugs` list and return its entries (config order).
+
+  Rejects the pre-list mapping form (`plugs: {arm: {address: ...}}`) with an
+  explicit message, so a stale /etc/fessel/fessel.yaml fails loud instead of
+  being misread."""
+  if raw is None:
+    return []
+  if isinstance(raw, dict):
+    raise ValueError(
+      "control.plugs must be a list of {name, address, label?, auto_off_after_s?} "
+      "entries; the old name->settings mapping is no longer supported"
+    )
+  if not isinstance(raw, list):
+    raise ValueError("control.plugs must be a list")
+  seen: set[str] = set()
+  for i, entry in enumerate(raw):
+    if not isinstance(entry, dict):
+      raise ValueError(f"control.plugs[{i}] must be a mapping")
+    name = entry.get("name")
+    if not isinstance(name, str) or not PLUG_NAME_RE.match(name):
+      raise ValueError(
+        f"control.plugs[{i}].name must be a lowercase slug ([a-z0-9][a-z0-9_-]*), got {name!r}"
+      )
+    if name in seen:
+      raise ValueError(f"control.plugs: duplicate plug name {name!r}")
+    seen.add(name)
+    after = entry.get("auto_off_after_s")
+    if after is not None and not (
+      isinstance(after, (int, float)) and not isinstance(after, bool) and after > 0
+    ):
+      raise ValueError(f"control.plugs[{i}].auto_off_after_s must be a positive number")
+  return raw

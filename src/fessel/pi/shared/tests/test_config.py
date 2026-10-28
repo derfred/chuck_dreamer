@@ -209,7 +209,7 @@ def test_shipped_example_loads_per_component():
   assert video["whip"]["endpoint"] == video["webui_base"] + "/whip/ingest"
   assert "ingest_url_base" not in video["snapshot"]
   sup = load_component_config(example, "supervisor")
-  assert sup["http"]["port"] == 8443 and sup["control"]["plugs"]["arm"]["address"]
+  assert sup["http"]["port"] == 8443 and sup["control"]["plugs"][0]["address"]
   up = load_component_config(example, "uploader")
   assert up["driver"] == "http" and up["webui_base"] == video["webui_base"]
   assert "ingest_url_base" not in up

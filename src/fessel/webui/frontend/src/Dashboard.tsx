@@ -5,9 +5,14 @@
 // unavailable" banner on a 5xx WITHOUT clearing the last-known state, and
 // escalates to re-auth on a 401.
 //
-// Destructive actions (Stop, Power off arm/Jetson) require a confirmation
-// modal whose default focus is Cancel and which is Escape-dismissable — the
-// failure mode guarded against is "clicked Stop by accident, hit Enter".
+// Destructive actions (Stop) require a confirmation modal whose default focus
+// is Cancel and which is Escape-dismissable — the failure mode guarded against
+// is "clicked Stop by accident, hit Enter".
+//
+// The plug switches (room lighting) are not hardcoded: supervisor reports the
+// plugs the Pi config defines in /api/state's `plugs`, and the panel renders
+// one On/Off group per plug, in config order. They are utility switches, so
+// no confirmation modal.
 //
 // Recording is NOT here: it is an action on the live scene, so it lives in the
 // Monitor video panel's header bar (RecordingControls). Embedded in Monitor,
@@ -16,7 +21,7 @@
 // the page works on its own.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AnomalyLogEntry, StateResponse } from "../../shared/schemas";
+import type { AnomalyLogEntry, PlugState, StateResponse } from "../../shared/schemas";
 import {
   AuthError,
   ControlError,
@@ -40,6 +45,8 @@ type ButtonStatus =
 interface ActionDef {
   action: ControlAction;
   label: string;
+  // Accessible name when the visible label alone is ambiguous (plug On/Off).
+  ariaLabel?: string;
   destructive: boolean;
   // Span both columns of the group grid (Stop).
   fullWidth?: boolean;
@@ -48,14 +55,15 @@ interface ActionDef {
   confirm?: string;
 }
 
-// Control actions grouped by function so the panel reads as three labelled
-// clusters (motion / power-arm / power-jetson) rather than a flat button soup.
-// Button labels stay fully-qualified ("Power off arm", not "Power off") — the
-// group label is a visual aid, but each button remains self-describing (and the
-// tests + audit log key off these exact labels).
+// Control actions grouped by function so the panel reads as labelled clusters
+// (motion, then one group per plug) rather than a flat button soup. Plug
+// buttons show a bare "On"/"Off" under the plug's group label; their
+// aria-label ("Room light on") keeps each button self-describing.
 interface ActionGroup {
   // Optional small caps label above the group; motion has none (it's the lead).
   label?: string;
+  // Optional status line under the buttons (a plug's current state).
+  status?: string;
   // Full-width actions render across both columns (Stop); the rest pair up.
   actions: ActionDef[];
 }
@@ -76,35 +84,43 @@ const ACTION_GROUPS: ActionGroup[] = [
       },
     ],
   },
-  {
-    label: "Power — arm",
-    actions: [
-      { action: "poweron/arm", label: "Power on arm", destructive: false },
-      {
-        action: "shutdown/arm",
-        label: "Power off arm",
-        destructive: true,
-        confirm:
-          "Cut power to the arm? The arm will lose power immediately and the operator " +
-          "who initiated this is responsible for confirming the arm is in a safe state.",
-      },
-    ],
-  },
-  {
-    label: "Power — Jetson",
-    actions: [
-      { action: "poweron/jetson", label: "Power on Jetson", destructive: false },
-      {
-        action: "shutdown/jetson",
-        label: "Power off Jetson",
-        destructive: true,
-        confirm:
-          "Cut power to the Jetson? Control and learning software stop immediately. " +
-          "You are responsible for confirming this is safe.",
-      },
-    ],
-  },
 ];
+
+// One On/Off group per configured plug, in the order supervisor reports them
+// (= the Pi config order).
+function plugGroups(plugs: Record<string, PlugState> | undefined): ActionGroup[] {
+  return Object.entries(plugs ?? {}).map(([name, ps]) => {
+    const label = ps.label ?? name;
+    return {
+      label,
+      status: plugStatus(ps),
+      actions: [
+        { action: `plugs/${name}/on`, label: "On", ariaLabel: `${label} on`, destructive: false },
+        {
+          action: `plugs/${name}/off`,
+          label: "Off",
+          ariaLabel: `${label} off`,
+          destructive: false,
+        },
+      ],
+    };
+  });
+}
+
+// "On · auto-off at 21:30", "Off", "On (unverified)", "Unknown".
+function plugStatus(ps: PlugState): string {
+  if (ps.on == null) return "Unknown";
+  let s = ps.on ? "On" : "Off";
+  if (!ps.verified) s += " (unverified)";
+  if (ps.auto_off_at) {
+    const at = new Date(ps.auto_off_at).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    s += ` · auto-off at ${at}`;
+  }
+  return s;
+}
 
 // `embedded` renders the sensing + controls without the standalone "Fessel"
 // heading and outer padding — used inside the Monitor side rail. Standalone
@@ -181,18 +197,14 @@ export function Dashboard({
         </div>
       )}
 
-      <SensingStrip
-        vision={state?.vision}
-        audio={state?.audio}
-        history={activityHistory}
-      />
+      <SensingStrip vision={state?.vision} audio={state?.audio} history={activityHistory} />
 
       <RecentAnomaliesPanel />
 
       <h2 style={{ fontSize: 16, marginTop: 24 }}>Controls</h2>
       <div style={{ display: "flex", flexDirection: "column", gap: 14, maxWidth: 320 }}>
-        {ACTION_GROUPS.map((group, i) => (
-          <div key={group.label ?? i}>
+        {[...ACTION_GROUPS, ...plugGroups(state?.plugs)].map((group) => (
+          <div key={group.actions[0].action}>
             {group.label && (
               <div
                 style={{
@@ -217,6 +229,9 @@ export function Dashboard({
                 />
               ))}
             </div>
+            {group.status && (
+              <div style={{ fontSize: 12, color: "#5b6866", marginTop: 6 }}>{group.status}</div>
+            )}
           </div>
         ))}
       </div>
@@ -258,8 +273,7 @@ function SensingStrip({
       <div style={{ display: "flex", flexWrap: "wrap", gap: 24, alignItems: "center" }}>
         <div>
           <div style={{ color: "#666", fontSize: 13 }}>
-            Activity{" "}
-            <span style={{ fontFamily: "monospace" }}>{ema.toFixed(3)}</span>
+            Activity <span style={{ fontFamily: "monospace" }}>{ema.toFixed(3)}</span>
           </div>
           <Sparkline values={history} ariaLabel="activity score history" max={1} />
         </div>
@@ -434,6 +448,7 @@ function ControlButton({
       <button
         onClick={onClick}
         disabled={inflight}
+        aria-label={def.ariaLabel}
         style={{
           font: "inherit",
           fontSize: 13,
