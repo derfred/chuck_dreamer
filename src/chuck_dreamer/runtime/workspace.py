@@ -111,7 +111,7 @@ class EeTracker:
 
   def jacobian(self, q: np.ndarray) -> np.ndarray:
     """Positional Jacobian at ``q``, for the five positioning joints."""
-    return self._fk.jacobian(self.positioning(q), self._dq)
+    return np.asarray(self._fk.jacobian(self.positioning(q), self._dq), dtype=np.float64)
 
   def positioning(self, q: np.ndarray) -> np.ndarray:
     """The five FK joints of ``q``, zero-padded if the arm reports fewer."""
